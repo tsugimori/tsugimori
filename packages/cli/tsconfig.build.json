@@ -1,0 +1,35 @@
+{
+  "extends": "../../tsconfig.package.json",
+  "references": [
+    {
+      "path": "../config/tsconfig.build.json"
+    },
+    {
+      "path": "../core/tsconfig.build.json"
+    },
+    {
+      "path": "../storage-sqlite/tsconfig.build.json"
+    },
+    {
+      "path": "../auth/tsconfig.build.json"
+    },
+    {
+      "path": "../../plugins/platform-telegram/tsconfig.build.json"
+    },
+    {
+      "path": "../../plugins/agent-codex/tsconfig.build.json"
+    },
+    {
+      "path": "../../plugins/agent-claude-sdk/tsconfig.build.json"
+    },
+    {
+      "path": "../../plugins/exec-local-sandbox/tsconfig.build.json"
+    },
+    {
+      "path": "../../plugins/web/tsconfig.build.json"
+    },
+    {
+      "path": "../../plugins/tunnel-cloudflare/tsconfig.build.json"
+    }
+  ]
+}

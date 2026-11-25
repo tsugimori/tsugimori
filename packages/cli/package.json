@@ -1,0 +1,30 @@
+{
+  "name": "@tsugimori/cli",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "exports": {
+    ".": {
+      "production": "./dist/index.js",
+      "default": "./src/index.ts"
+    }
+  },
+  "dependencies": {
+    "@tsugimori/config": "workspace:*",
+    "@tsugimori/core": "workspace:*",
+    "@tsugimori/storage-sqlite": "workspace:*",
+    "@tsugimori/auth": "workspace:*",
+    "@tsugimori/platform-telegram": "workspace:*",
+    "@tsugimori/agent-codex": "workspace:*",
+    "@tsugimori/agent-claude-sdk": "workspace:*",
+    "@tsugimori/exec-local-sandbox": "workspace:*",
+    "@tsugimori/web": "workspace:*",
+    "@tsugimori/tunnel-cloudflare": "workspace:*"
+  },
+  "bin": {
+    "tsugimori": "./src/cli.ts"
+  }
+}
