@@ -1,0 +1,395 @@
+import type {
+  AdapterContext,
+  ApprovalFeedback,
+  OutboundMessage,
+  PlatformAdapter,
+  SendPart,
+} from '@tsugimori/plugin-sdk';
+
+import { definePlugin, SendFailure } from '@tsugimori/plugin-sdk';
+import { setTimeout as delay } from 'node:timers/promises';
+
+import type { BotIdentity } from './updates.ts';
+
+import { BotApi, BotApiError, nativeId, record } from './api.ts';
+import { telegramChecks, telegramIdentity, telegramSetup } from './setup.ts';
+import { mapUpdate } from './updates.ts';
+
+const maxMessage = 4096;
+const cursorLifetimeMs = 6 * 24 * 60 * 60 * 1_000;
+const decisions = {
+  once: 'Allowed once.',
+  always: 'Always allowed.',
+  deny: 'Denied.',
+};
+
+export function splitText(text: string) {
+  const parts: string[] = [];
+  while (text.length > maxMessage) {
+    const window = text.slice(0, maxMessage);
+    const paragraph = window.lastIndexOf('\n\n');
+    const line = window.lastIndexOf('\n');
+    let end =
+      paragraph >= 0 ? paragraph + 2 : line >= 0 ? line + 1 : maxMessage;
+    if (/[\uD800-\uDBFF]/u.test(text[end - 1] ?? '')) end--;
+    parts.push(text.slice(0, end));
+    text = text.slice(end);
+  }
+  if (text) parts.push(text);
+  return parts;
+}
+
+export class TelegramAdapter implements PlatformAdapter {
+  readonly id: string;
+  readonly kind = 'telegram';
+  readonly capabilities = { deleteEvents: false, inlineButtons: true };
+  readonly #api: BotApi;
+  readonly #fetch: typeof globalThis.fetch;
+  readonly #token: string;
+  readonly #now: () => number;
+  readonly #typingIntervalMs: number;
+  #ctx?: AdapterContext;
+  #controller?: AbortController;
+  #polling?: Promise<void>;
+
+  constructor(
+    {
+      fetch = globalThis.fetch,
+      now = Date.now,
+      typingIntervalMs = 4500,
+    }: {
+      fetch?: typeof globalThis.fetch;
+      now?: () => number;
+      typingIntervalMs?: number;
+    },
+    id: string,
+    token: string,
+  ) {
+    this.id = id;
+    this.#api = new BotApi(fetch, token);
+    this.#fetch = fetch;
+    this.#token = token;
+    this.#now = now;
+    this.#typingIntervalMs = typingIntervalMs;
+  }
+
+  async start(ctx: AdapterContext) {
+    if (this.#controller)
+      throw new Error('Telegram adapter is already started');
+    const controller = new AbortController();
+    this.#controller = controller;
+    this.#ctx = ctx;
+    try {
+      const bot = await telegramIdentity(
+        this.#fetch,
+        this.#token,
+        AbortSignal.any([controller.signal, AbortSignal.timeout(8_000)]),
+      );
+      this.#polling = this.#poll(ctx, bot, controller.signal).catch(
+        (error: unknown) => {
+          if (controller.signal.aborted) return;
+          ctx.logError?.('telegram.poll_stopped');
+          throw error;
+        },
+      );
+      void this.#polling.catch(() => undefined); // stop() observes the failure.
+    } catch (error) {
+      this.#controller = undefined;
+      this.#ctx = undefined;
+      controller.abort();
+      throw error;
+    }
+  }
+
+  async stop() {
+    this.#controller?.abort();
+    try {
+      await this.#polling;
+    } finally {
+      this.#polling = undefined;
+      this.#controller = undefined;
+      this.#ctx = undefined;
+    }
+  }
+
+  async #poll(ctx: AdapterContext, bot: BotIdentity, signal: AbortSignal) {
+    if (ctx.ready) {
+      const stopped = Promise.withResolvers<void>();
+      const stop = () => stopped.resolve();
+      signal.addEventListener('abort', stop, { once: true });
+      try {
+        await Promise.race([ctx.ready, stopped.promise]);
+      } finally {
+        signal.removeEventListener('abort', stop);
+      }
+    }
+    if (signal.aborted) return;
+    let cursor: ReturnType<NonNullable<AdapterContext['loadCursor']>>;
+    let initialized = false;
+    let backoff = 250;
+    while (!signal.aborted) {
+      try {
+        if (!initialized) {
+          cursor = ctx.loadCursor?.(bot.id);
+          initialized = true;
+        }
+        if (cursor && this.#now() - cursor.updatedAt >= cursorLifetimeMs)
+          cursor = undefined;
+        const offset = cursor?.offset;
+        const updates = await this.#api.call(
+          'getUpdates',
+          {
+            timeout: 50,
+            offset,
+            allowed_updates: ['message', 'edited_message', 'callback_query'],
+          },
+          signal,
+          0,
+        );
+        if (!Array.isArray(updates))
+          throw new Error('Telegram returned invalid updates');
+        for (const update of updates
+          .map(record)
+          .sort((a, b) => Number(a?.update_id) - Number(b?.update_id))) {
+          signal.throwIfAborted();
+          const id = update?.update_id;
+          if (
+            typeof id !== 'number' ||
+            !Number.isSafeInteger(id) ||
+            id < 0 ||
+            !update
+          )
+            throw new Error('Telegram returned an invalid update ID');
+          if (cursor && id < cursor.offset) continue;
+          const event = mapUpdate(update, bot);
+          if (event) await ctx.emit(event);
+          const next = { offset: id + 1, updatedAt: this.#now() };
+          ctx.saveCursor?.(bot.id, next);
+          cursor = next;
+        }
+        backoff = 250;
+      } catch (error) {
+        if (signal.aborted) return;
+        ctx.logError?.('telegram.poll_retry', error);
+        await delay(
+          error instanceof BotApiError
+            ? (error.retryAfter ?? backoff)
+            : backoff,
+          undefined,
+          { signal },
+        );
+        backoff = Math.min(backoff * 2, 30_000);
+      }
+    }
+  }
+
+  async deleteMessage(
+    message: Pick<OutboundMessage, 'chatId'> & { messageId: string },
+  ) {
+    await this.#api.call(
+      'deleteMessage',
+      {
+        chat_id: message.chatId,
+        message_id: Number(message.messageId),
+      },
+      AbortSignal.timeout(5_000),
+    );
+  }
+
+  async send(message: OutboundMessage) {
+    const signal = this.#signal();
+    const parts: SendPart[] = [];
+    const texts = splitText(message.text);
+    const mentions = message.mentions ?? [];
+    if (mentions.some((id) => !/^[1-9]\d{0,19}$/.test(id)))
+      throw new SendFailure(
+        { parts, deliveryUnknown: false },
+        new Error('Expected native user IDs for Telegram mentions'),
+      );
+    const labels = mentions.map((id) => `user ${id}`);
+    const suffix = labels.length ? `\n\n${labels.join(' ')}` : '';
+    let offset = 0;
+    if (suffix) {
+      const last = texts.at(-1) ?? '';
+      if (last.length + suffix.length <= maxMessage && texts.length) {
+        texts[texts.length - 1] = last + suffix;
+        offset = last.length + 2;
+      } else {
+        texts.push(labels.join(' '));
+      }
+    }
+    const entities = labels.map((label, index) => {
+      const entity = {
+        type: 'text_link',
+        offset,
+        length: label.length,
+        url: `tg://user?id=${mentions[index]}`,
+      };
+      offset += label.length + 1;
+      return entity;
+    });
+    if (!texts.length)
+      throw new SendFailure(
+        { parts, deliveryUnknown: false },
+        new Error('Empty Telegram message'),
+      );
+    try {
+      for (const [index, text] of texts.entries()) {
+        const sent = record(
+          await this.#api.call(
+            'sendMessage',
+            {
+              ...destination(message),
+              text,
+              entities:
+                entities.length && index === texts.length - 1
+                  ? entities
+                  : undefined,
+              reply_parameters: message.replyTo
+                ? {
+                    message_id: Number(message.replyTo),
+                    allow_sending_without_reply: true,
+                  }
+                : undefined,
+              reply_markup:
+                index === 0 && message.buttons?.length
+                  ? {
+                      inline_keyboard: [
+                        message.buttons.map((button) => ({
+                          text: button.label,
+                          callback_data: button.id,
+                        })),
+                      ],
+                    }
+                  : undefined,
+            },
+            signal,
+          ),
+        );
+        const messageId = nativeId(sent?.message_id);
+        if (!messageId) throw new BotApiError('sendMessage', undefined);
+        parts.push({ messageId, text, raw: { message_id: sent?.message_id } });
+      }
+    } catch (error) {
+      throw new SendFailure(
+        {
+          parts,
+          deliveryUnknown:
+            !(error instanceof BotApiError) || error.unknownDelivery,
+        },
+        error,
+      );
+    }
+    return { messageId: parts[0]!.messageId, parts };
+  }
+
+  typing(
+    chat: Pick<OutboundMessage, 'chatId' | 'threadId'>,
+    task: AbortSignal,
+  ) {
+    const signal = AbortSignal.any([this.#signal(), task]);
+    if (signal.aborted) return;
+    const ctx = this.#ctx;
+    const send = () => {
+      // A rate-limited or slow typing action must never pile up behind the next refresh.
+      if (busy) return;
+      busy = true;
+      void this.#api
+        .call(
+          'sendChatAction',
+          {
+            ...destination(chat),
+            action: 'typing',
+          },
+          signal,
+          0,
+        )
+        .catch(() => {
+          if (!signal.aborted) ctx?.logError?.('telegram.typing_failed');
+        })
+        .finally(() => {
+          busy = false;
+        });
+    };
+    let busy = false;
+    send();
+    const timer = setInterval(send, this.#typingIntervalMs);
+    timer.unref();
+    signal.addEventListener('abort', () => clearInterval(timer), {
+      once: true,
+    });
+  }
+
+  async respondToApproval({
+    chatId,
+    decision,
+    messageId,
+    prompt,
+    queryId,
+  }: ApprovalFeedback) {
+    const signal = this.#signal();
+    const text = decision ? decisions[decision] : 'Approval is unavailable.';
+    try {
+      if (queryId)
+        await this.#api.call(
+          'answerCallbackQuery',
+          { callback_query_id: queryId, text },
+          signal,
+        );
+    } finally {
+      if (decision) {
+        const suffix = `\n\nDecision: ${text}`;
+        const display = prompt
+          ? (splitText(prompt)[0] ?? '')
+              .slice(0, maxMessage - suffix.length)
+              .replace(/[\uD800-\uDBFF]$/u, '')
+          : '';
+        await this.#api.call(
+          'editMessageText',
+          {
+            chat_id: chatId,
+            message_id: Number(messageId),
+            text: display ? display + suffix : text,
+            reply_markup: { inline_keyboard: [] },
+          },
+          signal,
+        );
+      }
+    }
+  }
+
+  #signal() {
+    if (!this.#controller) throw new Error('Telegram adapter is detached');
+    return this.#controller.signal;
+  }
+}
+
+function destination({
+  chatId,
+  threadId,
+}: Pick<OutboundMessage, 'chatId' | 'threadId'>) {
+  return {
+    chat_id: chatId,
+    message_thread_id: threadId === undefined ? undefined : Number(threadId),
+  };
+}
+
+export default definePlugin({
+  name: 'platform-telegram',
+  checks: telegramChecks,
+  credentialNames: (entry) =>
+    'tokenEnv' in entry && typeof entry.tokenEnv === 'string'
+      ? [entry.tokenEnv]
+      : [],
+  setupSteps: telegramSetup,
+  adapters: {
+    telegram(config, ctx) {
+      const token = config.tokenEnv && ctx.credential(config.tokenEnv);
+      if (!token)
+        throw new Error(
+          'Telegram requires tokenEnv with a configured credential',
+        );
+      return new TelegramAdapter({ fetch: ctx.fetch }, config.id, token);
+    },
+  },
+});
