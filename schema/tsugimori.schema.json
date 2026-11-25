@@ -1,0 +1,327 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Tsugimori workspace configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "owner": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string",
+        "minLength": 1
+      },
+      "default": {}
+    },
+    "timezone": {
+      "type": "string",
+      "minLength": 1,
+      "default": "Asia/Taipei"
+    },
+    "storage": {
+      "type": "object",
+      "additionalProperties": false,
+      "default": {},
+      "properties": {
+        "kind": {
+          "const": "sqlite",
+          "default": "sqlite"
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "default": "data/tsugimori.db"
+        }
+      }
+    },
+    "platforms": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "type": "object",
+        "required": ["id", "kind"],
+        "properties": {
+          "id": {
+            "$ref": "#/definitions/id"
+          },
+          "kind": {
+            "$ref": "#/definitions/id"
+          },
+          "enabled": {
+            "type": "boolean",
+            "default": true
+          },
+          "tokenEnv": {
+            "type": "string",
+            "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+          },
+          "options": {
+            "type": "object"
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "kind": {
+                  "const": "telegram"
+                },
+                "enabled": {
+                  "const": true
+                }
+              }
+            },
+            "then": {
+              "required": ["tokenEnv"]
+            }
+          }
+        ]
+      }
+    },
+    "agents": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "type": "object",
+        "required": ["id", "kind"],
+        "properties": {
+          "id": {
+            "$ref": "#/definitions/id"
+          },
+          "kind": {
+            "$ref": "#/definitions/id"
+          },
+          "enabled": {
+            "type": "boolean",
+            "default": true
+          },
+          "version": {
+            "type": "string",
+            "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:-[A-Za-z0-9.-]+)?$"
+          },
+          "model": {
+            "type": "string",
+            "minLength": 1
+          },
+          "thinking": {
+            "type": "string",
+            "minLength": 1
+          },
+          "options": {
+            "type": "object"
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "kind": {
+                  "const": "codex"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "options": {
+                  "type": "object",
+                  "properties": {
+                    "command": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "codexHome": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  }
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    "defaultAgent": {
+      "$ref": "#/definitions/id"
+    },
+    "context": {
+      "type": "object",
+      "additionalProperties": false,
+      "default": {},
+      "properties": {
+        "recentMessages": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 30
+        },
+        "summary": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "model": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        }
+      }
+    },
+    "scheduler": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "minIntervalMinutes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1440,
+          "default": 15
+        },
+        "maxActivePerUser": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000,
+          "default": 20
+        },
+        "highCostModels": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true,
+          "default": []
+        }
+      }
+    },
+    "exec": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "local-sandbox",
+          "default": "local-sandbox"
+        },
+        "denyRead": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true,
+          "default": []
+        }
+      }
+    },
+    "web": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        },
+        "listen": {
+          "type": "string",
+          "pattern": "^(127\\.0\\.0\\.1|\\[::1\\]):[1-9][0-9]{0,4}$",
+          "default": "127.0.0.1:8787"
+        },
+        "accessTeam": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]{0,62}$"
+        },
+        "accessAud": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "ownerEmail": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "ownerSub": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "allowLocalWithoutAccess": {
+          "type": "boolean",
+          "default": false
+        }
+      }
+    },
+    "preview": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxTtlMinutes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1440,
+          "default": 60
+        },
+        "named": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["zoneId", "domain", "tunnelId", "accessAud"],
+          "properties": {
+            "zoneId": {
+              "type": "string",
+              "pattern": "^[a-fA-F0-9]{32}$"
+            },
+            "domain": {
+              "type": "string",
+              "pattern": "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$",
+              "maxLength": 220
+            },
+            "tunnelId": {
+              "type": "string",
+              "pattern": "^[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}$"
+            },
+            "accessAud": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 255
+            },
+            "accessTeam": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9-]{0,62}$"
+            },
+            "ownerEmail": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 255
+            },
+            "ownerSub": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 255
+            },
+            "tokenEnv": {
+              "type": "string",
+              "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+              "default": "CLOUDFLARE_API_TOKEN"
+            },
+            "listen": {
+              "type": "string",
+              "pattern": "^127\\.0\\.0\\.1:[1-9][0-9]{0,4}$",
+              "default": "127.0.0.1:8788"
+            }
+          }
+        }
+      }
+    }
+  },
+  "definitions": {
+    "id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.:-]*$"
+    }
+  }
+}
