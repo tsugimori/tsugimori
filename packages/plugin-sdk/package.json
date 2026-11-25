@@ -1,0 +1,19 @@
+{
+  "name": "@tsugimori/plugin-sdk",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "exports": {
+    ".": {
+      "production": "./dist/index.js",
+      "default": "./src/index.ts"
+    },
+    "./contract-test": {
+      "production": "./dist/contract-checks.js",
+      "default": "./src/contract-checks.ts"
+    }
+  }
+}
