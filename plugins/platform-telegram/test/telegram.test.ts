@@ -229,6 +229,64 @@ test(
 );
 
 test(
+  'sends links and native IDs as UTF-16 mention entities with literal surrounding text',
+  { timeout: 4_000 },
+  async (t) => {
+    const sent: Record<string, unknown>[] = [];
+    const fakeFetch: typeof fetch = async (input, init) => {
+      const method = String(input).split('/').at(-1);
+      if (method === 'getMe') return ok(me);
+      if (method === 'getUpdates') return longPoll(init);
+      assert.equal(method, 'sendMessage');
+      assert.ok(typeof init?.body === 'string');
+      sent.push(JSON.parse(init.body));
+      return ok({ message_id: sent.length });
+    };
+    const adapter = new TelegramAdapter({ fetch: fakeFetch }, 'tg', '1:fake');
+    t.after(() => adapter.stop());
+    await adapter.start({ emit: () => Promise.resolve() });
+    const first = '😀 **literal** @example_user [other](https://example.com) ';
+    const name = 'First 👋';
+    const padding = 'x'.repeat(4094 - first.length - name.length);
+    const receipt = await adapter.send({
+      chatId: '-1001',
+      text:
+        first +
+        '[First 👋](tg://user?id=79)' +
+        padding +
+        '[第二位 😀](tg://user?id=80)!',
+      mentions: ['79', '81'],
+    });
+    assert.deepEqual(sent, [
+      {
+        chat_id: '-1001',
+        text: first + name + padding,
+        entities: [
+          {
+            type: 'text_link',
+            offset: first.length,
+            length: name.length,
+            url: 'tg://user?id=79',
+          },
+        ],
+      },
+      {
+        chat_id: '-1001',
+        text: '第二位 😀!\n\nuser 81',
+        entities: [
+          { type: 'text_link', offset: 0, length: 6, url: 'tg://user?id=80' },
+          { type: 'text_link', offset: 9, length: 7, url: 'tg://user?id=81' },
+        ],
+      },
+    ]);
+    assert.deepEqual(
+      receipt.parts?.map(({ text }) => text),
+      sent.map(({ text }) => text),
+    );
+  },
+);
+
+test(
   'typing refreshes until cancelled and approval feedback answers before editing',
   { timeout: 4_000 },
   async (t) => {
@@ -260,13 +318,16 @@ test(
       chatId: '-1001',
       messageId: '50',
       queryId: 'unauthorized',
+      notice: '這項審核已無法處理。',
     });
     await adapter.respondToApproval({
       chatId: '-1001',
       messageId: '50',
       queryId: 'approved',
       decision: 'once',
-      prompt: 'Approval requested',
+      decisionText: '審核結果: 已允許一次。',
+      notice: '已允許一次。',
+      prompt: '審核請求',
     });
     await delay(30);
     assert.deepEqual(
@@ -286,12 +347,9 @@ test(
     });
     assert.deepEqual(calls[2]?.[1], {
       callback_query_id: 'unauthorized',
-      text: 'Approval is unavailable.',
+      text: '這項審核已無法處理。',
     });
-    assert.equal(
-      calls[4]?.[1].text,
-      'Approval requested\n\nDecision: Allowed once.',
-    );
+    assert.equal(calls[4]?.[1].text, '審核請求\n\n審核結果: 已允許一次。');
   },
 );
 

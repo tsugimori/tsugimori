@@ -245,6 +245,7 @@ export interface Store {
   getSetupRun(id: string): SetupRun | undefined;
   getSummary(ref: ChatRef): ChatSummary | undefined;
   getTask(id: string): TaskRecord | undefined;
+  getUserDisplay(ref: PrincipalRef): string | undefined;
   getWorkspaceSettings(ref: ChatRef): WorkspaceSettings | undefined;
   insertGrant(grant: StoredGrant): void;
   interruptScheduleRuns(now: number): void;

@@ -11,6 +11,7 @@ export type {
   SetupStep,
 } from './setup.ts';
 export { agentHome, credentialKey, SetupError } from './setup.ts';
+export { userMentionLinks } from './mentions.ts';
 
 export interface ChatRef {
   adapterId: string;
@@ -73,6 +74,7 @@ export interface OutboundMessage {
   buttons?: readonly { id: string; label: string }[];
   chatId: string;
   mentions?: readonly string[];
+  parseTextMentions?: boolean;
   replyTo?: string;
   text: string;
   threadId?: string;
@@ -123,7 +125,9 @@ export interface AdapterContext {
 export interface ApprovalFeedback {
   chatId: string;
   decision?: ApprovalDecision;
+  decisionText?: string;
   messageId: string;
+  notice: string;
   prompt?: string;
   queryId?: string;
 }
@@ -177,13 +181,32 @@ export interface ApprovalRequest {
 
 export type JSONSchema = boolean | Record<string, unknown>;
 
+export type ScheduleApprovalReason =
+  'agent' | 'crossChat' | 'delivery' | 'frequency' | 'model';
+
+export interface ScheduleApprovalRequest {
+  address: Pick<OutboundMessage, 'chatId' | 'threadId'>;
+  agentReason?: string;
+  approverId?: string;
+  content: string;
+  dueAt: number;
+  id: string;
+  kind: 'agent' | 'message';
+  mentions: readonly string[];
+  model?: string;
+  operation: 'create' | 'update';
+  reasons: readonly ScheduleApprovalReason[];
+  repeat?: { cron: string } | { minutes: number };
+  target: ChatRef;
+  targetUserId?: string;
+  timezone: string;
+  until?: number;
+}
+
 export interface ToolContext {
-  approveSchedule?(request: {
-    address: Pick<OutboundMessage, 'chatId' | 'threadId'>;
-    approverId?: string;
-    description: string;
-    id: string;
-  }): Promise<string | undefined>;
+  approveSchedule?(
+    request: ScheduleApprovalRequest,
+  ): Promise<string | undefined>;
   chat: ChatRef;
   principal: PrincipalRef;
   signal: AbortSignal;

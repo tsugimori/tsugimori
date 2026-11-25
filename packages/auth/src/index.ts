@@ -34,16 +34,19 @@ function replyDecision(text: string): ApprovalDecision | undefined {
     case 'yes':
     case 'ok':
     case '好':
+    case '允許一次':
     case 'once':
     case 'allow':
     case 'allow once':
     case 'approve':
       return 'once';
     case 'always':
+    case '一律允許':
       return 'always';
     case 'no':
     case 'deny':
     case '不':
+    case '拒絕':
       return 'deny';
   }
 }

@@ -1,11 +1,12 @@
 import type {
   ChatRef,
+  ScheduleApprovalReason,
+  ScheduleApprovalRequest,
   ToolContext,
   ToolDefinition,
 } from '@tsugimori/plugin-sdk';
 import type {
   ScheduleAction,
-  ScheduleAddress,
   ScheduleRecord,
   ScheduleRun,
   ScheduleTrigger,
@@ -24,6 +25,7 @@ type Settings = {
 
 type ScheduleInput = {
   action: ScheduleAction;
+  mentions?: string[];
   missed?: ScheduleRecord['missed'];
   needsApproval?: boolean;
   reason?: string;
@@ -36,12 +38,7 @@ type ScheduleInput = {
 interface SchedulerDependencies {
   approve(
     task: ToolContext,
-    request: {
-      address: ScheduleAddress;
-      approverId?: string;
-      description: string;
-      id: string;
-    },
+    request: ScheduleApprovalRequest,
   ): Promise<string | undefined>;
   attachedAdapters(): readonly string[];
   canSchedule(chat: ChatRef, userId: string): boolean;
@@ -65,6 +62,12 @@ function object(properties: Record<string, unknown>, required: string[]) {
 }
 const at = timestamp;
 const until = timestamp;
+const nativeUserIds = {
+  type: 'array',
+  maxItems: 20,
+  uniqueItems: true,
+  items: { ...text, maxLength: 128 },
+};
 const fields = {
   action: {
     oneOf: [
@@ -94,12 +97,11 @@ const fields = {
     ],
   },
   targetChatId: { ...text, maxLength: 256 },
-  targets: {
-    type: 'array',
-    maxItems: 20,
-    uniqueItems: true,
-    items: { ...text, maxLength: 128 },
+  mentions: {
+    ...nativeUserIds,
+    description: 'Native platform user IDs to mention.',
   },
+  targets: nativeUserIds,
   timezone: { ...text, maxLength: 128 },
   missed: { enum: ['latest', 'skip'] },
   needsApproval: { type: 'boolean' },
@@ -195,7 +197,7 @@ export class Scheduler {
       {
         name: 'schedule.create',
         description:
-          'Create a reminder or agent task. at and until are Unix milliseconds. targetChatId is a known chat on this adapter, including its topic suffix if applicable.',
+          'Create a reminder or agent task. Pass recipients in mentions as native platform user IDs (strings). at and until are Unix milliseconds. targetChatId is a known chat on this adapter, including its topic suffix if applicable.',
         schema: object(fields, ['action', 'trigger']),
         run: (args, task) => this.#save(args as ScheduleInput, task),
       },
@@ -212,7 +214,7 @@ export class Scheduler {
       {
         name: 'schedule.update',
         description:
-          'Replace the timing and action of a schedule in this chat. The new settings are checked again for approval.',
+          'Replace the timing and action of a schedule in this chat. Pass recipients in mentions as native platform user IDs (strings). The new settings are checked again for approval.',
         schema: object({ ...fields, id }, ['id', 'action', 'trigger']),
         run: (args, task) => {
           const input = args as ScheduleInput & { id: string };
@@ -298,10 +300,13 @@ export class Scheduler {
     )
       throw new Error('Schedule must have a future occurrence');
     const userId = principal.userId;
-    const mentions = input.targets ?? [];
-    const explicitMention = containsMention(
-      action.kind === 'message' ? action.text : action.prompt,
-    );
+    const mentions = [
+      ...new Set([...(input.mentions ?? []), ...(input.targets ?? [])]),
+    ];
+    if (mentions.length > nativeUserIds.maxItems)
+      throw new Error('Too many schedule mentions');
+    const content = action.kind === 'message' ? action.text : action.prompt;
+    const explicitMention = containsMention(content);
     const self =
       target.kind === 'dm' &&
       target.userId === userId &&
@@ -313,7 +318,7 @@ export class Scheduler {
       !mentions.length &&
       !explicitMention;
     const restricted = !self && !untargetedGroup;
-    const reasons: string[] = [];
+    const reasons: ScheduleApprovalReason[] = [];
     const minInterval = settings.minIntervalMinutes ?? 15;
     if (trigger.kind !== 'once') {
       if (
@@ -325,28 +330,22 @@ export class Scheduler {
               trigger.until,
             )
       )
-        reasons.push(
-          'The schedule can run faster than the configured minimum interval.',
-        );
+        reasons.push('frequency');
     }
     const model =
       action.kind === 'agent'
         ? (action.model ?? this.#deps.model(chat))
         : undefined;
     if (model && settings.highCostModels?.includes(model))
-      reasons.push('The selected model requires owner approval.');
-    if (input.needsApproval)
-      reasons.push(input.reason ?? 'The agent requested owner approval.');
+      reasons.push('model');
+    if (input.needsApproval) reasons.push('agent');
     if (action.kind === 'agent' && targetScope.chatId !== chat.chatId)
-      reasons.push(
-        'This agent job reads conversation context and delivers to another chat.',
-      );
+      reasons.push('crossChat');
     const id = previous?.id ?? randomUUID();
     let deliveryApprovedBy: string | null = null;
     if (restricted || reasons.length) {
-      if (restricted)
-        reasons.push('The destination or mentions require delivery approval.');
-      const ownerOnly = reasons.length > Number(restricted);
+      const ownerOnly = reasons.length > 0;
+      if (restricted) reasons.push('delivery');
       const approverId =
         ownerOnly || explicitMention
           ? undefined
@@ -368,11 +367,25 @@ export class Scheduler {
       const approvedBy = await this.#deps.approve(task, {
         id,
         address: promptAddress,
+        agentReason: input.needsApproval ? input.reason : undefined,
         approverId,
-        description: [
-          reasons.join(' '),
-          `Schedule: ${JSON.stringify({ action, target: targetScope.chatId, mentions, trigger, timezone })}`,
-        ].join('\n'),
+        content,
+        dueAt: due,
+        kind: action.kind,
+        mentions,
+        model,
+        operation: previous ? 'update' : 'create',
+        reasons,
+        repeat:
+          trigger.kind === 'once'
+            ? undefined
+            : trigger.kind === 'cron'
+              ? { cron: trigger.expr }
+              : { minutes: trigger.minutes },
+        target: targetScope,
+        targetUserId: target.kind === 'dm' ? target.userId : undefined,
+        timezone,
+        until: trigger.kind === 'once' ? undefined : trigger.until,
       });
       if (!approvedBy) throw new Error('Schedule approval denied');
       deliveryApprovedBy = approvedBy;

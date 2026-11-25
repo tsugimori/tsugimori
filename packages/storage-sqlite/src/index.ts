@@ -206,6 +206,16 @@ export class SqliteStore implements Store {
     return this.#db.select().from(chats).where(chatScope(chats, ref)).get();
   }
 
+  getUserDisplay({ adapterId, userId }: PrincipalRef) {
+    return (
+      this.#db
+        .select({ display: users.display })
+        .from(users)
+        .where(and(eq(users.adapterId, adapterId), eq(users.userId, userId)))
+        .get()?.display ?? undefined
+    );
+  }
+
   openPreview(preview: StoredPreview) {
     this.#db.insert(previews).values(preview).run();
   }

@@ -12,32 +12,13 @@ import { setTimeout as delay } from 'node:timers/promises';
 import type { BotIdentity } from './updates.ts';
 
 import { BotApi, BotApiError, nativeId, record } from './api.ts';
+import { maxMessage, splitText, telegramMessageParts } from './message-text.ts';
 import { telegramChecks, telegramIdentity, telegramSetup } from './setup.ts';
 import { mapUpdate } from './updates.ts';
 
-const maxMessage = 4096;
 const cursorLifetimeMs = 6 * 24 * 60 * 60 * 1_000;
-const decisions = {
-  once: 'Allowed once.',
-  always: 'Always allowed.',
-  deny: 'Denied.',
-};
 
-export function splitText(text: string) {
-  const parts: string[] = [];
-  while (text.length > maxMessage) {
-    const window = text.slice(0, maxMessage);
-    const paragraph = window.lastIndexOf('\n\n');
-    const line = window.lastIndexOf('\n');
-    let end =
-      paragraph >= 0 ? paragraph + 2 : line >= 0 ? line + 1 : maxMessage;
-    if (/[\uD800-\uDBFF]/u.test(text[end - 1] ?? '')) end--;
-    parts.push(text.slice(0, end));
-    text = text.slice(end);
-  }
-  if (text) parts.push(text);
-  return parts;
-}
+export { splitText };
 
 export class TelegramAdapter implements PlatformAdapter {
   readonly id: string;
@@ -199,52 +180,21 @@ export class TelegramAdapter implements PlatformAdapter {
   async send(message: OutboundMessage) {
     const signal = this.#signal();
     const parts: SendPart[] = [];
-    const texts = splitText(message.text);
-    const mentions = message.mentions ?? [];
-    if (mentions.some((id) => !/^[1-9]\d{0,19}$/.test(id)))
-      throw new SendFailure(
-        { parts, deliveryUnknown: false },
-        new Error('Expected native user IDs for Telegram mentions'),
-      );
-    const labels = mentions.map((id) => `user ${id}`);
-    const suffix = labels.length ? `\n\n${labels.join(' ')}` : '';
-    let offset = 0;
-    if (suffix) {
-      const last = texts.at(-1) ?? '';
-      if (last.length + suffix.length <= maxMessage && texts.length) {
-        texts[texts.length - 1] = last + suffix;
-        offset = last.length + 2;
-      } else {
-        texts.push(labels.join(' '));
-      }
-    }
-    const entities = labels.map((label, index) => {
-      const entity = {
-        type: 'text_link',
-        offset,
-        length: label.length,
-        url: `tg://user?id=${mentions[index]}`,
-      };
-      offset += label.length + 1;
-      return entity;
-    });
-    if (!texts.length)
-      throw new SendFailure(
-        { parts, deliveryUnknown: false },
-        new Error('Empty Telegram message'),
-      );
+    let messages: ReturnType<typeof telegramMessageParts>;
     try {
-      for (const [index, text] of texts.entries()) {
+      messages = telegramMessageParts(message);
+    } catch (error) {
+      throw new SendFailure({ parts, deliveryUnknown: false }, error);
+    }
+    try {
+      for (const [index, { text, entities }] of messages.entries()) {
         const sent = record(
           await this.#api.call(
             'sendMessage',
             {
               ...destination(message),
               text,
-              entities:
-                entities.length && index === texts.length - 1
-                  ? entities
-                  : undefined,
+              entities,
               reply_parameters: message.replyTo
                 ? {
                     message_id: Number(message.replyTo),
@@ -322,23 +272,23 @@ export class TelegramAdapter implements PlatformAdapter {
 
   async respondToApproval({
     chatId,
-    decision,
+    decisionText,
     messageId,
+    notice,
     prompt,
     queryId,
   }: ApprovalFeedback) {
     const signal = this.#signal();
-    const text = decision ? decisions[decision] : 'Approval is unavailable.';
     try {
       if (queryId)
         await this.#api.call(
           'answerCallbackQuery',
-          { callback_query_id: queryId, text },
+          { callback_query_id: queryId, text: notice },
           signal,
         );
     } finally {
-      if (decision) {
-        const suffix = `\n\nDecision: ${text}`;
+      if (decisionText) {
+        const suffix = '\n\n' + decisionText;
         const display = prompt
           ? (splitText(prompt)[0] ?? '')
               .slice(0, maxMessage - suffix.length)
@@ -349,7 +299,7 @@ export class TelegramAdapter implements PlatformAdapter {
           {
             chat_id: chatId,
             message_id: Number(messageId),
-            text: display ? display + suffix : text,
+            text: display ? display + suffix : notice,
             reply_markup: { inline_keyboard: [] },
           },
           signal,

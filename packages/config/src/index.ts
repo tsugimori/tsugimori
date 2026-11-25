@@ -29,6 +29,7 @@ export interface Config {
   };
   defaultAgent?: string;
   exec?: { denyRead?: string[]; kind?: 'local-sandbox' };
+  locale: 'en' | 'zh-TW';
   owner: Record<string, string>;
   platforms: PlatformInstanceConfig[];
   preview?: {

@@ -20,6 +20,9 @@ test('validates workspace JSON and accepts disabled, unregistered plugin kinds',
   assert.equal(config.platforms[0]?.enabled, false);
   assert.equal(config.agents[0]?.enabled, true);
   assert.equal(config.context.recentMessages, 30);
+  assert.equal(config.locale, 'en');
+  assert.equal(parseConfig('{"locale":"zh-TW"}').locale, 'zh-TW');
+  assert.throws(() => parseConfig('{"locale":"zh-CN"}'), /locale/);
   assert.equal(config.storage.path, 'data/tsugimori.db');
   assert.throws(
     () => parseConfig('{"agents":[{"id":"bad","kind":"random"}]}'),

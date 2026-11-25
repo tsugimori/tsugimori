@@ -7,8 +7,8 @@ import type {
   ExecBackend,
   ExecScope,
   InboundMessage,
-  OutboundMessage,
   PlatformAdapter,
+  ScheduleApprovalRequest,
   ToolContext,
   ToolDefinition,
 } from '@tsugimori/plugin-sdk';
@@ -26,6 +26,7 @@ import type { TaskInput } from './supplements.ts';
 
 import { untilAborted } from './abort.ts';
 import { protectTools, runAgent } from './agent-run.ts';
+import { approvalMessages, approvalPrompt } from './approval-messages.ts';
 import { describeError } from './errors.ts';
 import { conversationId, DeliveryError, Outbound } from './outbound.ts';
 import { Supplements } from './supplements.ts';
@@ -434,16 +435,15 @@ export class Tasks {
           task: {
             ...task,
             signal: passSignal,
-            approveSchedule: ({ address, approverId, description, id }) =>
+            approveSchedule: (schedule) =>
               this.#requestApproval(
                 work,
                 {
-                  action: 'schedule.create',
-                  resource: { type: 'project', id },
-                  description,
+                  action: 'schedule.' + schedule.operation,
+                  resource: { type: 'project', id: schedule.id },
                 },
                 AbortSignal.any([passSignal, AbortSignal.timeout(120_000)]),
-                { address, approverId },
+                schedule,
               ),
           },
           requestApproval,
@@ -509,12 +509,9 @@ export class Tasks {
     work: Work,
     request: ApprovalRequest,
     signal: AbortSignal,
-    schedule?: {
-      address: Pick<OutboundMessage, 'chatId' | 'threadId'>;
-      approverId?: string;
-    },
+    schedule?: ScheduleApprovalRequest,
   ) {
-    const { auth, store, trace, outbound } = this.#deps;
+    const { auth, store, trace, outbound, runtime } = this.#deps;
     const { adapter, chat, input, id } = work;
     return trace.span('approval.request', { ...chat, taskId: id }, async () => {
       signal.throwIfAborted();
@@ -546,34 +543,33 @@ export class Tasks {
       const cancel = () => answer.resolve(undefined);
       signal.addEventListener('abort', cancel, { once: true });
       try {
-        const description = request.description
-          ? `\n\n${request.description}`
-          : '';
-        const choices = schedule ? 'yes or no' : 'yes, always, or no';
-        const text = `Approval requested for ${request.action} on ${JSON.stringify(request.resource)}. Reply directly to this message with ${choices}.${description}`;
+        const { locale } = runtime.config;
+        const { buttons } = approvalMessages(locale);
+        const text = approvalPrompt({ chat, locale, request, schedule, store });
         await outbound.send(
           adapter,
           {
             ...(schedule
               ? { ...schedule.address, text }
               : reply(input.message, text)),
+            parseTextMentions: false,
             buttons: adapter.capabilities.inlineButtons
               ? [
                   {
                     id: approvalCallbackId(approval.id, 'once'),
-                    label: 'Allow once',
+                    label: buttons.once,
                   },
                   ...(schedule
                     ? []
                     : [
                         {
                           id: approvalCallbackId(approval.id, 'always'),
-                          label: 'Always',
+                          label: buttons.always,
                         },
                       ]),
                   {
                     id: approvalCallbackId(approval.id, 'deny'),
-                    label: 'Deny',
+                    label: buttons.deny,
                   },
                 ]
               : undefined,

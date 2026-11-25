@@ -67,3 +67,72 @@ test('a restarted scheduler claims only the latest missed fire and preserves its
     delayed: false,
   });
 });
+
+test('one-time group delivery checks native IDs, user links, and usernames independently', async (t) => {
+  const store = new SqliteStore(':memory:');
+  t.after(() => store.close());
+  const chat = { adapterId: 'fake', chatId: 'room' };
+  const principal = { adapterId: 'fake', userId: '10' };
+  store.recordInbound(
+    { ...chat, kind: 'group', title: 'Room' },
+    { ...principal, display: 'Sender' },
+    {
+      ...chat,
+      direction: 'inbound',
+      messageId: 'request',
+      raw: null,
+      replyTo: null,
+      text: 'Schedule this',
+      threadId: null,
+      userId: principal.userId,
+    },
+  );
+  const reasons: (readonly string[])[] = [];
+  const scheduler = new Scheduler({
+    attachedAdapters: () => ['fake'],
+    approve: async (_task, request) => {
+      reasons.push(request.reasons);
+      return undefined;
+    },
+    canSchedule: () => true,
+    deliver: async () => 'sent',
+    logError: (event) => assert.fail(event),
+    model: () => 'test',
+    now: () => 0,
+    owner: () => '10',
+    settings: () => ({ timezone: 'UTC' }),
+    store,
+  });
+  const create = scheduler
+    .tools()
+    .find(({ name }) => name === 'schedule.create');
+  assert.ok(create);
+  const task = { chat, principal, taskId: 'task', signal: t.signal };
+  for (const { text, mentions } of [
+    { text: 'Reminder', mentions: ['20'] },
+    { text: '[Reader](tg://user?id=20), reminder' },
+    { text: '@some_user, reminder' },
+  ]) {
+    await assert.rejects(
+      create.run(
+        {
+          action: { kind: 'message', text },
+          mentions,
+          trigger: { kind: 'once', at: 60_000 },
+        },
+        task,
+      ),
+      /Schedule approval denied/,
+    );
+  }
+  assert.deepEqual(reasons, [['delivery'], ['delivery'], ['delivery']]);
+  assert.equal(store.listSchedules(chat).length, 0);
+  await create.run(
+    {
+      action: { kind: 'message', text: 'Group reminder' },
+      trigger: { kind: 'once', at: 60_000 },
+    },
+    task,
+  );
+  assert.equal(store.listSchedules(chat).length, 1);
+});

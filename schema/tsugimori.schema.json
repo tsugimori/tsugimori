@@ -20,6 +20,10 @@
       "minLength": 1,
       "default": "Asia/Taipei"
     },
+    "locale": {
+      "enum": ["en", "zh-TW"],
+      "default": "en"
+    },
     "storage": {
       "type": "object",
       "additionalProperties": false,

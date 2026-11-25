@@ -29,6 +29,7 @@ import { Tracer } from '@tsugimori/trace';
 import type { Logger } from './hooks.ts';
 import type { PreviewProviders } from './previews.ts';
 
+import { approvalDecisionText } from './approval-messages.ts';
 import { ChatSetup } from './chat-setup.ts';
 import { EnvironmentChecks, failureText } from './checks.ts';
 import { Executions, sandboxScope } from './executions.ts';
@@ -596,7 +597,7 @@ ${failures}`,
   async #approvalFeedback(
     adapter: PlatformAdapter,
     chat: ChatRef,
-    feedback: ApprovalFeedback,
+    feedback: Omit<ApprovalFeedback, 'decisionText' | 'notice' | 'prompt'>,
   ) {
     if (!adapter.respondToApproval) return;
     const prompt = feedback.decision
@@ -604,7 +605,14 @@ ${failures}`,
       : undefined;
     try {
       await this.#trace.span('approval.feedback', { ...chat }, () =>
-        adapter.respondToApproval?.({ ...feedback, prompt }),
+        adapter.respondToApproval?.({
+          ...feedback,
+          ...approvalDecisionText(
+            this.#runtime.config.locale,
+            feedback.decision,
+          ),
+          prompt,
+        }),
       );
     } catch {
       this.#deps.log({

@@ -36,6 +36,8 @@ For manual configuration, use the [example workspace](examples/workspace/tsugimo
 
 Add a `platforms` entry with `kind: "telegram"`, a unique `id`, and a `tokenEnv` naming the bot token variable. Each entry runs a separate bot. Telegram forum topics have separate history, sessions, and workspace directories. Replies use plain text, and owners can decide an approval with its buttons or by replying directly to the prompt. Telegram's group privacy mode controls which group messages reach the bot.
 
+Set the workspace `locale` to `zh-TW` for Traditional Chinese approval prompts, buttons, and decisions. The default is `en`.
+
 ### Codex
 
 Add an `agents` entry with `kind: "codex"`. Set `model` and `thinking` to override the Codex defaults. A pinned version uses the entrypoint in `runtime/codex/<version>/codex-package.json`, with `bin/codex` (`bin/codex.exe` on Windows) as the fallback within that release directory. Setup retains the package's helper executables and sandbox resources. If `doctor` reports a missing `codex-code-mode-host` in a managed install, run `tsugimori setup --upgrade` in the workspace.
@@ -57,6 +59,8 @@ The gateway updates rolling summaries in a background queue as older messages fa
 Agents can create fixed messages or agent tasks using `schedule.create` and manage them with `schedule.list`, `schedule.pause`, `schedule.update`, and `schedule.cancel`. Timing supports Unix-millisecond one-time dates, fixed minute intervals, and five-field cron in the workspace or schedule time zone. Cron handles repeated and skipped local times during daylight saving changes. The latest missed occurrence is delivered with a delay note by default. Set the schedule's `missed` option to `skip` to discard missed deliveries.
 
 Schedules are scoped to the conversation they were created in. Self-delivery and untargeted one-time group delivery can proceed immediately. Other delivery and resource-intensive jobs require linked approval. Configure `scheduler.minIntervalMinutes` (default 15), `scheduler.maxActivePerUser` (default 20), and `scheduler.highCostModels` in the workspace.
+
+Pass native platform user IDs in the schedule's `mentions` array to notify specific recipients. Telegram also renders `[name](tg://user?id=123)` as a user mention and preserves `@username` in the message text.
 
 ## Chat workspaces and execution
 
