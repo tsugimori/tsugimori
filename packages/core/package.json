@@ -1,0 +1,28 @@
+{
+  "name": "@tsugimori/core",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "exports": {
+    ".": {
+      "production": "./dist/index.js",
+      "default": "./src/index.ts"
+    }
+  },
+  "dependencies": {
+    "@tsugimori/auth": "workspace:*",
+    "@tsugimori/config": "workspace:*",
+    "@tsugimori/context": "workspace:*",
+    "@tsugimori/plugin-sdk": "workspace:*",
+    "@tsugimori/storage": "workspace:*",
+    "@tsugimori/trace": "workspace:*",
+    "ajv": "8.20.0",
+    "@tsugimori/scheduler": "workspace:*"
+  },
+  "devDependencies": {
+    "@tsugimori/storage-sqlite": "workspace:*"
+  }
+}

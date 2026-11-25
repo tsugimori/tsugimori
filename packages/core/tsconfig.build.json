@@ -1,0 +1,26 @@
+{
+  "extends": "../../tsconfig.package.json",
+  "references": [
+    {
+      "path": "../auth/tsconfig.build.json"
+    },
+    {
+      "path": "../config/tsconfig.build.json"
+    },
+    {
+      "path": "../context/tsconfig.build.json"
+    },
+    {
+      "path": "../plugin-sdk/tsconfig.build.json"
+    },
+    {
+      "path": "../storage/tsconfig.build.json"
+    },
+    {
+      "path": "../trace/tsconfig.build.json"
+    },
+    {
+      "path": "../scheduler/tsconfig.build.json"
+    }
+  ]
+}
