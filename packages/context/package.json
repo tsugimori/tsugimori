@@ -1,0 +1,22 @@
+{
+  "name": "@tsugimori/context",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "exports": {
+    ".": {
+      "production": "./dist/index.js",
+      "default": "./src/index.ts"
+    }
+  },
+  "dependencies": {
+    "@tsugimori/plugin-sdk": "workspace:*",
+    "@tsugimori/storage": "workspace:*"
+  },
+  "devDependencies": {
+    "@tsugimori/storage-sqlite": "workspace:*"
+  }
+}
