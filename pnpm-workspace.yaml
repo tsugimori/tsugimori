@@ -1,0 +1,7 @@
+packages:
+  - packages/*
+  - plugins/*
+networkConcurrency: 2
+childConcurrency: 2
+patchedDependencies:
+  drizzle-orm@1.0.0-rc.6: patches/drizzle-orm@1.0.0-rc.6.patch

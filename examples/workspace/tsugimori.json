@@ -1,0 +1,20 @@
+{
+  "owner": {},
+  "timezone": "Asia/Taipei",
+  "storage": { "kind": "sqlite", "path": "data/tsugimori.db" },
+  "platforms": [
+    {
+      "id": "telegram:main",
+      "kind": "telegram",
+      "tokenEnv": "TELEGRAM_BOT_TOKEN"
+    }
+  ],
+  "agents": [
+    { "id": "codex", "kind": "codex" },
+    { "id": "claude", "kind": "claude-sdk" }
+  ],
+  "defaultAgent": "codex",
+  "exec": {},
+  "preview": {},
+  "context": { "recentMessages": 30 }
+}
