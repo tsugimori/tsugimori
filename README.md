@@ -76,7 +76,9 @@ Schedules are scoped to the conversation they were created in. Self-delivery and
 
 Approval prompts offer **Approve** and **Deny**. Reply directly to the prompt with `approve` or `deny` to decide by text. Older replies such as `allow once` and `always` also approve the request. Approving a recurring schedule covers its future fires and edits that preserve the approved delivery scope. Resource checks can still require fresh owner approval.
 
-The requesting agent waits up to two minutes. If the request is still pending, the tool reports who needs to approve it and the conversation can continue. Schedule requests expire at the first scheduled trigger or 24 hours after the request was created, whichever comes first. Other requests expire after 24 hours. Pending approvals survive a reload or restart, and a later schedule decision is reported in the requesting conversation. When an approval expires, the prompt shows **Expired**, its buttons are removed, and the requester is notified in the original conversation.
+The requesting agent waits up to two minutes. If approval is still pending, the gateway ends the turn and keeps any answer the agent already produced. Telegram marks the original request with 👀 as soon as the approval prompt is sent, replaces it with 👍 on approval or 👎 on denial, and clears it on expiry. Reactions are best-effort. Adapters without reactions send a one-line pending notice when the wait ends.
+
+Pending approvals survive a reload or restart, and the gateway reports later outcomes in the requesting conversation, including the schedule reference when it creates a schedule. Schedule requests expire at the first scheduled trigger or 24 hours after the request was created, whichever comes first. Other requests expire after 24 hours. On expiry, the prompt shows **Expired**, its buttons are removed, and the requester is notified in the original conversation.
 
 Pass native platform user IDs in the schedule's `mentions` array to notify specific recipients. Telegram also renders `[name](tg://user?id=123)` as a user mention and preserves `@username` in the message text.
 

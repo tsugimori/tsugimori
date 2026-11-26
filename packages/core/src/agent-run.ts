@@ -17,13 +17,14 @@ import type { HookRunner, Logger } from './hooks.ts';
 import { untilAborted } from './abort.ts';
 
 interface AgentRunDependencies {
+  approvalPending?: AbortSignal;
   log: Logger;
   task: ToolContext;
   trace: Tracer;
 }
 
 export async function runAgent(
-  { trace, log, task }: AgentRunDependencies,
+  { approvalPending, trace, log, task }: AgentRunDependencies,
   agent: AgentConnector,
   request: AgentRequest,
   io: AgentIO,
@@ -56,11 +57,13 @@ export async function runAgent(
     let sessionId: string | undefined;
     try {
       for (;;) {
-        const next = await untilAborted(signal, () => iterator.next());
+        const next = await untilAborted(request.signal, () => iterator.next());
+        signal.throwIfAborted();
         if (next.done) {
           complete = true;
           return { text: final ?? deltas, sessionId };
         }
+        if (approvalPending?.aborted) continue;
         const event = next.value;
         switch (event.type) {
           case 'text.delta':
@@ -102,6 +105,8 @@ export async function runAgent(
             throw event.error;
         }
       }
+    } catch (error) {
+      if (signal.aborted || !approvalPending?.aborted) throw error;
     } finally {
       for (const end of tools.values()) end('error');
       if (!complete) {
@@ -116,6 +121,7 @@ export async function runAgent(
           });
       }
     }
+    return { text: final ?? deltas };
   });
 }
 
@@ -125,10 +131,12 @@ export function protectTools(
   {
     trace,
     hooks,
+    onResult,
     task,
     requestApproval,
   }: {
     hooks: HookRunner;
+    onResult?(result: unknown): void;
     requestApproval(
       request: Parameters<AgentIO['requestApproval']>[0],
       tool: Extract<ApprovalContinuation, { kind: 'tool' }>,
@@ -154,33 +162,31 @@ export function protectTools(
         const name = tool.name;
         await hooks.emit('tool.before', { task, name });
         let status: 'ok' | 'error' = 'error';
+        let result: unknown;
         try {
-          const result = await trace.span(
-            'tool.run',
-            { taskId, name },
-            async () => {
-              const permission = tool.permission;
-              if (permission) {
-                const approval = await requestApproval(
-                  {
-                    action: permission.action,
-                    description: permission.describe?.(args, task),
-                    resource: permission.resource(args, task),
-                  },
-                  { kind: 'tool', name, args },
-                );
-                if (typeof approval === 'object') return approval;
-                if (!approval) throw new Error('Tool permission denied');
-              }
-              signal.throwIfAborted();
-              return tool.run(args, task);
-            },
-          );
+          result = await trace.span('tool.run', { taskId, name }, async () => {
+            const permission = tool.permission;
+            if (permission) {
+              const approval = await requestApproval(
+                {
+                  action: permission.action,
+                  description: permission.describe?.(args, task),
+                  resource: permission.resource(args, task),
+                },
+                { kind: 'tool', name, args },
+              );
+              if (typeof approval === 'object') return approval;
+              if (!approval) throw new Error('Tool permission denied');
+            }
+            signal.throwIfAborted();
+            return tool.run(args, task);
+          });
           status = 'ok';
-          return result;
         } finally {
           await hooks.emit('tool.after', { task, name, status });
         }
+        onResult?.(result);
+        return result;
       },
     };
   });

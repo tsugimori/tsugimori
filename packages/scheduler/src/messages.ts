@@ -64,7 +64,7 @@ const messages = {
 };
 
 export const scheduleReplyStyle =
-  'Confirm schedule changes in one sentence with when, where, and what. Use the human-readable summary and state plainly when approval is pending. Omit internal IDs, field names, and JSON. Mention a short reference only when the user asks to manage a schedule.';
+  'Confirm completed schedule changes in one sentence with when, where, and what. Use the human-readable summary. The framework reports the outcome of pending approvals. Omit internal IDs, field names, and JSON. Mention a short reference only when the user asks to manage a schedule.';
 
 export function scheduleChatName(
   store: Store,

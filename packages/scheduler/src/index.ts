@@ -15,7 +15,11 @@ import type {
   Store,
 } from '@tsugimori/storage';
 
-import { containsMention, textMentionMatches } from '@tsugimori/plugin-sdk';
+import {
+  containsMention,
+  pendingApprovalResult,
+  textMentionMatches,
+} from '@tsugimori/plugin-sdk';
 import { createHash, randomUUID } from 'node:crypto';
 
 import { Cron, minuteMs } from './cron.ts';
@@ -610,7 +614,11 @@ export class Scheduler {
       };
       const approval = await this.#deps.approve(task, request, change);
       if (!approval) throw new Error('Schedule approval denied or unavailable');
-      if ('pending' in approval) return this.#result(schedule, change);
+      if ('pending' in approval)
+        return {
+          ...this.#result(schedule, change),
+          ...pendingApprovalResult,
+        };
       if ('scheduleApplied' in approval) {
         if (!approval.scheduleApplied)
           throw new Error('Schedule limit reached or schedule changed');

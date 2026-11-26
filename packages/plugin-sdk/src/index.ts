@@ -57,6 +57,14 @@ export interface InboundMessage extends InboundBase {
 
 export type ApprovalDecision = 'approve' | 'deny';
 
+export type ApprovalReaction = 'pending' | 'approved' | 'denied' | 'expired';
+
+export const pendingApprovalResult = {
+  pending: true,
+  instruction:
+    'The framework will report the outcome. Do not mention the pending approval in your reply.',
+} as const;
+
 export interface ChatMigration {
   chatId: string;
   /** The platform service message, when available for chat history. */
@@ -213,6 +221,12 @@ export interface PlatformAdapter {
   kind: string;
   respondToApproval?(feedback: ApprovalFeedback): Promise<void>;
   send(message: OutboundMessage): Promise<SendReceipt>;
+  /** Replace the approval reaction on the original message, or clear it on expiry. */
+  setApprovalReaction?(
+    message: Pick<InboundMessage, 'chatId' | 'messageId'>,
+    reaction: ApprovalReaction,
+    signal: AbortSignal,
+  ): Promise<void>;
   /** Replace commands for this scope, or clear the scope with an empty list. */
   setCommands?(
     commands: readonly PlatformCommand[],

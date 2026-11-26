@@ -45,6 +45,7 @@ const catalogs = {
     expired: 'Expired',
     pending: (approver: string) =>
       `Request sent. Awaiting approval from ${approver}.`,
+    pendingRecipient: 'the recipient',
     owner: 'the owner',
     unavailable: 'Approval is unavailable.',
     reply: 'Reply directly to this message with “approve” or “deny”.',
@@ -112,6 +113,7 @@ const catalogs = {
     },
     expired: '已逾時',
     pending: (approver: string) => `已送出，等待${approver}同意`,
+    pendingRecipient: '收件人',
     owner: '主人',
     unavailable: '這項審核已無法處理。',
     reply: '請直接回覆這則訊息，輸入「同意」或「拒絕」。',

@@ -158,6 +158,47 @@ test(
   },
 );
 
+test('replaces and clears approval reactions through the Bot API', async (t) => {
+  const bodies: unknown[] = [];
+  const fakeFetch: typeof fetch = async (input, init) => {
+    const method = String(input).split('/').at(-1);
+    if (method === 'getMe') return ok(me);
+    if (method === 'getUpdates') return longPoll(init);
+    assert.equal(method, 'setMessageReaction');
+    assert.ok(typeof init?.body === 'string');
+    bodies.push(JSON.parse(init.body));
+    return ok(true);
+  };
+  const adapter = new TelegramAdapter({ fetch: fakeFetch }, 'tg', '1:fake');
+  await adapter.start({ emit: async () => {} });
+  t.after(() => adapter.stop());
+  const message = { chatId: '-1001', messageId: '23' };
+  for (const status of ['pending', 'approved', 'denied', 'expired'] as const)
+    await adapter.setApprovalReaction(
+      message,
+      status,
+      AbortSignal.timeout(1_000),
+    );
+  assert.deepEqual(bodies, [
+    {
+      chat_id: '-1001',
+      message_id: 23,
+      reaction: [{ type: 'emoji', emoji: '👀' }],
+    },
+    {
+      chat_id: '-1001',
+      message_id: 23,
+      reaction: [{ type: 'emoji', emoji: '👍' }],
+    },
+    {
+      chat_id: '-1001',
+      message_id: 23,
+      reaction: [{ type: 'emoji', emoji: '👎' }],
+    },
+    { chat_id: '-1001', message_id: 23, reaction: [] },
+  ]);
+});
+
 test(
   'sends plain-text reply parts with receipts and retries only known rejections',
   { timeout: 4_000 },

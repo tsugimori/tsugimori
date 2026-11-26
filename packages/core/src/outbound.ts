@@ -1,16 +1,19 @@
 import type {
+  ApprovalReaction,
   ChatRef,
   OutboundMessage,
   PlatformAdapter,
   SendPart,
   SendReceipt,
 } from '@tsugimori/plugin-sdk';
-import type { Store } from '@tsugimori/storage';
+import type { Store, TaskRecord } from '@tsugimori/storage';
 import type { Tracer } from '@tsugimori/trace';
 
 import { SendFailure } from '@tsugimori/plugin-sdk';
 
-import type { HookRunner } from './hooks.ts';
+import type { HookRunner, Logger } from './hooks.ts';
+
+import { untilAborted } from './abort.ts';
 
 export function conversationId({
   chatId,
@@ -22,11 +25,63 @@ export function conversationId({
   return threadId === undefined ? chatId : `${chatId}_${threadId}`;
 }
 
-export class Outbound {
-  readonly #deps: { hooks: HookRunner; store: Store; trace: Tracer };
+interface OutboundDependencies {
+  hooks: HookRunner;
+  log: Logger;
+  store: Store;
+  trace: Tracer;
+}
 
-  constructor(deps: { hooks: HookRunner; store: Store; trace: Tracer }) {
+export class Outbound {
+  readonly #deps: OutboundDependencies;
+  readonly #approvalReactions = new Map<string, Promise<void>>();
+
+  constructor(deps: OutboundDependencies) {
     this.#deps = deps;
+  }
+
+  reactToApproval(
+    adapter: PlatformAdapter,
+    source: ChatRef & Pick<TaskRecord, 'id' | 'sourceMessageId'>,
+    reaction: ApprovalReaction,
+  ) {
+    const { id: taskId, sourceMessageId } = source;
+    const setReaction = adapter.setApprovalReaction?.bind(adapter);
+    if (!setReaction || sourceMessageId.startsWith('schedule:')) return;
+    const { log, store, trace } = this.#deps;
+    const attrs = {
+      adapterId: adapter.id,
+      chatId: source.chatId,
+      taskId,
+      reaction,
+    };
+    const previous = this.#approvalReactions.get(taskId) ?? Promise.resolve();
+    const update = previous
+      .then(async () => {
+        try {
+          await trace.span('approval.reaction', attrs, async () => {
+            const message = store.getMessage(source, sourceMessageId);
+            const address = store.deliveryAddress(source);
+            if (!message || message.deleted || !address) return;
+            const signal = AbortSignal.timeout(5_000);
+            await untilAborted(signal, () =>
+              setReaction(
+                { chatId: address.chatId, messageId: sourceMessageId },
+                reaction,
+                signal,
+              ),
+            );
+          });
+        } catch {
+          log({ level: 'error', event: 'approval.reaction_failed', ...attrs });
+        }
+      })
+      .finally(() => {
+        if (this.#approvalReactions.get(taskId) === update)
+          this.#approvalReactions.delete(taskId);
+      });
+    this.#approvalReactions.set(taskId, update);
+    return update;
   }
 
   async send(

@@ -1,6 +1,8 @@
 import type {
   AdapterContext,
   ApprovalFeedback,
+  ApprovalReaction,
+  InboundMessage,
   OutboundMessage,
   PlatformAdapter,
   PlatformCommand,
@@ -467,6 +469,29 @@ export class TelegramAdapter implements PlatformAdapter {
         );
       }
     }
+  }
+
+  async setApprovalReaction(
+    { chatId, messageId }: Pick<InboundMessage, 'chatId' | 'messageId'>,
+    status: ApprovalReaction,
+    signal: AbortSignal,
+  ) {
+    const emoji = {
+      pending: '👀',
+      approved: '👍',
+      denied: '👎',
+      expired: null,
+    }[status];
+    await this.#api.call(
+      'setMessageReaction',
+      {
+        chat_id: chatId,
+        message_id: Number(messageId),
+        reaction: emoji ? [{ type: 'emoji', emoji }] : [],
+      },
+      AbortSignal.any([this.#signal(), signal]),
+      0,
+    );
   }
 
   #signal() {

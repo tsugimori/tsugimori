@@ -3,6 +3,7 @@ import type {
   AgentConnector,
   AgentRequest,
   ApprovalFeedback,
+  ApprovalReaction,
   InboundMessage,
   OutboundMessage,
   PlatformAdapter,
@@ -43,11 +44,19 @@ function inbound(
   };
 }
 
-function createPlatform(messagePrefix = 'bot') {
+function createPlatform(
+  messagePrefix = 'bot',
+  react?: true | PlatformAdapter['setApprovalReaction'],
+) {
   let context: AdapterContext | undefined;
   let starts = 0;
   const sent: (OutboundMessage & { messageId: string })[] = [];
   const feedback: ApprovalFeedback[] = [];
+  const reactions: {
+    chatId: string;
+    messageId: string;
+    status: ApprovalReaction;
+  }[] = [];
   const platform: PlatformAdapter = {
     id: adapterId,
     kind: 'fake',
@@ -71,10 +80,16 @@ function createPlatform(messagePrefix = 'bot') {
       return Promise.resolve();
     },
   };
+  if (react)
+    platform.setApprovalReaction = async (message, status, signal) => {
+      reactions.push({ ...message, status });
+      if (typeof react === 'function') await react(message, status, signal);
+    };
   return {
     platform,
     sent,
     feedback,
+    reactions,
     get starts() {
       return starts;
     },
@@ -100,6 +115,7 @@ async function fixture(
     onScopedTool?: (args: unknown, userId: string) => void;
     plugins?: PluginDefinition[];
     previews?: { named?: TunnelProvider; quick: TunnelProvider };
+    reactions?: true | PlatformAdapter['setApprovalReaction'];
   } = {},
 ) {
   const workspace = await mkdtemp(join(tmpdir(), 'tsugimori-gateway-'));
@@ -107,7 +123,7 @@ async function fixture(
   const dbPath = options.durable ? join(workspace, 'gateway.db') : ':memory:';
   const store = new SqliteStore(dbPath);
   const trace = new Tracer(store, { ringSize: 500 });
-  const platform = createPlatform();
+  const platform = createPlatform(undefined, options.reactions);
   let agentStarts = 0;
   let agentStops = 0;
   const registry = new PluginRegistry([
@@ -810,7 +826,7 @@ test(
         yield { type: 'text.final', text: '' };
       },
       true,
-      { locale: 'zh-TW' },
+      { locale: 'zh-TW', reactions: true },
     );
     await f.platform.emit(inbound('owner-dm', 'Hello', { chatId: 'owner' }));
     const topic = { chatKind: 'group' as const, threadId: '8' };
@@ -822,9 +838,11 @@ test(
         userId: 'member',
       }),
     );
-    await until(t, () =>
-      f.store.listApprovals().some(({ promptMessageId }) => promptMessageId),
-    );
+    await until(t, () => f.platform.reactions.length === 1);
+    const original = { chatId: chat.chatId, messageId: 'original' };
+    assert.deepEqual(f.platform.reactions, [
+      { ...original, status: 'pending' },
+    ]);
     const [approval] = f.store.listApprovals();
     assert.ok(approval?.continuation?.kind === 'schedule');
     const prompt = f.platform.sent.find(
@@ -844,6 +862,10 @@ test(
     assert.equal(notice?.chatId, chat.chatId);
     assert.equal(notice?.threadId, '8');
     assert.equal(notice?.replyTo, 'original');
+    assert.deepEqual(f.platform.reactions.at(-1), {
+      ...original,
+      status: 'expired',
+    });
     assert.equal(f.store.getApproval(approval.id)?.status, 'expired');
     assert.ok(f.trace.recent.some(({ name }) => name === 'approval.expired'));
     const [edit] = f.platform.feedback;
@@ -920,6 +942,125 @@ test(
     assert.equal(f.platform.sent.at(-1)?.replyTo, 'use-tool');
   },
 );
+
+for (const mode of ['reaction', 'fallback', 'answer'] as const) {
+  test(
+    `a generic approval timeout ends the turn with ${mode} feedback`,
+    { timeout: 5_000 },
+    async (t) => {
+      const wait = new AbortController();
+      const timeout = AbortSignal.timeout;
+      t.mock.method(AbortSignal, 'timeout', (ms: number) =>
+        ms === 120_000 ? wait.signal : timeout(ms),
+      );
+      let toolResult: unknown;
+      let turnSignal: AbortSignal | undefined;
+      const f = await fixture(
+        t,
+        async function* (request) {
+          const tool = request.tools.find(({ name }) => name === 'scoped_tool');
+          assert.ok(tool);
+          turnSignal = request.signal;
+          if (mode === 'answer')
+            yield { type: 'text.final', text: 'The independent answer is 42.' };
+          toolResult = await tool.run({ id: 'test' });
+          if (mode === 'answer')
+            await new Promise<void>((resolve) => {
+              if (request.signal.aborted) resolve();
+              else
+                request.signal.addEventListener('abort', () => resolve(), {
+                  once: true,
+                });
+            });
+          yield {
+            type: 'text.final',
+            text: 'I sent the request and am waiting for approval.',
+          };
+        },
+        true,
+        {
+          plugins:
+            mode === 'answer'
+              ? [
+                  {
+                    name: 'tool-result-hook',
+                    hooks: {
+                      'tool.after': {
+                        mode: 'sync',
+                        timeoutMs: 200,
+                        run: () => delay(10),
+                      },
+                    },
+                  },
+                ]
+              : undefined,
+          reactions:
+            mode === 'fallback'
+              ? undefined
+              : async (_, status) => {
+                  if (mode === 'reaction' && status === 'pending')
+                    throw new Error('Reaction unavailable');
+                },
+        },
+      );
+      await f.platform.emit(inbound('original', 'Use the scoped tool'));
+      await until(t, () =>
+        f.store.listApprovals().some(({ promptMessageId }) => promptMessageId),
+      );
+      const [approval] = f.store.listApprovals();
+      assert.ok(approval?.promptMessageId);
+      assert.equal(f.platform.sent.length, 1);
+      const original = { chatId: chat.chatId, messageId: 'original' };
+      if (mode !== 'fallback')
+        assert.deepEqual(f.platform.reactions, [
+          { ...original, status: 'pending' },
+        ]);
+      wait.abort();
+      await f.gateway.idle();
+      assert.ok(turnSignal?.aborted);
+      assert.deepEqual(toolResult, {
+        pending: true,
+        summary: 'Request sent. Awaiting approval from the owner.',
+        instruction:
+          'The framework will report the outcome. Do not mention the pending approval in your reply.',
+      });
+      assert.deepEqual(
+        f.platform.sent.slice(1).map(({ text }) => text),
+        mode === 'answer'
+          ? ['The independent answer is 42.']
+          : mode === 'fallback'
+            ? ['Request sent. Awaiting approval from the owner.']
+            : [],
+      );
+      assert.equal(f.store.getApproval(approval.id)?.status, 'pending');
+      if (mode === 'reaction') {
+        assert.ok(
+          f.logs.some(({ event }) => event === 'approval.reaction_failed'),
+        );
+        assert.ok(
+          f.trace.recent.some(
+            ({ name, status }) =>
+              name === 'approval.reaction' && status === 'error',
+          ),
+        );
+      }
+      await f.platform.emit(
+        inbound('deny', 'deny', { replyTo: approval.promptMessageId }),
+      );
+      assert.equal(f.store.getApproval(approval.id)?.status, 'denied');
+      assert.deepEqual(
+        f.platform.reactions,
+        mode === 'fallback'
+          ? []
+          : [
+              { ...original, status: 'pending' },
+              { ...original, status: 'denied' },
+            ],
+      );
+      assert.equal(f.platform.sent.at(-1)?.text, 'The request was denied.');
+    },
+  );
+}
 
 test(
   'a platform can detach and reattach while the gateway remains running',
@@ -1266,6 +1407,8 @@ test(
   { timeout: 6000 },
   async (t) => {
     const wait = new AbortController();
+    const pendingReaction = Promise.withResolvers<void>();
+    t.after(() => pendingReaction.resolve());
     const timeout = AbortSignal.timeout;
     t.mock.method(AbortSignal, 'timeout', (ms: number) =>
       ms === 120_000 ? wait.signal : timeout(ms),
@@ -1310,7 +1453,12 @@ test(
         yield { type: 'text.final', text: '已送出，等待管理員同意' };
       },
       true,
-      { locale: 'zh-TW' },
+      {
+        locale: 'zh-TW',
+        reactions: async (_, status) => {
+          if (status === 'pending') await pendingReaction.promise;
+        },
+      },
     );
     await f.platform.emit(
       inbound('owner-dm', 'Register', {
@@ -1341,9 +1489,11 @@ test(
         userDisplay: '管理員',
       }),
     );
-    await until(t, () =>
-      f.platform.sent.some(({ buttons }) => Boolean(buttons)),
-    );
+    await until(t, () => f.platform.reactions.length === 1);
+    const original = { chatId: chat.chatId, messageId: 'schedule' };
+    assert.deepEqual(f.platform.reactions, [
+      { ...original, status: 'pending' },
+    ]);
     const prompt = f.platform.sent.find(({ buttons }) => Boolean(buttons));
     assert.ok(prompt);
     assert.equal(prompt.chatId, 'owner');
@@ -1393,32 +1543,47 @@ test(
     const [approval] = f.store.listApprovals();
     assert.equal(approval?.expiresAt, at);
     assert.ok(Object.is(result, undefined));
+    const sentBeforeTimeout = f.platform.sent.length;
     advance = 120_000;
     wait.abort();
     await f.gateway.idle();
     const pending = result as {
+      instruction: string;
       ok: boolean;
+      pending: boolean;
       ref: string;
       status: string;
       summary: string;
     };
-    assert.deepEqual(Object.keys(pending), ['ok', 'summary', 'status', 'ref']);
+    assert.equal(pending.pending, true);
     assert.equal(pending.status, 'pending_approval');
+    assert.match(
+      pending.instruction,
+      /framework will report the outcome.*Do not mention/,
+    );
     assert.match(pending.ref, /^[a-f0-9]{6}$/);
     assert.match(pending.summary, /^已送出，等待管理員同意/);
     assert.doesNotMatch(pending.summary, /tg:\/\/|mentions|\b79\b|\b80\b/);
-    assert.equal(f.platform.sent.at(-1)?.text, '已送出，等待管理員同意');
+    assert.equal(f.platform.sent.length, sentBeforeTimeout);
     assert.equal(f.store.getApproval(approval.id)?.status, 'pending');
     await f.platform.emit(
       inbound('unlinked-schedule-approval', '允許一次', { chatId: 'owner' }),
     );
     assert.equal(f.store.listSchedules(chat).length, 0);
-    await f.platform.emit(
+    const decide = f.platform.emit(
       inbound('linked-schedule-approval', '一律允許', {
         chatId: 'owner',
         replyTo: prompt.messageId,
       }),
     );
+    await until(
+      t,
+      () => f.store.getApproval(approval.id)?.status === 'approved',
+    );
+    assert.equal(f.platform.reactions.length, 1);
+    assert.equal(f.platform.sent.length, sentBeforeTimeout);
+    pendingReaction.resolve();
+    await decide;
     await f.gateway.idle();
     assert.equal(f.platform.feedback.at(-1)?.decisionText, '✅ 已同意');
     assert.deepEqual(
@@ -1428,6 +1593,10 @@ test(
     assert.deepEqual(f.platform.feedback.at(-1)?.pre, pre);
     const schedule = f.store.listSchedules(chat)[0];
     assert.equal(schedule?.deliveryApprovedBy, 'owner');
+    assert.deepEqual(f.platform.reactions.at(-1), {
+      ...original,
+      status: 'approved',
+    });
     assert.equal(f.platform.sent.at(-1)?.text, `已建立排程 #${pending.ref}。`);
     assert.equal(f.platform.sent.at(-1)?.replyTo, 'schedule');
     assert.deepEqual(schedule?.mentions, ['79', '80']);

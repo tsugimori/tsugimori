@@ -23,6 +23,7 @@ import type {
 import type { Tracer } from '@tsugimori/trace';
 
 import { approvalCallbackId } from '@tsugimori/auth';
+import { pendingApprovalResult } from '@tsugimori/plugin-sdk';
 import { containsMention, scheduleReplyStyle } from '@tsugimori/scheduler';
 import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
@@ -62,10 +63,12 @@ type Work = {
   acceptsSupplements: boolean;
   adapter: PlatformAdapter;
   chat: ChatRef;
+  endForApproval: AbortController;
   execution?: Promise<void>;
   id: string;
   input: TaskInput;
   messageIds: Set<string>;
+  pendingApprovalFallback?: string;
   route?: { agentId: string; model: string };
   sessionValid: boolean;
   supplements: Supplements;
@@ -73,7 +76,9 @@ type Work = {
 };
 
 type ApprovalAnswer =
-  { approved: boolean; scheduleApplied?: boolean } | 'expired' | 'timeout';
+  | { approved: boolean; reaction?: Promise<void>; scheduleApplied?: boolean }
+  | 'expired'
+  | 'timeout';
 
 function chatKey({ adapterId, chatId }: ChatRef) {
   return JSON.stringify([adapterId, chatId]);
@@ -119,6 +124,7 @@ export class Tasks {
       input,
       id: randomUUID(),
       abort: new AbortController(),
+      endForApproval: new AbortController(),
       messageIds: new Set([messageId]),
       supplements: new Supplements(),
       acceptsSupplements: false,
@@ -347,15 +353,17 @@ export class Tasks {
       const result = await this.#run(work, selected, model);
       work.acceptsSupplements = false;
       abort.signal.throwIfAborted();
-      if (result.text) {
+      const fallback = work.pendingApprovalFallback;
+      const text = [result.text, fallback].filter(Boolean).join('\n\n');
+      if (text) {
         const scheduled = input.scheduled;
         const output = scheduled
           ? {
               ...scheduled.target,
               allowTextMentions: scheduled.allowTextMentions,
-              text: scheduled.delayNote + result.text,
+              text: scheduled.delayNote + text,
             }
-          : reply(message, result.text);
+          : reply(message, text);
         if (
           scheduled &&
           !scheduled.allowTextMentions &&
@@ -364,7 +372,11 @@ export class Tasks {
           throw new Error('Scheduled response contains an unapproved mention');
         await outbound.send(
           adapter,
-          { ...output, format: 'markdown' },
+          {
+            ...output,
+            format: result.text ? 'markdown' : undefined,
+            parseTextMentions: result.text ? undefined : false,
+          },
           {
             taskId: id,
             signal: abort.signal,
@@ -521,6 +533,7 @@ export class Tasks {
     const { store, auth, context, runtime, trace, hooks } = this.#deps;
     const { chat, input, id, abort, supplements, adapter } = work;
     const { signal } = abort;
+    const approvalPending = work.endForApproval.signal;
     const { agent, config } = selected;
     const task: ToolContext = {
       chat,
@@ -578,6 +591,11 @@ export class Tasks {
       await hooks.emit('agent.before', { task, agentId: agent.id, model });
       const pass = new AbortController();
       const passSignal = AbortSignal.any([signal, pass.signal]);
+      const toolSignal = AbortSignal.any([passSignal, approvalPending]);
+      const stopForApproval = () => {
+        // Let the tool result settle before interrupting the connector.
+        setImmediate(() => pass.abort());
+      };
       const requestApproval = (
         request: ApprovalRequest,
         continuation?: ApprovalContinuation,
@@ -585,7 +603,7 @@ export class Tasks {
         const approval = this.#requestApproval(
           work,
           request,
-          passSignal,
+          toolSignal,
           continuation,
         );
         pending.add(approval);
@@ -600,14 +618,24 @@ export class Tasks {
         {
           trace,
           hooks,
-          task: { ...task, signal: passSignal },
+          onResult(result) {
+            if (
+              approvalPending.aborted &&
+              result &&
+              typeof result === 'object' &&
+              'pending' in result &&
+              result.pending === true
+            )
+              stopForApproval();
+          },
+          task: { ...task, signal: toolSignal },
           requestApproval,
         },
         definitions,
       );
       try {
         const result = await runAgent(
-          { ...this.#deps, task },
+          { ...this.#deps, task, approvalPending },
           agent,
           {
             model,
@@ -618,21 +646,28 @@ export class Tasks {
             sandbox: this.#deps.scope(assembled.workdir),
             context: blocks,
             resumeSessionId: sessionId,
-            signal,
+            signal: passSignal,
             workdir: assembled.workdir,
             tools,
           },
           {
-            requestApproval: async (request) =>
-              (await requestApproval(request)) === true,
+            requestApproval: async (request) => {
+              const result = await requestApproval(request);
+              if (typeof result === 'object') stopForApproval();
+              return result === true;
+            },
             supplements: supplements.stream(passSignal),
           },
         );
-        if (result.text) answers.push(result.text);
+        if (result.text.trim()) answers.push(result.text);
         sessionId = result.sessionId ?? sessionId;
       } finally {
         pass.abort();
         await Promise.allSettled(pending);
+      }
+      if (approvalPending.aborted) {
+        sessionId = undefined;
+        break;
       }
       const next = supplements.takePending();
       if (!next.length) {
@@ -677,14 +712,18 @@ export class Tasks {
     if ('approvedBy' in approval) return true;
     const result = await approval.decision;
     if (result === 'timeout') {
-      const m = approvalMessages(this.#deps.runtime.config.locale);
       const owner = this.#deps.auth.owner(work.chat.adapterId);
       const display = owner
         ? this.#deps.store.getUserDisplay({ ...work.chat, userId: owner })
         : undefined;
-      return { pending: true as const, summary: m.pending(display || m.owner) };
+      return {
+        ...pendingApprovalResult,
+        summary: this.#markApprovalPending(work, display || undefined),
+      };
     }
-    return result !== 'expired' && result?.approved === true;
+    if (!result || result === 'expired') return false;
+    await result.reaction;
+    return result.approved;
   }
 
   async approveSchedule(
@@ -711,10 +750,28 @@ export class Tasks {
     );
     if (!approval || 'approvedBy' in approval) return approval;
     const result = await approval.decision;
-    if (result === 'timeout') return { pending: true };
+    if (result === 'timeout') {
+      this.#markApprovalPending(work, change.approverName);
+      return { pending: true };
+    }
     if (result === 'expired') throw new Error('Schedule approval expired');
+    await result?.reaction;
     if (result?.approved)
       return { scheduleApplied: result.scheduleApplied === true };
+  }
+
+  #markApprovalPending(work: Work, approver?: string) {
+    const m = approvalMessages(this.#deps.runtime.config.locale);
+    const name = approver?.replace(/\s+/gu, ' ').trim().replaceAll('@', '＠');
+    const summary = m.pending(
+      name || (approver === '' ? m.pendingRecipient : m.owner),
+    );
+    if (!work.endForApproval.signal.aborted) {
+      if (!work.adapter.setApprovalReaction || work.input.scheduled)
+        work.pendingApprovalFallback = summary;
+      work.endForApproval.abort();
+    }
+    return summary;
   }
 
   async #openApproval(
@@ -848,6 +905,16 @@ export class Tasks {
               }
               store.linkApproval(approval.id, messageId, format);
               linked = true;
+              if (
+                adapter.setApprovalReaction &&
+                !input.scheduled &&
+                store.getApproval(approval.id)?.status === 'pending'
+              )
+                void outbound.reactToApproval(
+                  adapter,
+                  { ...chat, id, sourceMessageId: input.message.messageId },
+                  'pending',
+                );
             },
           },
         );

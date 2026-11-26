@@ -80,6 +80,7 @@ type LinkedApproval = Exclude<
   { decision: 'expired' }
 > & {
   live: boolean;
+  reaction?: Promise<void>;
   record: ApprovalRecord;
 };
 
@@ -186,6 +187,7 @@ export class Gateway {
     });
     this.#hooks = new HookRunner({ registry, trace: this.#trace, log });
     this.#outbound = new Outbound({
+      log,
       store,
       trace: this.#trace,
       hooks: this.#hooks,
@@ -560,7 +562,7 @@ export class Gateway {
         display: event.userDisplay ?? null,
         username: event.userUsername,
       });
-      const result = this.#resolveApproval({
+      const result = this.#resolveApproval(adapter, {
         ...chat,
         callbackId: event.callbackId,
         messageId: event.messageId,
@@ -642,7 +644,7 @@ export class Gateway {
     if (this.#isStopping() || parsed === 'other-bot') return;
 
     if (event.replyTo) {
-      const result = this.#resolveApproval({
+      const result = this.#resolveApproval(adapter, {
         ...chat,
         userId: event.userId,
         replyTo: event.replyTo,
@@ -788,6 +790,7 @@ export class Gateway {
   }
 
   #resolveApproval(
+    adapter: PlatformAdapter,
     input: Parameters<Auth['resolveApproval']>[0],
   ): LinkedApproval | { decision: 'expired' } | undefined {
     const { store } = this.#deps;
@@ -808,8 +811,19 @@ export class Gateway {
     if (result.decision === 'expired') return result;
     const record = store.getApproval(result.id);
     if (!record) return;
-    const live = this.#tasks.resolveApproval(result.id, result);
-    return { ...result, live, record };
+    const source = store.getTask(record.taskId);
+    const reaction =
+      source &&
+      this.#outbound.reactToApproval(
+        adapter,
+        source,
+        result.approved ? 'approved' : 'denied',
+      );
+    const live = this.#tasks.resolveApproval(result.id, {
+      ...result,
+      reaction,
+    });
+    return { ...result, live, reaction, record };
   }
 
   async #expireApprovals(now: number, adapterIds: readonly string[]) {
@@ -836,6 +850,7 @@ export class Gateway {
             });
           const source = store.getTask(taskId);
           if (!source) return;
+          await this.#outbound.reactToApproval(adapter, source, 'expired');
           const m = approvalMessages(this.#runtime.config.locale).outcomes;
           const continuation = record.continuation;
           const text =
@@ -858,6 +873,7 @@ export class Gateway {
 
   async #approvalOutcome(adapter: PlatformAdapter, result: LinkedApproval) {
     if (result.live) return;
+    await result.reaction;
     const { store, log } = this.#deps;
     const { record, approved, scheduleApplied } = result;
     const source = store.getTask(record.taskId);
