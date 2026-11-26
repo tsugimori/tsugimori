@@ -460,3 +460,140 @@ test('prunes the oldest task transcript first and preserves outcomes and tool me
   );
   assert.equal(store.getTaskExecution('task-2')?.outcome.kind, 'delivered');
 });
+
+test('lists task summaries with indexed filters and stable pagination on timestamp ties', (t) => {
+  const store = new SqliteStore(':memory:');
+  t.after(() => store.close());
+  const group = { adapterId: 'tg:main', chatId: 'group' };
+  const dm = { adapterId: 'line:main', chatId: 'direct' };
+  const platforms = new Map([
+    ['tg:main', 'telegram'],
+    ['line:main', 'line'],
+  ]);
+  const source = store.recordInbound(
+    { ...group, title: 'Example chat', kind: 'group' },
+    { adapterId: group.adapterId, userId: 'user', display: 'Participant' },
+    {
+      ...group,
+      messageId: 'first',
+      direction: 'inbound',
+      userId: 'user',
+      raw: { hidden: 'raw fixture' },
+      replyTo: null,
+      threadId: null,
+      text: 'A literal 100%_ check ' + '界'.repeat(300) + ' tail marker',
+    },
+  );
+  assert.ok(source);
+  for (const [id, ref, createdAt, status, agentId] of [
+    ['new', group, 3000, 'running', 'a'],
+    ['tie-z', group, 2000, 'failed', 'b'],
+    ['tie-a', dm, 2000, 'sent', 'a'],
+    ['old', group, 1000, 'cancelled', null],
+  ] as const) {
+    store.createTask({
+      ...ref,
+      id,
+      createdAt,
+      status,
+      agentId,
+      sourceMessageId: 'first',
+      startedAt: createdAt + 10,
+      finishedAt: status === 'running' ? null : createdAt + 40,
+      model: agentId === null ? null : 'model',
+    });
+  }
+  store.saveTrigger(
+    {
+      ...group,
+      at: 1990,
+      messageId: 'first',
+      taskId: 'tie-z',
+      triggered: true,
+      reason: 'mention',
+    },
+    source.seq,
+  );
+  const call = store.createToolCall({
+    taskId: 'tie-z',
+    approvalId: null,
+    callId: null,
+    args: null,
+    result: null,
+    name: 'fixture',
+    startedAt: 2015,
+    endedAt: 2018,
+    status: 'error',
+  });
+  assert.ok(call);
+  const metric = (
+    name: string,
+    startedAt: number,
+    attrs: Record<string, string | number>,
+  ) => ({
+    name,
+    startedAt,
+    endedAt: startedAt,
+    durationMs: 0,
+    status: 'ok' as const,
+    attrs: { ...attrs, taskId: 'tie-z' },
+  });
+  store.writeTraceSpans([
+    metric('agent.usage', 2012, { inputTokens: 3, outputTokens: 4 }),
+    metric('agent.usage', 2013, { inputTokens: 7 }),
+    metric('agent.usage', 2014, {
+      inputTokens: 1000,
+      outputTokens: 900,
+      purpose: 'summary',
+    }),
+    metric('tool.run', 2015, { name: 'fixture', toolCallSeq: call }),
+    metric('agent.tool', 2016, { name: 'legacy' }),
+    metric('task.failed', 2040, { error: 'fixture error' }),
+  ]);
+
+  const ids = (filter: Parameters<SqliteStore['adminTasks']>[0]) =>
+    store.adminTasks(filter, platforms).map(({ id }) => id);
+  const first = store.adminTasks({ limit: 2 }, platforms);
+  assert.deepEqual(
+    first.map(({ id }) => id),
+    ['new', 'tie-z', 'tie-a'],
+  );
+  const cursor = { createdAt: first[1]!.createdAt, id: first[1]!.id };
+  assert.deepEqual(ids({ limit: 2, cursor }), ['tie-a', 'old']);
+  assert.deepEqual(
+    ids({
+      limit: 10,
+      status: 'failed',
+      agent: 'b',
+      chat: group,
+      platform: 'telegram',
+      since: 2000,
+      before: 3000,
+      q: '100%_',
+    }),
+    ['tie-z'],
+  );
+  assert.deepEqual(ids({ limit: 10, platform: 'line' }), ['tie-a']);
+  assert.deepEqual(ids({ limit: 10, platform: 'tg:main' }), []);
+  assert.deepEqual(ids({ limit: 10, platform: 'missing' }), []);
+  assert.deepEqual(ids({ limit: 10, q: '100%X' }), []);
+  assert.deepEqual(ids({ limit: 10, q: 'TAIL MARKER' }), [
+    'new',
+    'tie-z',
+    'old',
+  ]);
+  const failed = first[1]!;
+  assert.equal(failed.chatKey, JSON.stringify([group.adapterId, group.chatId]));
+  assert.equal(failed.chatTitle, 'Example chat');
+  assert.equal(failed.triggerReason, 'mention');
+  assert.ok(failed.triggerText?.endsWith('…'));
+  assert.ok(!failed.triggerText?.includes('tail marker'));
+  assert.equal(failed.durationMs, 30);
+  assert.equal(failed.inputTokens, 7);
+  assert.equal(failed.outputTokens, 4);
+  assert.equal(failed.toolCount, 2);
+  assert.equal(failed.error, 'fixture error');
+  assert.equal(first[0]?.durationMs, null);
+  assert.equal(first[2]?.triggerText, null);
+  assert.equal(first[2]?.triggerReason, null);
+});

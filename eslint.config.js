@@ -1,15 +1,9 @@
 import perfectionist from 'eslint-plugin-perfectionist';
-import svelte from 'eslint-plugin-svelte';
 import tseslint from 'typescript-eslint';
 
 export default [
-  { ignores: ['**/dist/**', '**/drizzle/**'] },
+  { ignores: ['**/dist/**', '**/drizzle/**', '**/.nuxt/**', '**/.output/**'] },
   ...tseslint.configs.recommended,
-  ...svelte.configs.recommended,
-  {
-    files: ['**/*.svelte', '**/*.svelte.ts'],
-    languageOptions: { parserOptions: { parser: tseslint.parser } },
-  },
   {
     rules: {
       'perfectionist/sort-imports': 'error',
@@ -21,7 +15,7 @@ export default [
     plugins: { perfectionist },
   },
   {
-    files: ['plugins/**/*.{js,ts,svelte}'],
+    files: ['plugins/**/*.{js,ts}'],
     rules: {
       'no-restricted-imports': [
         'error',

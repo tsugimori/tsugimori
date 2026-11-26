@@ -16,15 +16,27 @@
     "@tsugimori/plugin-sdk": "workspace:*"
   },
   "devDependencies": {
-    "svelte": "5.59.1",
-    "vite": "8.3.8",
-    "@sveltejs/vite-plugin-svelte": "7.3.2",
-    "svelte-check": "4.7.8"
+    "@fontsource-variable/noto-sans": "5.3.0",
+    "@fontsource-variable/noto-sans-tc": "5.3.1",
+    "@lucide/vue": "1.60.0",
+    "@primeuix/themes": "2.0.3",
+    "@primevue/core": "4.5.5",
+    "@primevue/metadata": "4.5.5",
+    "@primevue/nuxt-module": "4.5.5",
+    "@tailwindcss/vite": "4.3.3",
+    "marked": "18.3.0",
+    "nuxt": "4.5.2",
+    "primevue": "4.5.5",
+    "tailwindcss": "4.3.3",
+    "tailwindcss-primeui": "0.6.1",
+    "vue": "3.5.43",
+    "vue-router": "5.3.1",
+    "vue-tsc": "3.3.11"
   },
   "scripts": {
-    "dev": "vite",
-    "build": "vite build",
-    "typecheck": "svelte-check --tsconfig ./ui/tsconfig.json",
+    "dev": "node ui/scripts/styles/cli.ts && nuxt dev ui --dotenv /dev/null",
+    "build": "node ui/scripts/styles/cli.ts && nuxt generate ui --dotenv /dev/null && node ui/scripts/package.mjs",
+    "typecheck": "node ui/scripts/styles/cli.ts && nuxt typecheck ui --dotenv /dev/null",
     "preview": "node scripts/preview.mjs"
   }
 }

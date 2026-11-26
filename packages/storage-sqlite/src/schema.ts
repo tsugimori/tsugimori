@@ -186,6 +186,16 @@ export const tasks = sqliteTable(
     ),
     index('tasks_agent_created').on(table.agentId, table.createdAt),
     index('tasks_created').on(table.createdAt),
+    index('tasks_status_created_id').on(
+      table.status,
+      table.createdAt,
+      table.id,
+    ),
+    index('tasks_adapter_created_id').on(
+      table.adapterId,
+      table.createdAt,
+      table.id,
+    ),
     index('tasks_failed_at')
       .on(sql`coalesce(${table.finishedAt}, ${table.createdAt})`)
       .where(sql`${table.status} in ('failed', 'delivery-unknown')`),

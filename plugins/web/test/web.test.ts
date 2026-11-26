@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
+import { createFixtureReader } from '../scripts/fixtures.ts';
 import { AdminServer, createAccessVerifier } from '../src/index.ts';
 
 test('Access JWTs require a valid key, audience, expiry, and owner identity', async () => {
@@ -213,6 +214,7 @@ async function fixture() {
           }
         : undefined,
     chats: () => [chat],
+    tasks: createFixtureReader().reader.tasks,
     trace: () => undefined,
     toolCall: (task, seq) =>
       task === 'task' && seq === tool.seq ? tool : undefined,
@@ -255,24 +257,40 @@ async function fixture() {
 test('gates HTML, assets, API and SSE and serves only manifest assets', async (t) => {
   const f = await fixture();
   t.after(f.stop);
-  await mkdir(join(f.directory, '.vite'));
-  await mkdir(join(f.directory, 'assets'));
+  await mkdir(join(f.directory, '_nuxt'));
+  await mkdir(join(f.directory, 'tasks'));
   await writeFile(
     join(f.directory, 'index.html'),
     '<!doctype html><title>Admin SPA</title>',
   );
+  await writeFile(join(f.directory, '200.html'), '<title>Admin SPA</title>');
   await writeFile(
-    join(f.directory, '.vite', 'manifest.json'),
-    JSON.stringify({
-      'index.html': { file: 'assets/app-123.js', css: ['assets/app-456.css'] },
-    }),
+    join(f.directory, 'tasks', 'index.html'),
+    '<title>Tasks</title>',
   );
-  await writeFile(join(f.directory, 'assets/app-123.js'), 'app()');
-  await writeFile(join(f.directory, 'assets/private.js'), 'not in manifest');
+  await writeFile(
+    join(f.directory, 'files.json'),
+    JSON.stringify([
+      'index.html',
+      '200.html',
+      'tasks/index.html',
+      '_nuxt/abcABC12.js',
+      '_nuxt/ui.abcABC12.woff2',
+      '_nuxt/builds/latest.json',
+    ]),
+  );
+  await mkdir(join(f.directory, '_nuxt', 'builds'));
+  await writeFile(join(f.directory, '_nuxt', 'abcABC12.js'), 'app()');
+  await writeFile(join(f.directory, '_nuxt', 'private.js'), 'not in manifest');
+  await writeFile(
+    join(f.directory, '_nuxt', 'ui.abcABC12.woff2'),
+    'font fixture',
+  );
+  await writeFile(join(f.directory, '_nuxt', 'builds', 'latest.json'), '{}');
 
   for (const route of [
     '/',
-    '/assets/app-123.js',
+    '/_nuxt/abcABC12.js',
     '/api/workspace',
     '/api/events',
   ]) {
@@ -291,12 +309,7 @@ test('gates HTML, assets, API and SSE and serves only manifest assets', async (t
   });
   assert.equal(viewer.status, 200);
   await viewer.text();
-  for (const route of [
-    '/',
-    '/agents',
-    '/chat/telegram%3Amain/room/66',
-    '/unknown',
-  ]) {
+  for (const route of ['/', '/chat/telegram%3Amain/room/66', '/unknown']) {
     const response = await fetch(f.url + route, { headers });
     assert.equal(response.status, 200);
     assert.match(await response.text(), /Admin SPA/);
@@ -305,19 +318,30 @@ test('gates HTML, assets, API and SSE and serves only manifest assets', async (t
       "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; font-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
     );
   }
-  const asset = await fetch(f.url + '/assets/app-123.js', { headers });
+  assert.match(
+    await (await fetch(f.url + '/tasks', { headers })).text(),
+    /Tasks/,
+  );
+  const font = await fetch(f.url + '/_nuxt/ui.abcABC12.woff2', { headers });
+  assert.equal(font.headers.get('content-type'), 'font/woff2');
+  const metadata = await fetch(f.url + '/_nuxt/builds/latest.json', {
+    headers,
+  });
+  assert.match(metadata.headers.get('content-type') ?? '', /application\/json/);
+  assert.equal(metadata.headers.get('cache-control'), 'no-store');
+  const asset = await fetch(f.url + '/_nuxt/abcABC12.js', { headers });
   assert.equal(await asset.text(), 'app()');
   assert.equal(
     asset.headers.get('cache-control'),
     'public, max-age=31536000, immutable',
   );
   for (const path of [
-    '/assets/missing.js',
-    '/assets/private.js',
-    '/assets/app-456.css',
-    '/assets/../index.html',
-    '/assets/%2e%2e/index.html',
-    '/assets/..%2findex.html',
+    '/_nuxt/missing.js',
+    '/_nuxt/private.js',
+    '/_nuxt/app-456.css',
+    '/_nuxt/../index.html',
+    '/_nuxt/%2e%2e/index.html',
+    '/_nuxt/..%2findex.html',
   ]) {
     const status = await new Promise<number | undefined>((resolve, reject) => {
       get({ host: '127.0.0.1', port: f.port, path, headers }, (response) => {
@@ -381,7 +405,12 @@ test('offers the APIs before the UI is built and redirects bookmarked routes', a
       '/chat?adapter=telegram%3Amain&id=room&before=12',
       '/chat/telegram%3Amain/room?before=12',
     ],
-    ['/trace?task=task', '/trace/task'],
+    ['/trace?task=task', '/task/task'],
+    ['/trace/t%2F1?before=12', '/task/t%2F1?before=12'],
+    ['/agents', '/#agents'],
+    ['/chats', '/chat'],
+    ['/approvals', '/ops'],
+    ['/schedules', '/ops'],
   ]) {
     const response = await fetch(f.url + previous, {
       headers,
@@ -398,6 +427,10 @@ test('chat history works through authorized links without JavaScript', async (t)
   await writeFile(
     join(f.directory, 'index.html'),
     '<!doctype html><html><body></body></html>',
+  );
+  await writeFile(
+    join(f.directory, 'files.json'),
+    JSON.stringify(['index.html']),
   );
   const url = f.url + '/chat/telegram%3Amain/room/66';
   const app = await fetch(url, { headers });
@@ -540,3 +573,68 @@ test(
     await Promise.all(streams.slice(1).map((stream) => stream.end()));
   },
 );
+
+test('task list authenticates viewers, validates filters, and returns opaque cursors', async (t) => {
+  const f = await fixture();
+  t.after(f.stop);
+  const url = f.url + '/api/tasks';
+  assert.equal((await fetch(url)).status, 403);
+  const viewer = { 'Cf-Access-Jwt-Assertion': 'viewer' };
+  const first = await fetch(url + '?limit=1', { headers: viewer });
+  assert.equal(first.status, 200);
+  assert.equal(first.headers.get('cache-control'), 'no-store');
+  const page = await first.json();
+  assert.equal(page.tasks.length, 1);
+  assert.match(page.nextCursor, /^[\w-]+$/);
+  const next = await fetch(
+    url + '?' + new URLSearchParams({ limit: '1', cursor: page.nextCursor }),
+    { headers },
+  );
+  assert.equal(next.status, 200);
+  const nextPage = await next.json();
+  assert.equal(nextPage.tasks.length, 1);
+  assert.notEqual(nextPage.tasks[0].id, page.tasks[0].id);
+  assert.ok(nextPage.tasks[0].createdAt <= page.tasks[0].createdAt);
+
+  const filtered = await fetch(
+    url +
+      '?' +
+      new URLSearchParams({
+        status: 'completed',
+        platform: 'telegram',
+        chat: JSON.stringify(['telegram', '-1000000000123']),
+        agent: 'claude-sdk',
+        since: new Date(page.tasks[0].createdAt - 10 * 60_000).toISOString(),
+        before: new Date(page.tasks[0].createdAt).toISOString(),
+        q: '健康檢查',
+      }),
+    { headers },
+  );
+  assert.equal(filtered.status, 200);
+  const matches = await filtered.json();
+  assert.deepEqual(
+    matches.tasks.map((row: { id: string }) => row.id),
+    ['fixture-completed'],
+  );
+  assert.equal(matches.nextCursor, null);
+
+  for (const query of [
+    'limit=101',
+    'limit=0',
+    'limit=1.5',
+    'status=bad',
+    'chat=room',
+    'cursor=invalid',
+    'before=yesterday',
+    'since=2026-02-30',
+    'since=2026-11-28&before=2026-11-27',
+  ]) {
+    const result = await fetch(url + '?' + query, { headers });
+    assert.equal(result.status, 400, query);
+    assert.deepEqual(await result.json(), { error: 'invalidTaskFilter' });
+  }
+  assert.equal(
+    (await fetch(url, { method: 'POST', headers: viewer })).status,
+    405,
+  );
+});

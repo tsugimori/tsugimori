@@ -444,6 +444,11 @@ export function adminReader({
         grants: store.listGrants(),
       };
     },
+    tasks: (filter) =>
+      store.adminTasks(
+        filter,
+        new Map(config().platforms.map(({ id, kind }) => [id, kind])),
+      ),
     toolCall: (taskId, seq) => {
       const record = store.adminToolCall(taskId, seq);
       if (!record) return;

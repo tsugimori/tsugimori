@@ -13,6 +13,7 @@ import { createAccessVerifier } from './access.ts';
 import { Assets } from './assets.ts';
 import { addHistoryLink, chatHistory } from './chat-history.ts';
 import { AdminEvents } from './events.ts';
+import { taskFilter, taskPage } from './tasks.ts';
 
 export { createAccessVerifier };
 
@@ -174,23 +175,20 @@ export class AdminServer {
     // Inspect the path before URL normalizes dot segments and backslashes.
     if (
       /(?:^|\/)(?:\.|%2e){1,2}(?:\/|$)|%(?:2f|5c)|\\/i.test(path) &&
-      !/^\/(?:chat|trace)\//.test(path)
+      !/^\/(?:chat|trace|task)\//.test(path)
     ) {
       respond(response, 404, 'Not found.');
       return;
     }
     const url = new URL(raw, 'http://127.0.0.1');
     if (api) return await this.#api(url, request, response);
-    if (path === '/assets' || path.startsWith('/assets/')) {
+    if (
+      /^\/(?:_nuxt|assets)(?:\/|$)|\.[a-z0-9]+$/i.test(path) &&
+      !/^\/(?:chat|trace|task)\//.test(path)
+    ) {
       const asset = await this.#assets.get(path.slice(1));
       if (!asset) return respond(response, 404, 'Not found.');
-      return respond(
-        response,
-        200,
-        asset.body,
-        asset.type,
-        'public, max-age=31536000, immutable',
-      );
+      return respond(response, 200, asset.body, asset.type, asset.cache);
     }
     const query = url.searchParams;
     const adapter = query.get('adapter');
@@ -208,13 +206,21 @@ export class AdminServer {
       const before = positiveInt(query.get('before'));
       if (before !== undefined) redirect += `?before=${before}`;
     }
-    if (path === '/trace' && task)
-      redirect = '/trace/' + encodeURIComponent(task);
+    if ((path === '/trace' || path === '/task') && task)
+      redirect = '/task/' + encodeURIComponent(task);
+    if (path.startsWith('/trace/')) {
+      redirect = '/task/' + path.slice('/trace/'.length) + url.search;
+    }
+    if (path === '/agents') redirect = '/#agents';
+    if (path === '/approvals') redirect = '/ops';
+    if (path === '/schedules') redirect = '/ops';
+    if (path === '/chats') redirect = '/chat' + url.search;
     if (redirect) {
       response.setHeader('Location', redirect);
       return respond(response, 302, '');
     }
-    const index = await this.#assets.index();
+    const page = await this.#assets.page(path);
+    const index = page?.body;
     if (index && path.startsWith('/chat/')) {
       const cursor = query.get('before');
       const before = positiveInt(cursor);
@@ -298,6 +304,11 @@ export class AdminServer {
         const data = reader.chat({ adapterId, chatId }, before);
         if (data) return json(data);
         break;
+      }
+      case '/api/tasks': {
+        const filter = taskFilter(query);
+        if (!filter) return apiError(response, 400, 'invalidTaskFilter');
+        return json(taskPage(reader.tasks(filter), filter.limit));
       }
       case '/api/task': {
         const id = query.get('id');

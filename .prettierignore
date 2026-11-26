@@ -2,3 +2,6 @@ dist/
 patches/
 packages/storage-sqlite/drizzle/
 pnpm-lock.yaml
+plugins/web/ui/.nuxt/
+plugins/web/ui/.output/
+plugins/web/ui/app/assets/css/generated.css

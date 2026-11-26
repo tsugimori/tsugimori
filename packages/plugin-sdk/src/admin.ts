@@ -348,6 +348,45 @@ export interface AdminSchedules {
   })[];
 }
 
+/** A task page is ordered by creation time, then ID, both descending. */
+export interface AdminTaskFilter {
+  agent?: string;
+  before?: number;
+  chat?: ChatRef;
+  cursor?: { createdAt: number; id: string };
+  limit: number;
+  platform?: string;
+  q?: string;
+  since?: number;
+  status?: string;
+}
+
+export interface AdminTaskSummary extends ChatRef {
+  agentId: string | null;
+  chatKey: string;
+  chatTitle: string;
+  createdAt: number;
+  durationMs: number | null;
+  error: string | null;
+  finishedAt: number | null;
+  id: string;
+  inputTokens: number | null;
+  model: string | null;
+  outputTokens: number | null;
+  platform: string;
+  silent: boolean;
+  startedAt: number | null;
+  status: string;
+  toolCount: number;
+  triggerReason: TriggerReason | null;
+  triggerText: string | null;
+}
+
+export interface AdminTaskPage {
+  nextCursor: string | null;
+  tasks: readonly AdminTaskSummary[];
+}
+
 export interface AdminReader {
   agents(now: number): readonly AdminAgent[];
   approvals(recentLimit?: number): AdminApprovals;
@@ -359,6 +398,7 @@ export interface AdminReader {
   schedules?(): AdminSchedules;
   subscribe(listener: (event: AdminEvent) => void): () => void;
   task(taskId: string): Promise<AdminTaskRecord | undefined>;
+  tasks(filter: AdminTaskFilter): readonly AdminTaskSummary[];
   toolCall(taskId: string, seq: number): AdminToolCall | undefined;
   trace(taskId: string): AdminTrace | undefined;
   workspace(): AdminWorkspace;

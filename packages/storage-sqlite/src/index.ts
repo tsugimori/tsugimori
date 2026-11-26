@@ -1,6 +1,8 @@
 import type {
   AdapterCursor,
   AdminEvent,
+  AdminTaskFilter,
+  AdminTaskSummary,
   ChatRef,
   ContextBlock,
   PreviewCloseReason,
@@ -1642,6 +1644,147 @@ export class SqliteStore implements Store {
         .sync(),
       pendingApprovals: this.countPendingApprovals(now),
     };
+  }
+
+  adminTasks(
+    {
+      agent,
+      before,
+      chat,
+      cursor,
+      limit,
+      platform,
+      q,
+      since,
+      status,
+    }: AdminTaskFilter,
+    platforms: ReadonlyMap<string, string>,
+  ): AdminTaskSummary[] {
+    const adapterIds =
+      platform === undefined
+        ? []
+        : [
+            ...Array.from(platforms)
+              .filter(([, kind]) => kind === platform)
+              .map(([id]) => id),
+            ...(!platforms.has(platform) ? [platform] : []),
+          ];
+    const traceTask = sql`json_extract(${traceSpans.attrs}, '$.taskId') = ${tasks.id}`;
+    const usage = (path: string) =>
+      sql<number | null>`(
+      select json_extract(${traceSpans.attrs}, ${path}) from ${traceSpans}
+      where ${traceTask} and ${traceSpans.name} = 'agent.usage'
+        and json_extract(${traceSpans.attrs}, '$.purpose') is not 'summary'
+        and json_type(${traceSpans.attrs}, ${path}) in ('integer', 'real')
+      order by ${traceSpans.startedAt} desc, ${traceSpans.id} desc limit 1
+    )`.mapWith(Number);
+    const rows = this.#db
+      .select({
+        id: tasks.id,
+        adapterId: tasks.adapterId,
+        chatId: tasks.chatId,
+        chatTitle: chats.title,
+        status: tasks.status,
+        createdAt: tasks.createdAt,
+        startedAt: tasks.startedAt,
+        finishedAt: tasks.finishedAt,
+        agentId: tasks.agentId,
+        model: tasks.model,
+        triggerText: sql<string | null>`substr(${messages.text}, 1, 241)`,
+        triggerReason: sql<AdminTaskSummary['triggerReason']>`coalesce(
+          (select ${triggerDecisions.reason} from ${triggerDecisions}
+            where ${triggerDecisions.taskId} = ${tasks.id}
+            order by ${triggerDecisions.id} limit 1),
+          (select ${triggerDecisions.reason} from ${triggerDecisions}
+            where ${triggerDecisions.messageSeq} = ${messages.seq}
+              and ${triggerDecisions.reason} <> 'duplicate'
+            order by ${triggerDecisions.id} desc limit 1)
+        )`,
+        toolCount: sql<number>`(
+          select count(*) from ${toolCalls} where ${toolCalls.taskId} = ${tasks.id}
+        ) + (
+          select count(*) from ${traceSpans} where ${traceTask}
+            and ${traceSpans.name} in ('agent.tool', 'tool.run')
+            and json_type(${traceSpans.attrs}, '$.name') = 'text'
+            and not exists (
+              select 1 from ${toolCalls} where ${toolCalls.taskId} = ${tasks.id}
+                and ${toolCalls.seq} = json_extract(${traceSpans.attrs}, '$.toolCallSeq')
+            )
+        )`.mapWith(Number),
+        inputTokens: usage('$.inputTokens'),
+        outputTokens: usage('$.outputTokens'),
+        error: sql<string | null>`(
+          select substr(json_extract(${traceSpans.attrs}, '$.error'), 1, 241)
+          from ${traceSpans} where ${traceTask} and ${traceSpans.name} = 'task.failed'
+          and json_type(${traceSpans.attrs}, '$.error') = 'text'
+          order by ${traceSpans.startedAt} desc, ${traceSpans.id} desc limit 1
+        )`,
+        silent: sql<number>`exists (
+          select 1 from ${traceSpans} where ${traceTask}
+            and ${traceSpans.name} = 'outbound.silent'
+            and json_extract(${traceSpans.attrs}, '$.reply') = 'silent'
+            and not coalesce(json_extract(${traceSpans.attrs}, '$.fallback'), 0)
+        )`,
+      })
+      .from(tasks)
+      .leftJoin(
+        chats,
+        and(
+          eq(chats.adapterId, tasks.adapterId),
+          eq(chats.chatId, tasks.chatId),
+        ),
+      )
+      .leftJoin(
+        messages,
+        and(
+          eq(messages.adapterId, tasks.adapterId),
+          eq(messages.chatId, tasks.chatId),
+          eq(messages.direction, 'inbound'),
+          eq(messages.messageId, tasks.sourceMessageId),
+          eq(
+            messages.migratedFromChatId,
+            sql`coalesce(${tasks.sourceChatId}, '')`,
+          ),
+        ),
+      )
+      .where(
+        and(
+          chat ? chatScope(tasks, chat) : undefined,
+          agent ? eq(tasks.agentId, agent) : undefined,
+          platform === undefined
+            ? undefined
+            : inArray(tasks.adapterId, adapterIds),
+          status ? eq(tasks.status, status as TaskRecord['status']) : undefined,
+          since === undefined ? undefined : gte(tasks.createdAt, since),
+          before === undefined ? undefined : lt(tasks.createdAt, before),
+          cursor &&
+            sql`(${tasks.createdAt}, ${tasks.id}) < (${cursor.createdAt}, ${cursor.id})`,
+          q ? sql`instr(lower(${messages.text}), lower(${q})) > 0` : undefined,
+        ),
+      )
+      .orderBy(desc(tasks.createdAt), desc(tasks.id))
+      .limit(limit + 1)
+      .all();
+    function excerpt(text: string | null) {
+      if (text === null) return null;
+      const flat = text.replace(/\s+/g, ' ').trim();
+      return [...text].length > 240
+        ? [...flat].slice(0, 240).join('').trimEnd() + '…'
+        : flat;
+    }
+    return rows.map((row) => ({
+      ...row,
+      chatKey: JSON.stringify([row.adapterId, row.chatId]),
+      chatTitle: row.chatTitle || row.chatId,
+      platform: platforms.get(row.adapterId) ?? row.adapterId,
+      durationMs:
+        row.startedAt === null || row.finishedAt === null
+          ? null
+          : Math.max(0, row.finishedAt - row.startedAt),
+      error: excerpt(row.error),
+      triggerText: excerpt(row.triggerText),
+      silent: Boolean(row.silent),
+    }));
   }
 
   adminChatTasks(

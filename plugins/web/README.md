@@ -40,20 +40,32 @@ There is no web-specific `doctor` probe or dedicated `/status` row for the liste
 
 ## Build and development
 
-Run `corepack pnpm --filter @tsugimori/web build` to emit the app into `dist/ui`. The workspace build also builds the console. The gateway serves JSON when the UI build is absent.
+Run `corepack pnpm --filter @tsugimori/web build` to generate the static Nuxt console in `dist/ui`. The workspace check includes Nuxt type checking, generation, and a CSP check on the served files. The gateway serves JSON when the UI build is absent.
 
-For development, run the gateway on loopback with `allowLocalWithoutAccess: true`, then run `corepack pnpm --filter @tsugimori/web dev`. Vite proxies `/api`, including the live event stream, to `http://127.0.0.1:8787`. Set `TSUGIMORI_UI_GATEWAY` to use a different loopback gateway address.
+For development, run the gateway on loopback with `allowLocalWithoutAccess: true`, then run `corepack pnpm --filter @tsugimori/web dev`. The Nuxt dev server proxies `/api`, including the live event stream, to `http://127.0.0.1:8787`. Set `TSUGIMORI_UI_GATEWAY` to use a different loopback address. After building, `corepack pnpm --filter @tsugimori/web preview` serves fixtures through the web plugin on `127.0.0.1:8788`. Set `TSUGIMORI_PREVIEW_PORT` to change the port or add `--empty` to exercise empty states.
 
 ## Views
 
-The console fetches the current state and then updates it over one Server-Sent Events connection. The header shows the connection state and the last event time. Reconnecting replays recent changes or refreshes the current page when the replay window has passed.
+- **Overview** (`/`) shows agent state, sign-in, model and activity, recent tasks, webhook status, record usage and chat summaries.
+- **Tasks** (`/tasks`) filters tasks by status, agent, chat, platform, date and trigger text. **Task details** (`/task/:taskId`) shows the timing, context, transcript, tool calls, final output and trace waterfall.
+- **Chat** (`/chat/:adapter/:chatId[/:topic]`) opens the latest message window and can load older messages. The task timeline expands active tasks and refreshes them over Server-Sent Events. The Tasks tab and the details panel show related tasks, routing, summaries, approvals and schedules. Plain chat history also works with JavaScript disabled.
+- **Approvals and schedules** (`/ops`) shows pending and recently handled requests, grants and schedules. [Decisions go through the chat platform](../../README.md#approvals-and-schedules).
 
-- **Overview** (`/`) shows today's task and failure totals, pending approvals, and chat cards with message previews, tool activity, routing, and summary progress. **Chats** (`/chats`) opens the chat list directly.
-- **Agents** (`/agents`) shows agent state, model, sign-in, chat and task counts, and links to recent tasks.
-- **Chat** (`/chat/:adapter/:chatId[/:topic]`) opens at the latest message, loads older messages as you scroll up, and follows live updates when you are near the bottom. Use the searchable chat list to switch chats. The details panel shows routing, summary coverage, approvals, and schedules. Expand a task to inspect its model and tool timing, then expand a tool call to load the full arguments and result. With JavaScript disabled, use the chat history link to browse messages and load earlier pages.
-- **Trace** (`/trace/:taskId`) shows elapsed time by span, expandable attributes, and any recorded tool details.
-- **Approvals** lists pending requests, the 50 latest handled requests, and grants. [Decisions go through the chat platform](../../README.md#approvals-and-schedules).
-- **Schedules** lists scheduled work, its status, and its next run.
+The header offers System, Light and Dark. System follows the device preference. Existing bookmarks for agents, traces, chat queries, approvals and schedules redirect to the corresponding views.
+
+## Task list API
+
+`GET /api/tasks` returns `{ tasks, nextCursor }` to authorized owners and viewers. Results are ordered by creation time, newest first, with task ID as the tie-breaker. Use the returned `nextCursor` with the same filters to load the next page. The default limit is 25, and the maximum is 100.
+
+| Parameter         | Meaning                                                                                                  |
+| ----------------- | -------------------------------------------------------------------------------------------------------- |
+| `status`          | Stored task status, such as `running`, `sent`, or `failed`.                                              |
+| `agent`           | Agent instance ID.                                                                                       |
+| `chat`            | JSON array of adapter instance ID and chat ID, matching each row’s `chatKey`.                            |
+| `platform`        | Platform kind, such as `telegram` or `line`.                                                             |
+| `since`, `before` | Inclusive start and exclusive end by task creation time. Use ISO timestamps with an offset or UTC dates. |
+| `q`               | Literal substring of the source message. SQLite folds ASCII case.                                        |
+| `cursor`, `limit` | Opaque continuation cursor and page size.                                                                |
 
 ## Tool details
 

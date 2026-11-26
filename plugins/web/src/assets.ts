@@ -1,31 +1,42 @@
 import { readFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { extname, join } from 'node:path';
 
-const assetPath = /^assets\/[A-Za-z0-9_.-]+$/;
+const filePath = /^(?:[\w.-]+\/)*[\w.-]+$/;
 const media: Record<string, string> = {
-  css: 'text/css; charset=utf-8',
-  js: 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.svg': 'image/svg+xml',
+  '.woff': 'font/woff',
+  '.woff2': 'font/woff2',
 };
-
-interface Entry {
-  assets?: string[];
-  css?: string[];
-  file: string;
-}
+const hashed =
+  /^(?:_nuxt\/(?:[\w-]+[.-])?[\w-]{8,}\.(?:css|js|woff2?)|_nuxt\/builds\/meta\/[\w-]+\.json)$/;
 
 export class Assets {
   readonly #directory: string;
+  #files?: ReadonlySet<string>;
 
   constructor(directory: string) {
     this.#directory = directory;
   }
 
-  index() {
-    return this.#read('index.html');
+  async page(path: string) {
+    const name = path.replace(/^\/|\/$/g, '');
+    const route = name ? name + '/index.html' : 'index.html';
+    return (
+      (await this.get(route)) ??
+      (await this.get('200.html')) ??
+      (await this.get('index.html'))
+    );
   }
 
   async get(path: string) {
-    if (!assetPath.test(path) || path.endsWith('/..') || path.endsWith('/.'))
+    if (
+      !filePath.test(path) ||
+      path.split('/').some((piece) => piece.startsWith('.'))
+    )
       return;
     const allowed = await this.#load();
     if (!allowed?.has(path)) return;
@@ -33,25 +44,19 @@ export class Assets {
     if (!body) return;
     return {
       body,
-      type:
-        media[path.slice(path.lastIndexOf('.') + 1)] ??
-        'application/octet-stream',
+      cache: hashed.test(path)
+        ? 'public, max-age=31536000, immutable'
+        : 'no-store',
+      type: media[extname(path)] ?? 'application/octet-stream',
     };
   }
 
   async #load() {
-    const file = await this.#read('.vite/manifest.json');
-    if (!file) return;
-    const entries = Object.values(
-      JSON.parse(file.toString('utf8')) as Record<string, Entry>,
-    );
-    return new Set(
-      entries.flatMap(({ file, assets, css }) => [
-        file,
-        ...(css ?? []),
-        ...(assets ?? []),
-      ]),
-    );
+    if (this.#files) return this.#files;
+    const file = await this.#read('files.json');
+    if (file)
+      this.#files = new Set(JSON.parse(file.toString('utf8')) as string[]);
+    return this.#files;
   }
 
   async #read(relative: string) {

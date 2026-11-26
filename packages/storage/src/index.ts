@@ -1,6 +1,8 @@
 import type {
   AdapterCursor,
   AdminEvent,
+  AdminTaskFilter,
+  AdminTaskSummary,
   AdminToolCall,
   ApprovalFeedback,
   ChatRef,
@@ -377,6 +379,10 @@ export interface Store {
     pendingApprovals: number;
     tasksToday: number;
   };
+  adminTasks(
+    filter: AdminTaskFilter,
+    platforms: ReadonlyMap<string, string>,
+  ): readonly AdminTaskSummary[];
   adminToolCall(taskId: string, seq: number): ToolCallRecord | undefined;
   appendTaskEvents(
     taskId: string,
