@@ -101,6 +101,8 @@ test('Access JWTs require a valid key, audience, expiry, and owner identity', as
   const viewers = { ...identity, viewerServiceTokens: ['viewer.access'] };
   assert.equal(await verify(service(), identity), false);
   assert.equal(await verify(service(), viewers), 'viewer');
+  assert.equal(await verify(service({ aud: 'app' }), viewers), 'viewer');
+  assert.equal(await verify(service({ aud: 'other' }), viewers), false);
   assert.equal(
     await verify(service({ common_name: 'other.access' }), viewers),
     false,

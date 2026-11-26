@@ -115,8 +115,10 @@ export function createAccessVerifier({
         headers.kid.length > 256 ||
         headers.crit !== undefined ||
         claims?.iss !== issuer ||
-        !Array.isArray(claims.aud) ||
-        !claims.aud.includes(identity.aud) ||
+        // Service token JWTs carry a single audience string.
+        !(Array.isArray(claims.aud)
+          ? claims.aud.includes(identity.aud)
+          : claims.aud === identity.aud) ||
         typeof claims.exp !== 'number' ||
         !Number.isSafeInteger(claims.exp) ||
         claims.exp <= current() ||
