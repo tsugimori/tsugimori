@@ -32,6 +32,7 @@ import {
   eq,
   gt,
   inArray,
+  isNotNull,
   isNull,
   lt,
   lte,
@@ -943,7 +944,6 @@ export class SqliteStore implements Store {
         and(
           chatScope(approvals, ref),
           eq(approvals.promptMessageId, promptMessageId),
-          eq(approvals.status, 'pending'),
         ),
       )
       .get();
@@ -960,7 +960,13 @@ export class SqliteStore implements Store {
         const approval = tx
           .update(approvals)
           .set(decision)
-          .where(and(eq(approvals.id, id), eq(approvals.status, 'pending')))
+          .where(
+            and(
+              eq(approvals.id, id),
+              eq(approvals.status, 'pending'),
+              gt(approvals.expiresAt, decision.decidedAt),
+            ),
+          )
           .returning()
           .get();
         if (!approval) return;
@@ -1019,14 +1025,21 @@ export class SqliteStore implements Store {
       .run();
   }
 
-  expireApprovals(now: number) {
-    this.#db
+  expireApprovals(now: number, adapterIds: readonly string[]) {
+    if (!adapterIds.length) return [];
+    return this.#db
       .update(approvals)
-      .set({ status: 'cancelled', decidedAt: now })
+      .set({ status: 'expired', decidedAt: now })
       .where(
-        and(eq(approvals.status, 'pending'), lte(approvals.expiresAt, now)),
+        and(
+          eq(approvals.status, 'pending'),
+          lte(approvals.expiresAt, now),
+          inArray(approvals.adapterId, adapterIds),
+          isNotNull(approvals.promptMessageId),
+        ),
       )
-      .run();
+      .returning()
+      .all();
   }
 
   insertGrant(grant: StoredGrant) {

@@ -133,9 +133,6 @@ export const approvals = sqliteTable(
       NonNullable<ApprovalRecord['continuation']>
     >(),
     expiresAt: integer('expires_at'),
-    onceOnly: integer('once_only', { mode: 'boolean' })
-      .notNull()
-      .default(false),
     promptMessageId: text('prompt_message_id'),
     promptFormat: text('prompt_format', { mode: 'json' }).$type<
       NonNullable<ApprovalRecord['promptFormat']>

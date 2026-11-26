@@ -17,6 +17,7 @@ import type {
   ScheduleRecord,
   ScheduleRun,
   Store,
+  TaskRecord,
 } from '@tsugimori/storage';
 
 import { Auth } from '@tsugimori/auth';
@@ -70,7 +71,10 @@ interface GatewayDependencies {
   workspace: string;
 }
 
-type LinkedApproval = NonNullable<ReturnType<Auth['resolveApproval']>> & {
+type LinkedApproval = Exclude<
+  NonNullable<ReturnType<Auth['resolveApproval']>>,
+  { decision: 'expired' }
+> & {
   live: boolean;
   record: ApprovalRecord;
 };
@@ -91,7 +95,9 @@ export class Gateway {
   readonly #chatSetup: ChatSetup;
   #reportedFailures = false;
   readonly #inbound = new Set<Promise<void>>();
+  #applyingConfig = false;
   #closeWatch?: ReturnType<typeof watch>;
+  #expiry?: Promise<void>;
   #stopping?: Promise<void>;
   readonly admin: AdminReader;
   #state: 'new' | 'starting' | 'running' | 'stopping' = 'new';
@@ -127,8 +133,8 @@ export class Gateway {
           chatId: approval.chatId,
           decidedAt: approval.decidedAt,
           decidedBy: approval.decidedBy,
+          expiresAt: approval.expiresAt,
           id: approval.id,
-          onceOnly: approval.onceOnly,
           promptMessageId: approval.promptMessageId,
           requester: approval.requester,
           resource: approval.resource,
@@ -226,6 +232,16 @@ export class Gateway {
         this.#auth.isAllowlisted(chat),
       deliver: (schedule, run, delayed) =>
         this.#fireSchedule(schedule, run, delayed),
+      expireApprovals: (now, adapterIds) => {
+        if (!this.#applyingConfig && !this.#expiry && adapterIds.length)
+          this.#expiry = this.#expireApprovals(now, adapterIds)
+            .catch(() =>
+              log({ level: 'error', event: 'approval.expiry_failed' }),
+            )
+            .finally(() => {
+              this.#expiry = undefined;
+            });
+      },
       attachedAdapters: () =>
         this.#isStopping() || this.#runtime.transition
           ? []
@@ -324,12 +340,18 @@ export class Gateway {
   }
 
   async #apply(snapshot: WorkspaceConfig) {
-    await this.#runtime.apply(snapshot);
-    if (this.#deps.namedPreview) {
-      const provider = this.#deps.namedPreview(
-        this.#runtime.disabled('preview.named') ? undefined : snapshot,
-      );
-      await this.#previews?.configureNamed(provider);
+    this.#applyingConfig = true;
+    try {
+      await this.#expiry;
+      await this.#runtime.apply(snapshot);
+      if (this.#deps.namedPreview) {
+        const provider = this.#deps.namedPreview(
+          this.#runtime.disabled('preview.named') ? undefined : snapshot,
+        );
+        await this.#previews?.configureNamed(provider);
+      }
+    } finally {
+      this.#applyingConfig = false;
     }
   }
 
@@ -378,6 +400,7 @@ export class Gateway {
       try {
         await this.#chatSetup.stop();
         await this.#summaries.stop();
+        await this.#expiry;
         await this.#runtime.stop();
         await this.idle();
         await this.#scheduler.idle();
@@ -439,15 +462,22 @@ export class Gateway {
         messageId: event.messageId,
         userId: event.userId,
       });
-      await this.#approvalFeedback(adapter, chat, {
-        chatId: event.chatId,
-        messageId: event.messageId,
-        queryId: event.queryId,
-        decision: result?.decision,
-        alwaysAsOnce: result?.alwaysAsOnce,
-        ...result?.record.promptFormat,
-      });
-      if (result) await this.#approvalOutcome(adapter, result);
+      await this.#approvalFeedback(
+        adapter,
+        chat,
+        {
+          chatId: event.chatId,
+          messageId: event.messageId,
+          queryId: event.queryId,
+          decision: result?.decision,
+          ...(result && 'record' in result
+            ? result.record.promptFormat
+            : undefined),
+        },
+        result?.decision !== 'expired',
+      );
+      if (result && 'record' in result)
+        await this.#approvalOutcome(adapter, result);
       return;
     }
     const user = {
@@ -504,14 +534,15 @@ export class Gateway {
         text: event.text,
       });
       if (result) {
-        await this.#approvalFeedback(adapter, chat, {
-          chatId: event.chatId,
-          messageId: event.replyTo,
-          decision: result.decision,
-          alwaysAsOnce: result.alwaysAsOnce,
-          ...result.record.promptFormat,
-        });
-        await this.#approvalOutcome(adapter, result);
+        if ('record' in result) {
+          await this.#approvalFeedback(adapter, chat, {
+            chatId: event.chatId,
+            messageId: event.replyTo,
+            decision: result.decision,
+            ...result.record.promptFormat,
+          });
+          await this.#approvalOutcome(adapter, result);
+        }
         return;
       }
     }
@@ -640,7 +671,7 @@ export class Gateway {
 
   #resolveApproval(
     input: Parameters<Auth['resolveApproval']>[0],
-  ): LinkedApproval | undefined {
+  ): LinkedApproval | { decision: 'expired' } | undefined {
     const { store } = this.#deps;
     const result = this.#trace.span(
       'approval.resolve',
@@ -656,13 +687,47 @@ export class Gateway {
         }),
     );
     if (!result) return;
+    if (result.decision === 'expired') return result;
     const record = store.getApproval(result.id);
     if (!record) return;
-    const live = this.#tasks.resolveApproval({
-      ...result,
-      decidedBy: input.userId,
-    });
+    const live = this.#tasks.resolveApproval(result.id, result);
     return { ...result, live, record };
+  }
+
+  async #expireApprovals(now: number, adapterIds: readonly string[]) {
+    const { store } = this.#deps;
+    const expired = store.expireApprovals(now, adapterIds);
+    for (const { id } of expired) this.#tasks.resolveApproval(id, 'expired');
+    for (const record of expired) {
+      const { adapterId, chatId, id, taskId, promptMessageId, promptFormat } =
+        record;
+      const chat = { adapterId, chatId };
+      await this.#trace.span(
+        'approval.expired',
+        { ...chat, taskId, approvalId: id },
+        async () => {
+          const adapter = this.#runtime.getAdapter(adapterId);
+          if (!adapter) return;
+          const address = store.deliveryAddress(chat);
+          if (address && promptMessageId)
+            await this.#approvalFeedback(adapter, chat, {
+              ...promptFormat,
+              chatId: address.chatId,
+              messageId: promptMessageId,
+              decision: 'expired',
+            });
+          const source = store.getTask(taskId);
+          if (!source) return;
+          const m = approvalMessages(this.#runtime.config.locale).outcomes;
+          const continuation = record.continuation;
+          const text =
+            continuation?.kind === 'schedule'
+              ? m.scheduleExpired(continuation.change.schedule.id.slice(0, 6))
+              : m.expired;
+          await this.#notifyApproval(adapter, source, text);
+        },
+      );
+    }
   }
 
   #canCompleteApproval(chat: ChatRef, requester: string) {
@@ -679,9 +744,6 @@ export class Gateway {
     const { record, approved, scheduleApplied } = result;
     const source = store.getTask(record.taskId);
     if (!source) return;
-    const address = store.deliveryAddress(source);
-    if (!address) return;
-    const message = store.getMessage(source, source.sourceMessageId);
     const m = approvalMessages(this.#runtime.config.locale).outcomes;
     const continuation = record.continuation;
     let text = approved ? m.interrupted : m.denied;
@@ -711,6 +773,18 @@ export class Gateway {
         });
       }
     }
+    await this.#notifyApproval(adapter, source, text);
+  }
+
+  async #notifyApproval(
+    adapter: PlatformAdapter,
+    source: TaskRecord,
+    text: string,
+  ) {
+    const { store, log } = this.#deps;
+    const address = store.deliveryAddress(source);
+    if (!address) return;
+    const message = store.getMessage(source, source.sourceMessageId);
     try {
       await this.#outbound.send(adapter, {
         chatId: address.chatId,
@@ -731,17 +805,14 @@ export class Gateway {
   async #approvalFeedback(
     adapter: PlatformAdapter,
     chat: ChatRef,
-    {
-      alwaysAsOnce,
-      ...feedback
-    }: Omit<ApprovalFeedback, 'decisionText' | 'notice' | 'prompt'> & {
-      alwaysAsOnce?: boolean;
-    },
+    feedback: Omit<ApprovalFeedback, 'decisionText' | 'notice' | 'prompt'>,
+    edit = true,
   ) {
     if (!adapter.respondToApproval) return;
-    const prompt = feedback.decision
-      ? this.#deps.store.getMessage(chat, feedback.messageId)?.text
-      : undefined;
+    const prompt =
+      edit && feedback.decision
+        ? this.#deps.store.getMessage(chat, feedback.messageId)?.text
+        : undefined;
     try {
       await this.#trace.span('approval.feedback', { ...chat }, () =>
         adapter.respondToApproval?.({
@@ -749,8 +820,8 @@ export class Gateway {
           ...approvalDecisionText(
             this.#runtime.config.locale,
             feedback.decision,
-            alwaysAsOnce,
           ),
+          ...(!edit ? { decisionText: undefined } : undefined),
           prompt,
         }),
       );

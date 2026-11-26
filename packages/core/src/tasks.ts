@@ -72,7 +72,8 @@ type Work = {
   workdir?: string;
 };
 
-type ApprovalAnswer = { approved: boolean; decidedBy: string };
+type ApprovalAnswer =
+  { approved: boolean; scheduleApplied?: boolean } | 'expired' | 'timeout';
 
 function chatKey({ adapterId, chatId }: ChatRef) {
   return JSON.stringify([adapterId, chatId]);
@@ -207,8 +208,8 @@ export class Tasks {
     if (running) running.sessionValid = false;
   }
 
-  resolveApproval(result: ApprovalAnswer & { id: string }) {
-    const approval = this.#approvals.get(result.id);
+  resolveApproval(id: string, result: ApprovalAnswer) {
+    const approval = this.#approvals.get(id);
     if (!approval || approval.signal.aborted) return false;
     approval.resolve(result);
     return true;
@@ -577,7 +578,6 @@ export class Tasks {
       await hooks.emit('agent.before', { task, agentId: agent.id, model });
       const pass = new AbortController();
       const passSignal = AbortSignal.any([signal, pass.signal]);
-      const pending = new Set<Promise<boolean>>();
       const requestApproval = (
         request: ApprovalRequest,
         continuation?: ApprovalContinuation,
@@ -587,7 +587,7 @@ export class Tasks {
           request,
           passSignal,
           continuation,
-        ).then(Boolean);
+        );
         pending.add(approval);
         void approval.then(
           () => pending.delete(approval),
@@ -595,6 +595,7 @@ export class Tasks {
         );
         return approval;
       };
+      const pending = new Set<ReturnType<typeof requestApproval>>();
       const tools = protectTools(
         {
           trace,
@@ -622,7 +623,8 @@ export class Tasks {
             tools,
           },
           {
-            requestApproval,
+            requestApproval: async (request) =>
+              (await requestApproval(request)) === true,
             supplements: supplements.stream(passSignal),
           },
         );
@@ -671,14 +673,18 @@ export class Tasks {
       signal,
       continuation,
     );
-    return (
-      approval &&
-      ('approvedBy' in approval
-        ? approval.approvedBy
-        : 'decision' in approval
-          ? await approval.decision
-          : undefined)
-    );
+    if (!approval) return false;
+    if ('approvedBy' in approval) return true;
+    const result = await approval.decision;
+    if (result === 'timeout') {
+      const m = approvalMessages(this.#deps.runtime.config.locale);
+      const owner = this.#deps.auth.owner(work.chat.adapterId);
+      const display = owner
+        ? this.#deps.store.getUserDisplay({ ...work.chat, userId: owner })
+        : undefined;
+      return { pending: true as const, summary: m.pending(display || m.owner) };
+    }
+    return result !== 'expired' && result?.approved === true;
   }
 
   async approveSchedule(
@@ -703,7 +709,12 @@ export class Tasks {
       { kind: 'schedule', change },
       schedule,
     );
-    if (approval && !('decision' in approval)) return approval;
+    if (!approval || 'approvedBy' in approval) return approval;
+    const result = await approval.decision;
+    if (result === 'timeout') return { pending: true };
+    if (result === 'expired') throw new Error('Schedule approval expired');
+    if (result?.approved)
+      return { scheduleApplied: result.scheduleApplied === true };
   }
 
   async #openApproval(
@@ -713,7 +724,9 @@ export class Tasks {
     continuation?: ApprovalContinuation,
     schedule?: ScheduleApprovalRequest,
   ): Promise<
-    ScheduleApproval | { decision: Promise<string | undefined> } | undefined
+    | { approvedBy: string }
+    | { decision: Promise<ApprovalAnswer | undefined> }
+    | undefined
   > {
     const { auth, store, trace, outbound, runtime } = this.#deps;
     const { adapter, chat, input, id } = work;
@@ -727,7 +740,6 @@ export class Tasks {
             chatId: conversationId(schedule.address),
           }
         : chat;
-      const onceOnly = !schedule?.repeat;
       const reuseGrant = schedule
         ? schedule.reuseGrant
         : request.resource.type !== 'schedule';
@@ -749,27 +761,24 @@ export class Tasks {
         {
           approverId: schedule?.approverId,
           continuation,
-          expiresAt: schedule ? Date.now() + 120_000 : undefined,
-          onceOnly,
         },
       );
       const answer = Promise.withResolvers<ApprovalAnswer | undefined>();
+      const wait = AbortSignal.any([signal, AbortSignal.timeout(120_000)]);
       const cleanup = () => {
-        signal.removeEventListener('abort', cancel);
+        wait.removeEventListener('abort', cancel);
         this.#approvals.delete(approval.id);
       };
       const cancel = () => {
         cleanup();
-        answer.resolve(undefined);
+        answer.resolve(signal.aborted ? undefined : 'timeout');
       };
-      if (!schedule) {
-        this.#approvals.set(approval.id, {
-          resolve: answer.resolve,
-          signal,
-          work,
-        });
-        signal.addEventListener('abort', cancel, { once: true });
-      }
+      this.#approvals.set(approval.id, {
+        resolve: answer.resolve,
+        signal: wait,
+        work,
+      });
+      wait.addEventListener('abort', cancel, { once: true });
       let linked = false;
       try {
         const { locale } = runtime.config;
@@ -799,17 +808,9 @@ export class Tasks {
             buttons: useButtons
               ? [
                   {
-                    id: approvalCallbackId(approval.id, 'once'),
-                    label: buttons.once,
+                    id: approvalCallbackId(approval.id, 'approve'),
+                    label: buttons.approve,
                   },
-                  ...(onceOnly
-                    ? []
-                    : [
-                        {
-                          id: approvalCallbackId(approval.id, 'always'),
-                          label: buttons.always,
-                        },
-                      ]),
                   {
                     id: approvalCallbackId(approval.id, 'deny'),
                     label: buttons.deny,
@@ -850,15 +851,7 @@ export class Tasks {
             },
           },
         );
-        if (schedule) return { pending: true };
-        return {
-          decision: answer.promise.then((result) => {
-            cleanup();
-            return result?.approved && !signal.aborted
-              ? result.decidedBy
-              : undefined;
-          }),
-        };
+        return { decision: answer.promise.finally(cleanup) };
       } catch (error) {
         cleanup();
         if (!linked) store.cancelApproval(approval.id, Date.now());

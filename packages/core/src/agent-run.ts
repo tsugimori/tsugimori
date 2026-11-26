@@ -132,7 +132,7 @@ export function protectTools(
     requestApproval(
       request: Parameters<AgentIO['requestApproval']>[0],
       tool: Extract<ApprovalContinuation, { kind: 'tool' }>,
-    ): Promise<boolean>;
+    ): Promise<boolean | { pending: true; summary: string }>;
     task: ToolContext;
     trace: Tracer;
   },
@@ -160,18 +160,18 @@ export function protectTools(
             { taskId, name },
             async () => {
               const permission = tool.permission;
-              if (
-                permission &&
-                !(await requestApproval(
+              if (permission) {
+                const approval = await requestApproval(
                   {
                     action: permission.action,
                     description: permission.describe?.(args, task),
                     resource: permission.resource(args, task),
                   },
                   { kind: 'tool', name, args },
-                ))
-              )
-                throw new Error('Tool permission denied');
+                );
+                if (typeof approval === 'object') return approval;
+                if (!approval) throw new Error('Tool permission denied');
+              }
               signal.throwIfAborted();
               return tool.run(args, task);
             },

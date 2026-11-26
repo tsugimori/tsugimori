@@ -67,6 +67,7 @@ interface SchedulerDependencies {
     run: ScheduleRun,
     delayed: boolean,
   ): Promise<ScheduleRun['status']>;
+  expireApprovals?(now: number, adapterIds: readonly string[]): void;
   logError(event: string, id?: string): void;
   model(chat: ChatRef): string;
   now?(): number;
@@ -210,11 +211,9 @@ export class Scheduler {
     if (this.#wake.signal.aborted) return;
     try {
       const now = this.#now();
-      this.#deps.store.expireApprovals(now);
-      for (const schedule of this.#deps.store.dueSchedules(
-        now,
-        this.#deps.attachedAdapters(),
-      )) {
+      const adapterIds = this.#deps.attachedAdapters();
+      this.#deps.expireApprovals?.(now, adapterIds);
+      for (const schedule of this.#deps.store.dueSchedules(now, adapterIds)) {
         if (this.#active.size >= 2) break;
         const execution = this.#fire(schedule, now).catch(() =>
           this.#deps.logError('schedule.run_failed', schedule.id),
@@ -547,6 +546,18 @@ export class Scheduler {
       const until = trigger.kind === 'once' ? undefined : trigger.until;
       const agentReason = input.needsApproval ? input.reason : undefined;
       const key = deliveryKey(schedule);
+      const sameDelivery =
+        previous !== undefined && !ownerOnly && deliveryKey(previous) === key;
+      const priorApprover = previous?.deliveryApprovedBy;
+      if (
+        sameDelivery &&
+        previous.trigger.kind !== 'once' &&
+        priorApprover &&
+        (priorApprover === approverId || priorApprover === ownerId)
+      ) {
+        signal.throwIfAborted();
+        return save(priorApprover);
+      }
       const request: ScheduleApprovalRequest = {
         id,
         address: promptAddress,
@@ -576,8 +587,7 @@ export class Scheduler {
         operation: previous ? 'update' : 'create',
         reasons,
         repeat,
-        reuseGrant:
-          previous !== undefined && !ownerOnly && deliveryKey(previous) === key,
+        reuseGrant: sameDelivery,
         target: targetScope,
         targetUserId: target.kind === 'dm' ? target.userId : undefined,
         timezone,
@@ -600,6 +610,11 @@ export class Scheduler {
       const approval = await this.#deps.approve(task, request, change);
       if (!approval) throw new Error('Schedule approval denied or unavailable');
       if ('pending' in approval) return this.#result(schedule, change);
+      if ('scheduleApplied' in approval) {
+        if (!approval.scheduleApplied)
+          throw new Error('Schedule limit reached or schedule changed');
+        return this.#result(schedule);
+      }
       signal.throwIfAborted();
       return save(approval.approvedBy);
     }

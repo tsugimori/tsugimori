@@ -68,7 +68,9 @@ Agents can create fixed messages or agent tasks using `schedule.create` and mana
 
 Schedules are scoped to the conversation they were created in. Self-delivery and untargeted one-time group delivery can proceed immediately. Other delivery and resource-intensive jobs require linked approval. Configure `scheduler.minIntervalMinutes` (default 15), `scheduler.maxActivePerUser` (default 20), and `scheduler.highCostModels` in the workspace.
 
-One-time requests offer **Allow once** and **Deny**. A direct reply of `always` on one of these requests counts as **Allow once**. Recurring schedules also offer **Always allow (this recurring schedule)**, which covers future deliveries and edits that preserve the approved delivery scope. Resource checks can still require fresh owner approval.
+Approval prompts offer **Approve** and **Deny**. Reply directly to the prompt with `approve` or `deny` to decide by text. Older replies such as `allow once` and `always` also approve the request. Approving a recurring schedule covers its future fires and edits that preserve the approved delivery scope. Resource checks can still require fresh owner approval.
+
+The requesting agent waits up to two minutes. If the request is still pending, the tool reports who needs to approve it and the conversation can continue. Schedule requests expire at the first scheduled trigger or 24 hours after the request was created, whichever comes first. Other requests expire after 24 hours. Pending approvals survive a reload or restart, and a later schedule decision is reported in the requesting conversation. When an approval expires, the prompt shows **Expired**, its buttons are removed, and the requester is notified in the original conversation.
 
 Pass native platform user IDs in the schedule's `mentions` array to notify specific recipients. Telegram also renders `[name](tg://user?id=123)` as a user mention and preserves `@username` in the message text.
 

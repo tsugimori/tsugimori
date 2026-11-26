@@ -11,6 +11,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 
 const pairingTtlMs = 10 * 60_000;
+const approvalTtlMs = 24 * 60 * 60_000;
 const scheduleGrantAction = 'schedule.delivery';
 
 interface AuthDependencies {
@@ -35,15 +36,16 @@ function replyDecision(text: string): ApprovalDecision | undefined {
     case 'yes':
     case 'ok':
     case '好':
+    case '同意':
+    case '允許':
     case '允許一次':
     case 'once':
     case 'allow':
     case 'allow once':
     case 'approve':
-      return 'once';
     case 'always':
     case '一律允許':
-      return 'always';
+      return 'approve';
     case 'no':
     case 'deny':
     case '不':
@@ -56,7 +58,7 @@ export function approvalCallbackId(
   approvalId: string,
   decision: ApprovalDecision,
 ) {
-  return `approval:${decision}:${approvalId}`;
+  return `approval:${decision === 'approve' ? 'once' : 'deny'}:${approvalId}`;
 }
 
 function matchesResource(scope: StoredGrant['scope'], resource: ResourceRef) {
@@ -152,8 +154,6 @@ export class Auth {
     options: {
       approverId?: string;
       continuation?: ApprovalRecord['continuation'];
-      expiresAt?: number;
-      onceOnly?: boolean;
     } = {},
   ) {
     const approval: ApprovalRecord = {
@@ -165,11 +165,15 @@ export class Auth {
       action: request.action,
       resource: request.resource,
       continuation: options.continuation ?? null,
-      expiresAt: options.expiresAt ?? null,
+      expiresAt: Math.min(
+        this.#now() + approvalTtlMs,
+        options.continuation?.kind === 'schedule'
+          ? (options.continuation.change.schedule.nextDueAt ?? Infinity)
+          : Infinity,
+      ),
       promptMessageId: null,
       promptFormat: null,
       approverId: options.approverId ?? null,
-      onceOnly: options.onceOnly ?? false,
       status: 'pending',
       decidedBy: null,
       decidedAt: null,
@@ -186,9 +190,9 @@ export class Auth {
     let decision: ApprovalDecision | undefined;
     if ('callbackId' in input) {
       const [, action, approvalId] =
-        /^approval:(once|always|deny):([\w-]+)$/.exec(input.callbackId) ?? [];
+        /^approval:(once|deny):([\w-]+)$/.exec(input.callbackId) ?? [];
       if (!approvalId) return;
-      decision = action as ApprovalDecision;
+      decision = action === 'once' ? 'approve' : 'deny';
       approval = this.#store.getApproval(approvalId);
       if (approval?.promptMessageId !== input.messageId) return;
     } else if (input.replyTo) {
@@ -197,40 +201,41 @@ export class Auth {
     }
     if (
       !decision ||
-      approval?.status !== 'pending' ||
-      approval.adapterId !== input.adapterId ||
+      approval?.adapterId !== input.adapterId ||
       approval.chatId !== input.chatId ||
       (!this.isOwner(input) && approval.approverId !== input.userId)
     )
       return;
 
-    const alwaysAsOnce = approval.onceOnly && decision === 'always';
-    if (alwaysAsOnce) decision = 'once';
     const now = this.#now();
-    if (approval.expiresAt !== null && approval.expiresAt <= now) {
-      this.#store.cancelApproval(approval.id, now);
-      return;
-    }
-    const approved = decision !== 'deny';
-    const grant: StoredGrant | undefined =
-      decision !== 'deny'
-        ? {
-            adapterId: approval.adapterId,
-            chatId: approval.chatId,
-            id: randomUUID(),
-            action:
-              approval.resource.type === 'schedule'
-                ? scheduleGrantAction
-                : approval.action,
-            scope: approval.resource,
-            mode: decision,
-            grantedTo: approval.requester,
-            grantedBy: input.userId,
-            createdAt: now,
-            revokedAt: null,
-            consumedAt: decision === 'once' ? now : null,
-          }
-        : undefined;
+    if (
+      approval.status === 'expired' ||
+      (approval.status === 'pending' &&
+        approval.expiresAt !== null &&
+        approval.expiresAt <= now)
+    )
+      return { id: approval.id, decision: 'expired' as const };
+    if (approval.status !== 'pending') return;
+
+    const approved = decision === 'approve';
+    const grant: StoredGrant | undefined = approved
+      ? {
+          adapterId: approval.adapterId,
+          chatId: approval.chatId,
+          id: randomUUID(),
+          action:
+            approval.resource.type === 'schedule'
+              ? scheduleGrantAction
+              : approval.action,
+          scope: approval.resource,
+          mode: 'once',
+          grantedTo: approval.requester,
+          grantedBy: input.userId,
+          createdAt: now,
+          revokedAt: null,
+          consumedAt: now,
+        }
+      : undefined;
     const changed = this.#store.decideApproval(
       approval.id,
       {
@@ -249,7 +254,6 @@ export class Auth {
         approved,
         decision,
         ...changed,
-        ...(alwaysAsOnce ? { alwaysAsOnce } : {}),
       };
   }
 

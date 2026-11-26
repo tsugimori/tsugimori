@@ -72,7 +72,7 @@ test(
         callback_query: {
           from: { ...from, username: 'example_sender' },
           id: 'query-1',
-          data: 'approval:always:test-id',
+          data: 'approval:once:test-id',
           message: { ...address, message_id: 23 },
         },
       },
@@ -141,7 +141,7 @@ test(
     assert.equal(reply.chatKind, 'dm');
     assert.equal(reply.repliesToBot, true);
     assert.equal(callback?.type, 'callback');
-    assert.equal(callback.callbackId, 'approval:always:test-id');
+    assert.equal(callback.callbackId, 'approval:once:test-id');
     assert.equal(callback.queryId, 'query-1');
     assert.equal(callback.userUsername, 'example_sender');
     assert.equal(callback.userDisplay, 'Example sender');
@@ -193,7 +193,7 @@ test(
     };
     const receipt = await adapter.send({
       ...message,
-      buttons: [{ id: 'approval:once:test-id', label: 'Allow once' }],
+      buttons: [{ id: 'approval:once:test-id', label: 'Approve' }],
     });
     assert.equal(receipt.messageId, '2');
     assert.deepEqual(
@@ -208,7 +208,7 @@ test(
       reply_parameters: { message_id: 21, allow_sending_without_reply: true },
       reply_markup: {
         inline_keyboard: [
-          [{ callback_data: 'approval:once:test-id', text: 'Allow once' }],
+          [{ callback_data: 'approval:once:test-id', text: 'Approve' }],
         ],
       },
     });
@@ -501,7 +501,7 @@ test(
     const long = '🌙'.repeat(2200) + '\n記得喝水';
     const approval = await adapter.send({
       approval: true,
-      buttons: [{ id: 'approval:once:example', label: '允許一次' }],
+      buttons: [{ id: 'approval:once:example', label: '同意' }],
       chatId: '-1001',
       entities: [{ type: 'pre', offset: header.length, length: long.length }],
       text: header + long,
@@ -564,15 +564,30 @@ test(
       chatId: '-1001',
       messageId: '50',
       queryId: 'approved',
-      decision: 'once',
-      decisionText: '✅ 已允許一次',
-      notice: '✅ 已允許一次',
+      decision: 'approve',
+      decisionText: '✅ 已同意',
+      notice: '✅ 已同意',
       prompt: '🔔 同意\n你好😀',
       pre: { offset: 6, length: 4 },
       entities: [
         { type: 'mention', offset: 3, length: 2, userId: '79' },
         { type: 'pre', offset: 6, length: 4 },
       ],
+    });
+    await adapter.respondToApproval({
+      chatId: '-1001',
+      messageId: '51',
+      decision: 'expired',
+      decisionText: '⌛ 已逾時',
+      notice: '已逾時',
+      prompt: '🔔 需要你同意',
+    });
+    await adapter.respondToApproval({
+      chatId: '-1001',
+      messageId: '51',
+      decision: 'expired',
+      queryId: 'late',
+      notice: '已逾時',
     });
     await delay(30);
     assert.deepEqual(
@@ -583,6 +598,8 @@ test(
         'answerCallbackQuery',
         'answerCallbackQuery',
         'editMessageText',
+        'editMessageText',
+        'answerCallbackQuery',
       ],
     );
     assert.deepEqual(calls[0]?.[1], {
@@ -597,12 +614,22 @@ test(
     assert.deepEqual(calls[4]?.[1], {
       chat_id: '-1001',
       message_id: 50,
-      text: '🔔 同意\n你好😀\n\n✅ 已允許一次',
+      text: '🔔 同意\n你好😀\n\n✅ 已同意',
       entities: [
         { type: 'text_mention', offset: 3, length: 2, user: { id: 79 } },
         { type: 'pre', offset: 6, length: 4 },
       ],
       reply_markup: { inline_keyboard: [] },
+    });
+    assert.deepEqual(calls[5]?.[1], {
+      chat_id: '-1001',
+      message_id: 51,
+      text: '🔔 需要你同意\n\n⌛ 已逾時',
+      reply_markup: { inline_keyboard: [] },
+    });
+    assert.deepEqual(calls[6]?.[1], {
+      callback_query_id: 'late',
+      text: '已逾時',
     });
   },
 );

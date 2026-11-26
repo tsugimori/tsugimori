@@ -78,12 +78,11 @@ export interface ApprovalRecord extends ChatRef {
   decidedBy: string | null;
   expiresAt: number | null;
   id: string;
-  onceOnly: boolean;
   promptFormat: ApprovalPromptFormat | null;
   promptMessageId: string | null;
   requester: string;
   resource: ResourceRef;
-  status: 'pending' | 'approved' | 'denied' | 'cancelled';
+  status: 'pending' | 'approved' | 'denied' | 'cancelled' | 'expired';
   taskId: string;
 }
 
@@ -259,7 +258,7 @@ export interface Store {
     | (ScheduleAddress & { kind: ChatRecord['kind']; userId: string })
     | undefined;
   dueSchedules(now: number, adapterIds: readonly string[]): ScheduleRecord[];
-  expireApprovals(now: number): void;
+  expireApprovals(now: number, adapterIds: readonly string[]): ApprovalRecord[];
   findApprovalByPrompt(
     ref: ChatRef,
     promptMessageId: string,

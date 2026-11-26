@@ -338,7 +338,7 @@ export class TelegramAdapter implements PlatformAdapter {
               .slice(0, maxMessage - suffix.length)
               .replace(/[\uD800-\uDBFF]$/u, '')
           : '';
-        const text = display ? display + suffix : notice;
+        const text = display ? display + suffix : decisionText;
         const formatting = (
           entities ?? (pre ? [{ ...pre, type: 'pre' as const }] : [])
         )

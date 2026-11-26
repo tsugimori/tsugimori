@@ -1,6 +1,6 @@
 import type { Config } from '@tsugimori/config';
 import type {
-  ApprovalDecision,
+  ApprovalFeedback,
   ApprovalRequest,
   ChatRef,
   ScheduleApprovalRequest,
@@ -18,12 +18,12 @@ import {
 const catalogs = {
   en: {
     buttons: {
-      once: 'Allow once',
-      always: 'Always allow (this recurring schedule)',
+      approve: 'Approve',
       deny: 'Deny',
     },
     outcomes: {
       denied: 'The request was denied.',
+      expired: 'Your request expired before it was approved.',
       completed: 'The approved action completed.',
       failed: 'The approved action could not be completed.',
       interrupted:
@@ -32,20 +32,22 @@ const catalogs = {
       scheduleUpdated: (ref: string) => `Schedule #${ref} was updated.`,
       scheduleDenied: (ref: string) =>
         `Approval for schedule #${ref} was denied.`,
+      scheduleExpired: (ref: string) =>
+        `Schedule request #${ref} expired before it was approved.`,
       scheduleFailed: (ref: string) =>
         `Schedule #${ref} could not be saved after approval.`,
     },
     decisions: {
-      once: '✅ Allowed once',
-      always: '✅ Always allowed',
+      approve: '✅ Approved',
       deny: '❌ Denied',
+      expired: '⌛ Expired',
     },
-    alwaysAsOnce:
-      '✅ Allowed once (“always” counts as “allow once” for this request)',
+    expired: 'Expired',
+    pending: (approver: string) =>
+      `Request sent. Awaiting approval from ${approver}.`,
+    owner: 'the owner',
     unavailable: 'Approval is unavailable.',
-    replyRecurring:
-      'Reply directly with “yes”, “always” (this recurring schedule only), or “no”.',
-    replyOnce: 'Reply directly to this message with “yes” or “no”.',
+    reply: 'Reply directly to this message with “approve” or “deny”.',
     title: 'Approval requested',
     create: { message: 'Schedule a reminder', agent: 'Schedule an agent task' },
     update: {
@@ -88,30 +90,31 @@ const catalogs = {
   },
   'zh-TW': {
     buttons: {
-      once: '允許一次',
-      always: '一律允許（此週期排程）',
+      approve: '同意',
       deny: '拒絕',
     },
     decisions: {
-      once: '✅ 已允許一次',
-      always: '✅ 已設為一律允許',
+      approve: '✅ 已同意',
       deny: '❌ 已拒絕',
+      expired: '⌛ 已逾時',
     },
     outcomes: {
       denied: '這項請求已被拒絕。',
+      expired: '請求已逾時，未獲同意。',
       completed: '核准的操作已完成。',
       failed: '核准的操作未能完成。',
       interrupted: '代理程式的回合已結束，無法執行核准的操作。請重新提出請求。',
       scheduleCreated: (ref: string) => `已建立排程 #${ref}。`,
       scheduleUpdated: (ref: string) => `已更新排程 #${ref}。`,
       scheduleDenied: (ref: string) => `排程 #${ref} 的請求已被拒絕。`,
+      scheduleExpired: (ref: string) => `排程請求 #${ref} 已逾時，未獲同意。`,
       scheduleFailed: (ref: string) => `排程 #${ref} 已獲核准，但未能儲存。`,
     },
-    alwaysAsOnce: '✅ 已允許一次（此請求的「一律允許」視為「允許一次」）',
+    expired: '已逾時',
+    pending: (approver: string) => `已送出，等待${approver}同意`,
+    owner: '主人',
     unavailable: '這項審核已無法處理。',
-    replyRecurring:
-      '請直接回覆「允許一次」、「一律允許」（僅限此週期排程）或「拒絕」。',
-    replyOnce: '請直接回覆這則訊息，輸入「允許一次」或「拒絕」。',
+    reply: '請直接回覆這則訊息，輸入「同意」或「拒絕」。',
     title: '需要你同意',
     create: { message: '排程提醒', agent: '排程代理任務' },
     update: { message: '修改排程提醒', agent: '修改排程代理任務' },
@@ -156,15 +159,14 @@ export function approvalMessages(locale: Config['locale']) {
 
 export function approvalDecisionText(
   locale: Config['locale'],
-  decision: ApprovalDecision | undefined,
-  alwaysAsOnce?: boolean,
+  decision: ApprovalFeedback['decision'],
 ) {
   const messages = approvalMessages(locale);
   if (!decision) return { notice: messages.unavailable };
-  const notice = messages.decisions[decision];
   return {
-    notice,
-    decisionText: alwaysAsOnce ? messages.alwaysAsOnce : notice,
+    notice:
+      decision === 'expired' ? messages.expired : messages.decisions[decision],
+    decisionText: messages.decisions[decision],
   };
 }
 
@@ -229,7 +231,7 @@ export function approvalPrompt({
           : []),
         ...(resource.type === 'global' ? [m.globalScope] : []),
         ...(reference ? [field(m.reference, reference)] : []),
-        ...(useButtons ? [] : [m.replyOnce]),
+        ...(useButtons ? [] : [m.reply]),
       ],
       description,
     );
@@ -321,6 +323,6 @@ export function approvalPrompt({
         : m.reasons.agent,
     ),
   );
-  if (!useButtons) lines.push(schedule.repeat ? m.replyRecurring : m.replyOnce);
+  if (!useButtons) lines.push(m.reply);
   return withContent(lines, schedule.content);
 }

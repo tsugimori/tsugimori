@@ -55,7 +55,7 @@ export interface InboundMessage extends InboundBase {
   userUsername?: string | null;
 }
 
-export type ApprovalDecision = 'deny' | 'once' | 'always';
+export type ApprovalDecision = 'approve' | 'deny';
 
 export type PlatformInboundEvent =
   | InboundMessage
@@ -149,7 +149,7 @@ export interface AdapterContext {
 
 export interface ApprovalFeedback {
   chatId: string;
-  decision?: ApprovalDecision;
+  decision?: ApprovalDecision | 'expired';
   decisionText?: string;
   entities?: readonly TextEntity[];
   messageId: string;
@@ -233,7 +233,8 @@ export interface ScheduleApprovalRequest {
   until?: number;
 }
 
-export type ScheduleApproval = { approvedBy: string } | { pending: true };
+export type ScheduleApproval =
+  { approvedBy: string } | { pending: true } | { scheduleApplied: boolean };
 
 export interface ToolContext {
   chat: ChatRef;

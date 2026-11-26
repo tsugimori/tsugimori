@@ -34,7 +34,8 @@ const messages = {
       `${time} in ${chat}, remind ${target}: ${content}`,
     task: (time: string, chat: string, content: string) =>
       `${time} in ${chat}, run: ${content}`,
-    pending: (approver: string) => `Awaiting approval from ${approver}`,
+    pending: (approver: string) =>
+      `Request sent. Awaiting approval from ${approver}`,
   },
   'zh-TW': {
     privateChat: '私人對話',
@@ -58,7 +59,7 @@ const messages = {
       `${time}在 ${chat} 提醒 ${target}：${content}`,
     task: (time: string, chat: string, content: string) =>
       `${time}在 ${chat} 執行：${content}`,
-    pending: (approver: string) => `等${approver}同意後就會排上`,
+    pending: (approver: string) => `已送出，等待${approver}同意`,
   },
 };
 
