@@ -47,7 +47,7 @@ export interface ChatSummary extends ChatRef {
   throughSeq: number;
 }
 
-export type SessionMetric = 'context' | 'compaction';
+export type SessionMetric = 'context' | 'compaction' | 'contextWindow';
 
 export interface SessionHistory {
   compactions: number;

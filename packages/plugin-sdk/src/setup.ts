@@ -80,7 +80,9 @@ export interface SetupContext extends CheckContext {
 export interface SetupStep {
   id: string;
   localized?: { 'zh-TW'?: string };
+  retryFrom?: string;
   run(ctx: SetupContext): void | Promise<void>;
+  runOnLogin?: boolean;
   title: string;
 }
 

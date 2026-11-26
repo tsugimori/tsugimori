@@ -454,6 +454,8 @@ export type AgentEvent =
   | {
       /** Tokens occupying the session context. Null when the provider only reports aggregate usage. */
       contextTokens?: number | null;
+      /** Context capacity of the model used for this turn, when reported. */
+      contextWindow?: number;
       inputTokens?: number;
       outputTokens?: number;
       type: 'usage';
@@ -486,6 +488,8 @@ export interface AgentQuota {
 }
 
 export interface AgentSessionInfo {
+  effort?: string;
+  model?: string;
   serviceTier?: string | null;
 }
 

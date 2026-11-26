@@ -280,7 +280,13 @@ export function statusCard(
     const scope = work.sessionScope;
     const usage = scope ? trace.latestSessionSpan(scope, 'context') : undefined;
     const used = usage?.attrs.contextTokens;
-    const limit = work.compactAt ?? defaultCompactAt;
+    const window = scope
+      ? trace.latestSessionSpan(scope, 'contextWindow')?.attrs.contextWindow
+      : undefined;
+    const limit =
+      typeof window === 'number' && window > 0
+        ? window
+        : (work.compactAt ?? defaultCompactAt);
     field(
       m.context,
       typeof used === 'number'

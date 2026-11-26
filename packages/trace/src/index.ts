@@ -43,7 +43,9 @@ export class Tracer {
       span.attrs.sessionScope === scope &&
       (metric === 'compaction'
         ? span.name === 'agent.compaction' && span.status === 'ok'
-        : typeof span.attrs.contextTokens === 'number');
+        : metric === 'contextWindow'
+          ? typeof span.attrs.contextWindow === 'number'
+          : typeof span.attrs.contextTokens === 'number');
     return (
       this.#pending.findLast(matches) ??
       this.#writing?.findLast(matches) ??

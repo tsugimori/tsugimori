@@ -151,10 +151,15 @@ export async function runAgent(
               tokens >= 0
                 ? tokens
                 : null;
+            const contextWindow = event.contextWindow;
             trace.record('agent.usage', {
               ...attrs,
-              sessionScope: contextTokens === null ? null : activeScope,
+              sessionScope:
+                contextTokens === null && contextWindow === undefined
+                  ? null
+                  : activeScope,
               contextTokens,
+              ...(contextWindow === undefined ? {} : { contextWindow }),
               inputTokens: event.inputTokens ?? null,
               outputTokens: event.outputTokens ?? null,
             });

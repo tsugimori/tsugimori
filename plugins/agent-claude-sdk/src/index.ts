@@ -2,6 +2,7 @@ import type {
   Options,
   query,
   SDKMessage,
+  SDKRateLimitInfo,
 } from '@anthropic-ai/claude-agent-sdk';
 import type {
   AgentCompactRequest,
@@ -10,7 +11,10 @@ import type {
   AgentEvent,
   AgentInstanceConfig,
   AgentIO,
+  AgentQuota,
+  AgentQuotaWindow,
   AgentRequest,
+  AgentSessionInfo,
   ContextBlock,
   PluginFactoryContext,
 } from '@tsugimori/plugin-sdk';
@@ -20,7 +24,7 @@ import {
   definePlugin,
   nativeCompactionLimit,
 } from '@tsugimori/plugin-sdk';
-import { realpath } from 'node:fs/promises';
+import { mkdir, realpath } from 'node:fs/promises';
 
 import {
   askThroughHost,
@@ -41,6 +45,14 @@ type Query = (args: Parameters<typeof query>[0]) => AsyncIterable<SDKMessage>;
 
 interface ClaudeDependencies {
   query?: Query;
+}
+
+interface ClaudeOptions {
+  compactAt?: number;
+  effort?: string;
+  home?: string;
+  model?: string;
+  token?: string;
 }
 
 interface SessionSlot {
@@ -65,6 +77,8 @@ function trustedInstructions(block: ContextBlock) {
 }
 
 const implementation = 'Claude Agent SDK';
+const quotaWindows = { five_hour: 300, seven_day: 10_080 };
+type QuotaWindow = keyof typeof quotaWindows;
 
 export class ClaudeAgent implements AgentConnector {
   readonly id: string;
@@ -74,26 +88,80 @@ export class ClaudeAgent implements AgentConnector {
   readonly #query?: Query;
   readonly #apiKey?: string;
   readonly #compactAt: number;
+  readonly #effort?: string;
   readonly #home?: string;
+  readonly #model?: string;
   readonly #token?: string;
   readonly #active = new Set<AbortController>();
   readonly #lifecycle = new AbortController();
   readonly #sessionTails = new Map<string, Promise<void>>();
   readonly #compactions = new Map<string, Promise<AgentCompactResult>>();
   readonly #contextWindows = new Map<string, number>();
+  readonly #sessions = new Map<string, AgentSessionInfo>();
+  readonly #quota = new Map<QuotaWindow, AgentQuotaWindow>();
+  readonly #reached = new Set<QuotaWindow>();
+  #defaultModel?: string;
+  #defaultEffort?: string;
 
   constructor(
     { query }: ClaudeDependencies,
     id: string,
     apiKey: string | null = process.env.ANTHROPIC_API_KEY ?? null,
-    options?: { compactAt?: number; home?: string; token?: string },
+    options?: ClaudeOptions,
   ) {
     this.id = id;
     this.#query = query;
     this.#apiKey = apiKey ?? undefined;
     this.#compactAt = options?.compactAt ?? defaultCompactAt;
+    this.#effort = options?.effort;
     this.#home = options?.home;
+    this.#model = options?.model === 'default' ? undefined : options?.model;
     this.#token = options?.token;
+  }
+
+  describeDefaults() {
+    const model = this.#model ?? this.#defaultModel;
+    const effort = this.#effort ?? this.#defaultEffort;
+    return { ...(model && { model }), ...(effort && { effort }) };
+  }
+
+  describeSession(sessionId: string) {
+    return this.#sessions.get(sessionId);
+  }
+
+  describeQuota(): AgentQuota | undefined {
+    if (!this.#quota.size) return;
+    const primary = this.#quota.get('five_hour');
+    const secondary = this.#quota.get('seven_day');
+    const [rateLimitReachedType] = this.#reached;
+    return {
+      ...(primary && { primary }),
+      ...(secondary && { secondary }),
+      ...(rateLimitReachedType && { rateLimitReachedType }),
+    };
+  }
+
+  #updateQuota({
+    rateLimitType,
+    resetsAt,
+    status,
+    utilization,
+  }: SDKRateLimitInfo) {
+    if (rateLimitType !== 'five_hour' && rateLimitType !== 'seven_day') return;
+    const previous = this.#quota.get(rateLimitType);
+    this.#quota.set(rateLimitType, {
+      ...previous,
+      windowDurationMins: quotaWindows[rateLimitType],
+      ...(typeof resetsAt === 'number' &&
+        Number.isFinite(resetsAt) && { resetsAt }),
+      ...(typeof utilization === 'number' &&
+        Number.isFinite(utilization) && {
+          usedPercent: utilization <= 1 ? utilization * 100 : utilization,
+        }),
+    });
+    if (status === 'rejected') this.#reached.add(rateLimitType);
+    if (status === 'allowed' || status === 'allowed_warning')
+      this.#reached.delete(rateLimitType);
   }
 
   async stop() {
@@ -139,6 +207,7 @@ export class ClaudeAgent implements AgentConnector {
 
   async #compact(request: AgentCompactRequest): Promise<AgentCompactResult> {
     let compacted: AgentCompactResult = { status: 'skipped' };
+    let hasResult = false;
     const input: AgentRequest = {
       ...request,
       context: [],
@@ -164,10 +233,11 @@ export class ClaudeAgent implements AgentConnector {
           compacted = { status: 'compacted', ...compactionDetails(event) };
       } else if (event.type === 'result') {
         assertSuccess(event);
-        return compacted;
+        hasResult = true;
       }
     }
-    throw new Error('Claude compaction ended before a result');
+    if (!hasResult) throw new Error('Claude compaction ended before a result');
+    return compacted;
   }
 
   async *#session(request: AgentRequest, io?: AgentIO, command?: '/compact') {
@@ -183,6 +253,7 @@ export class ClaudeAgent implements AgentConnector {
     const signal = abortController.signal;
     try {
       const workdir = await realpath(request.workdir);
+      if (this.#home) await mkdir(this.#home, { recursive: true, mode: 0o700 });
       const query =
         this.#query ?? (await import('@anthropic-ai/claude-agent-sdk')).query;
       signal.throwIfAborted();
@@ -202,6 +273,7 @@ export class ClaudeAgent implements AgentConnector {
         cwd: workdir,
         model: request.model === 'default' ? undefined : request.model,
         maxTurns: command ? 1 : undefined,
+        persistSession: request.purpose === 'summary' ? false : undefined,
         resume: request.resumeSessionId,
         effort:
           request.thinking && effortLevels.has(request.thinking)
@@ -232,6 +304,7 @@ export class ClaudeAgent implements AgentConnector {
           CLAUDE_CONFIG_DIR: this.#home,
           [apiKeyName]: this.#apiKey,
           [oauthTokenName]: this.#token,
+          DISABLE_AUTOUPDATER: '1',
           CLAUDE_AGENT_SDK_CLIENT_APP: 'tsugimori/0.0.0',
           CLAUDE_CODE_AUTO_COMPACT_WINDOW: String(
             nativeCompactionLimit(
@@ -306,6 +379,23 @@ export class ClaudeAgent implements AgentConnector {
         options,
       })) {
         signal.throwIfAborted();
+        if (event.type === 'rate_limit_event')
+          this.#updateQuota(event.rate_limit_info);
+        if (
+          !command &&
+          !request.purpose &&
+          event.type === 'system' &&
+          event.subtype === 'init'
+        ) {
+          const { effort, model } = event;
+          this.#sessions.set(event.session_id, {
+            ...(model && { model }),
+            ...(effort && { effort }),
+          });
+          if (request.model === 'default') this.#defaultModel = model;
+          if (!request.thinking && request.model === (this.#model ?? 'default'))
+            this.#defaultEffort = effort ?? undefined;
+        }
         yield event;
       }
       signal.throwIfAborted();
@@ -453,6 +543,7 @@ export class ClaudeAgent implements AgentConnector {
         lastContext = event.compact_metadata.post_tokens;
         yield {
           type: 'compaction',
+          status: 'ok',
           trigger:
             event.compact_metadata.trigger === 'auto' ? 'native' : 'manual',
           ...compactionDetails(event),
@@ -460,22 +551,23 @@ export class ClaudeAgent implements AgentConnector {
       } else if (event.type === 'result') {
         assertSuccess(event);
         result = event;
-        break;
       }
     }
     if (!result) throw new Error('Claude query ended before a result');
     const usageByModel = result.modelUsage ?? {};
     const reportedModels = Object.values(usageByModel);
-    const window = (
+    const reportedWindow = (
       usageByModel[model ?? request.model] ??
+      usageByModel[request.model] ??
       (reportedModels.length === 1 ? reportedModels[0] : undefined)
     )?.contextWindow;
-    if (
-      typeof window === 'number' &&
-      Number.isSafeInteger(window) &&
-      window > 0
-    )
-      this.#contextWindows.set(request.model, window);
+    const window =
+      typeof reportedWindow === 'number' &&
+      Number.isSafeInteger(reportedWindow) &&
+      reportedWindow > 0
+        ? reportedWindow
+        : undefined;
+    if (window !== undefined) this.#contextWindows.set(request.model, window);
 
     // Aggregate turn usage may count the same context several times across tool calls.
     const tokens =
@@ -493,6 +585,7 @@ export class ClaudeAgent implements AgentConnector {
     yield {
       type: 'usage',
       contextTokens: tokens ?? null,
+      ...(window === undefined ? {} : { contextWindow: window }),
       inputTokens: result.usage.input_tokens,
       outputTokens: result.usage.output_tokens,
     };
@@ -555,6 +648,9 @@ export default definePlugin({
         return new ClaudeAgent({}, config.id, auth.apiKey ?? null, {
           ...auth,
           compactAt: config.compactAt,
+          model: typeof config.model === 'string' ? config.model : undefined,
+          effort:
+            typeof config.thinking === 'string' ? config.thinking : undefined,
         });
       },
       { implementation },

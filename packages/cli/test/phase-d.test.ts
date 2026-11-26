@@ -454,11 +454,12 @@ test('Claude uses the SDK binary and keeps setup-token auth out of the config an
   const store = new SqliteStore(':memory:');
   t.after(() => store.close());
   const registry = new PluginRegistry([claude]);
+  const rejected = 'sk-ant-oat01-synthetic-rejected-example';
   const token = 'sk-ant-oat01-test-test-test-test-test-tests';
   const home = join(workspace, 'agents', 'claude-1', 'home');
   const prompts: boolean[] = [];
   const progress: string[] = [];
-  let tested = false;
+  let tested = 0;
   const setup = new GuidedSetup({
     registry,
     workspace,
@@ -467,41 +468,49 @@ test('Claude uses the SDK binary and keeps setup-token auth out of the config an
       const key = (await loadSettings(workspace, registry)).agents[0]?.options
         ?.tokenEnv;
       assert.equal(key, undefined);
-      assert.equal(
-        ctx.credential('CLAUDE_CODE_OAUTH_TOKEN_636C617564652D31'),
-        token,
-      );
-      tested = true;
+      const actual = ctx.credential('CLAUDE_CODE_OAUTH_TOKEN_636C617564652D31');
+      assert.equal(actual, tested === 0 ? rejected : token);
+      if (++tested === 1) throw new Error('test turn rejected the token');
     },
-    async runCommand([cli, subcommand, action], options) {
+    async runCommand([cli, subcommand, action, flag], options) {
       assert.match(cli, /claude-agent-sdk-[^/]+\/claude(?:\.exe)?$/);
+      if (subcommand === '--help')
+        return { ...ok, stdout: '--autocompact <auto|tokens>' };
       assert.equal(subcommand, 'auth');
       assert.equal(action, 'status');
+      assert.equal(flag, '--json');
       assert.equal(options?.env?.CLAUDE_CONFIG_DIR, home);
-      assert.equal(options?.env?.CLAUDE_CODE_OAUTH_TOKEN, token);
+      assert.equal(
+        options?.env?.CLAUDE_CODE_OAUTH_TOKEN,
+        tested === 0 ? rejected : token,
+      );
       return { ...ok, stdout: '{"loggedIn":true}' };
     },
   });
-  await mkdir(join(workspace, 'agents'), { recursive: true });
-  await setup.run(
-    { mode: 'add', category: 'agent', id: 'claude-1', kind: 'claude-sdk' },
-    {
-      signal: AbortSignal.timeout(5_000),
-      show: async (text) => {
-        progress.push(text);
+  const run = () =>
+    setup.run(
+      { mode: 'add', category: 'agent', id: 'claude-1', kind: 'claude-sdk' },
+      {
+        signal: AbortSignal.timeout(5_000),
+        show: async (text) => {
+          progress.push(text);
+        },
+        prompt: async ({ secret }) => {
+          prompts.push(Boolean(secret));
+          return secret ? (tested === 0 ? rejected : token) : 'token';
+        },
       },
-      prompt: async ({ secret }) => {
-        prompts.push(Boolean(secret));
-        return secret ? token : 'token';
-      },
-    },
-  );
-  assert.deepEqual(prompts, [false, true]);
-  assert.ok(tested);
+    );
+  await assert.rejects(run(), /test turn rejected/);
+  assert.deepEqual((await loadSettings(workspace, registry)).agents, []);
+  await run();
+  assert.deepEqual(prompts, [false, true, false, true]);
+  assert.equal(tested, 2);
   assert.ok(
     !JSON.stringify(await loadSettings(workspace, registry)).includes(token),
   );
   assert.ok(!progress.join('\n').includes(token));
+  assert.ok(!progress.join('\n').includes(rejected));
 });
 
 test('Claude browser login relays the vendor URL, handles a partial code prompt and confirms identity', async (t) => {
@@ -512,15 +521,20 @@ test('Claude browser login relays the vendor URL, handles a partial code prompt 
   const progress: string[] = [];
   const code = 'example-one-time#expected-state';
   const signIn =
-    'https://claude.com/cai/oauth/authorize?state=random&code_challenge=example';
+    'https://claude.com/cai/oauth/authorize?code=true&state=random&code_challenge=example';
   const prompts: { secret?: boolean; text: string }[] = [];
   let written = '';
+  let tested = 0;
   const setup = new GuidedSetup({
     registry,
     workspace,
     store,
-    testAgent: async () => {},
+    testAgent: async () => {
+      tested++;
+    },
     async runCommand([, verb, action], options) {
+      if (verb === '--help')
+        return { ...ok, stdout: '--autocompact <auto|tokens>' };
       assert.equal(verb, 'auth');
       if (action === 'status')
         return {
@@ -536,29 +550,91 @@ test('Claude browser login relays the vendor URL, handles a partial code prompt 
           written += text;
         },
       };
+      await onChunk(
+        'Opening ' +
+          signIn.replace('code=true', 'code=ignored-callback-secret') +
+          '\n',
+        io,
+      );
       await onChunk('Opening ' + signIn.slice(0, 45), io);
       await onChunk(signIn.slice(45) + '\nPaste code ', io);
       await onChunk('here > ', io);
       return ok;
     },
   });
-  await setup.run(
-    { mode: 'add', category: 'agent', id: 'claude', kind: 'claude-sdk' },
-    {
-      signal: AbortSignal.timeout(5_000),
-      show: async (text) => {
-        progress.push(text);
+  const run = (mode: 'add' | 'login', confirm: string) => {
+    prompts.length = 0;
+    return setup.run(
+      mode === 'add'
+        ? { mode, category: 'agent', id: 'claude', kind: 'claude-sdk' }
+        : { mode, id: 'claude' },
+      {
+        signal: AbortSignal.timeout(5_000),
+        show: async (text) => {
+          progress.push(text);
+        },
+        prompt: async (question) => {
+          prompts.push(question);
+          return prompts.length === 1
+            ? 'login'
+            : question.secret
+              ? code
+              : confirm;
+        },
       },
-      prompt: async (question) => {
-        prompts.push(question);
-        return prompts.length === 1 ? 'login' : question.secret ? code : 'yes';
-      },
-    },
-  );
-  assert.equal(written, code + '\n');
+    );
+  };
+  await assert.rejects(run('add', 'no'), /not confirmed/);
+  assert.equal(tested, 0);
+  await run('add', 'yes');
+  await run('login', 'yes');
+  assert.equal(tested, 2);
+  assert.equal(written, (code + '\n').repeat(3));
   assert.match(prompts[2]?.text ?? '', /owner@example\.test/);
   assert.ok(progress.some((text) => text.includes(signIn)));
   assert.ok(!progress.join('\n').includes(code));
+  assert.ok(!progress.join('\n').includes('ignored-callback-secret'));
+});
+
+test('setup and doctor report the bundled Claude CLI and the agent home', async (t) => {
+  const workspace = await fixture(t, {
+    agents: [
+      { id: 'claude', kind: 'claude-sdk' },
+      {
+        id: 'blocked',
+        kind: 'claude-sdk',
+        options: { claudeHome: 'tsugimori.json/home' },
+      },
+    ],
+  });
+  const logs = t.mock.method(console, 'log', () => {});
+  const deps: SetupDependencies = {
+    platform: 'linux',
+    arch: 'x64',
+    async runCommand([bin, arg]) {
+      if (bin === 'git') return ok;
+      assert.match(bin, /claude-agent-sdk-linux-x64\/claude$/);
+      assert.equal(arg, '--help');
+      return { ...ok, stdout: '--autocompact <auto|tokens>' };
+    },
+  };
+  for (const command of ['setup', 'doctor']) {
+    logs.mock.resetCalls();
+    assert.equal(
+      await main([command, workspace], undefined, deps),
+      command === 'doctor' ? 1 : 0,
+    );
+    const report = logs.mock.calls
+      .map(({ arguments: args }) => args[0])
+      .join('\n');
+    assert.match(
+      report,
+      /\[OK\] agent\/claude · Claude Agent SDK bundled CLI: Bundled Claude CLI runs on linux-x64\./,
+    );
+    assert.match(report, /\[OK\] agent\/claude · Claude home directory/);
+    assert.match(report, /\[FAIL\] agent\/blocked · Claude home directory/);
+  }
+  assert.ok(!(await readdir(workspace)).includes('agents'));
 });
 
 test('doctor distinguishes bubblewrap namespaces from named and Quick Cloudflare preview checks', async (t) => {

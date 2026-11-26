@@ -71,7 +71,7 @@ export class GuidedSetup {
     if (!kind) throw new SetupError(m.agentMissing);
     const plugin = registry.forInstance(category, kind);
     const steps = (plugin?.setupSteps ?? []).filter(
-      (step) => mode === 'add' || step.id === 'login',
+      (step) => mode === 'add' || step.id === 'login' || step.runOnLogin,
     );
     if (!steps.length)
       throw new SetupError(m.noSteps(mode === 'login', category, kind));
@@ -185,8 +185,19 @@ export class GuidedSetup {
           testTurn: () =>
             this.#testTurn(run.draft.entry, current, signal, m.testFailed),
         };
-        if (io.measure) await io.measure(step.id, async () => step.run(ctx));
-        else await step.run(ctx);
+        try {
+          if (io.measure) await io.measure(step.id, async () => step.run(ctx));
+          else await step.run(ctx);
+        } catch (error) {
+          if (step.retryFrom && !signal.aborted) {
+            const retry = steps.findIndex(({ id }) => id === step.retryFrom);
+            if (retry >= 0 && retry < run.step) {
+              checkpoint.step = retry;
+              save();
+            }
+          }
+          throw error;
+        }
         run.step++;
         checkpoint = structuredClone(run);
         save();
@@ -252,6 +263,8 @@ export class GuidedSetup {
               },
             ],
             model: typeof entry.model === 'string' ? entry.model : 'default',
+            thinking:
+              typeof entry.thinking === 'string' ? entry.thinking : undefined,
             purpose: 'summary',
             sandbox: {
               workdir,

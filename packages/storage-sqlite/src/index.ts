@@ -785,7 +785,7 @@ export class SqliteStore implements Store {
                 eq(traceSpans.name, 'agent.compaction'),
                 eq(traceSpans.status, 'ok'),
               )
-            : sql`json_extract(${traceSpans.attrs}, '$.contextTokens') is not null`,
+            : sql`json_extract(${traceSpans.attrs}, ${metric === 'contextWindow' ? '$.contextWindow' : '$.contextTokens'}) is not null`,
         ),
       )
       .orderBy(desc(traceSpans.id))

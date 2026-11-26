@@ -8,8 +8,10 @@ import type {
 } from '@tsugimori/plugin-sdk';
 
 import { agentHome, credentialKey, SetupError } from '@tsugimori/plugin-sdk';
-import { mkdir } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { access, mkdir, stat } from 'node:fs/promises';
 import { createRequire } from 'node:module';
+import { dirname } from 'node:path';
 
 export const apiKeyName = 'ANTHROPIC_API_KEY';
 export const oauthTokenName = 'CLAUDE_CODE_OAUTH_TOKEN';
@@ -139,12 +141,12 @@ export function claudeOptions(
 
 async function authStatus(
   ctx: CheckContext,
-  options = claudeOptions(ctx.entry, ctx),
+  cli: string,
+  options: ReturnType<typeof claudeOptions>,
   signal?: AbortSignal,
 ) {
   try {
-    const cli = resolveBundledCli(ctx.platform, ctx.arch);
-    const result = await ctx.runCommand([cli, 'auth', 'status'], {
+    const result = await ctx.runCommand([cli, 'auth', 'status', '--json'], {
       cwd: ctx.workspace,
       signal,
       env: {
@@ -162,41 +164,125 @@ async function authStatus(
     );
     if (info.loggedIn === true) return info;
   } catch {
+    signal?.throwIfAborted();
     // Authentication state is reported without logging raw CLI output.
   }
 }
 
+async function homeState(home: string) {
+  let directory = home;
+  for (;;) {
+    try {
+      if (!(await stat(directory)).isDirectory()) return 'unavailable';
+      await access(directory, constants.W_OK | constants.X_OK);
+      return directory === home ? 'writable' : 'creatable';
+    } catch (error) {
+      const parent = dirname(directory);
+      if (
+        parent === directory ||
+        !(error instanceof Error && 'code' in error && error.code === 'ENOENT')
+      )
+        return 'unavailable';
+      directory = parent;
+    }
+  }
+}
+
 export async function claudeChecks(ctx: CheckContext): Promise<CheckItem[]> {
-  const info = await authStatus(ctx);
+  const options = claudeOptions(ctx.entry, ctx);
+  const home = await homeState(options.home);
+  const homeWritable = home !== 'unavailable';
+  let cli: string | undefined;
   let supportsCompaction = false;
   try {
-    const cli = resolveBundledCli(ctx.platform, ctx.arch);
-    const help = await ctx.runCommand([cli, '--help'], {
+    const bundled = resolveBundledCli(ctx.platform, ctx.arch);
+    const help = await ctx.runCommand([bundled, '--help'], {
       cwd: ctx.workspace,
-      env: claudeEnvironment(),
+      env: {
+        ...claudeEnvironment(),
+        CLAUDE_CONFIG_DIR: options.home,
+        DISABLE_AUTOUPDATER: '1',
+        CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
+      },
     });
-    supportsCompaction =
-      help.exitCode === 0 && /(?:^|\s)--autocompact\s/.test(help.stdout);
+    if (help.exitCode === 0) {
+      cli = bundled;
+      supportsCompaction = /(?:^|\s)--autocompact\s/.test(help.stdout);
+    }
   } catch {
-    // Report unavailable compaction support without exposing CLI output.
+    // The check below reports a missing or unusable CLI without raw output.
   }
+  const items: CheckItem[] = [
+    {
+      id: 'claude-cli',
+      title: 'Claude Agent SDK bundled CLI',
+      status: cli ? 'ok' : 'fail',
+      detail: cli
+        ? `Bundled Claude CLI runs on ${ctx.platform}-${ctx.arch}.`
+        : 'The bundled Claude CLI is missing or could not start.',
+      fix: cli ? undefined : { hint: loginMessages.en.cliMissing },
+      localized: {
+        'zh-TW': {
+          title: 'Claude Agent SDK 隨附的 CLI',
+          detail: cli
+            ? `隨附的 Claude CLI 可在 ${ctx.platform}-${ctx.arch} 執行。`
+            : '找不到隨附的 Claude CLI，或無法啟動。',
+          hint: loginMessages['zh-TW'].cliMissing,
+        },
+      },
+      capabilities: ['agent'],
+    },
+    {
+      id: 'claude-home',
+      title: 'Claude home directory',
+      status: homeWritable ? 'ok' : 'fail',
+      detail: homeWritable
+        ? 'The Claude home directory is writable or can be created.'
+        : 'The Claude home directory cannot be written or created.',
+      fix: homeWritable
+        ? undefined
+        : { hint: 'Set options.claudeHome to a writable directory.' },
+      localized: {
+        'zh-TW': {
+          title: 'Claude 主目錄',
+          detail: homeWritable
+            ? 'Claude 主目錄可寫入或可建立。'
+            : '無法寫入或建立 Claude 主目錄。',
+          hint: '請將 options.claudeHome 設為可寫入的目錄。',
+        },
+      },
+      capabilities: ['agent'],
+    },
+  ];
+  if (!cli || !homeWritable) return items;
+  // The CLI initializes its config on `auth status`. Avoid creating a new
+  // agent home just to report the configured authentication method.
+  const authenticated = Boolean(
+    options.apiKey ||
+    options.token ||
+    (home === 'writable' && (await authStatus(ctx, cli, options))),
+  );
   return [
+    ...items,
     {
       id: 'claude-login',
       title: 'Claude authentication',
-      status: info ? 'ok' : 'fail',
-      detail: info
+      status: authenticated ? 'ok' : 'fail',
+      detail: authenticated
         ? 'Claude reports configured authentication.'
-        : 'Claude authentication or the SDK’s bundled CLI is unavailable.',
-      fix: info
+        : 'Claude reports no configured authentication.',
+      fix: authenticated
         ? undefined
         : {
-            hint: `Check the Agent SDK install and ask the owner to run /login ${ctx.entry.id}.`,
+            hint: `Ask the owner to run /login ${ctx.entry.id}.`,
           },
       localized: {
         'zh-TW': {
           title: 'Claude 登入',
-          hint: `請檢查 Agent SDK 是否已安裝，並請主人執行 /login ${ctx.entry.id}。`,
+          detail: authenticated
+            ? 'Claude 已設定登入方式。'
+            : 'Claude 尚未設定登入方式。',
+          hint: `請主人執行 /login ${ctx.entry.id}。`,
         },
       },
       capabilities: ['agent'],
@@ -226,6 +312,7 @@ export async function claudeChecks(ctx: CheckContext): Promise<CheckItem[]> {
 
 async function login(ctx: SetupContext) {
   const m = loginMessages[ctx.locale ?? 'en'];
+  const cli = resolveBundledCli(ctx.platform, ctx.arch, ctx.locale);
   const method = (
     await ctx.prompt({
       text: m.method,
@@ -247,6 +334,7 @@ async function login(ctx: SetupContext) {
     if (
       !(await authStatus(
         ctx,
+        cli,
         { ...options, apiKey: undefined, token },
         ctx.signal,
       ))
@@ -262,12 +350,12 @@ async function login(ctx: SetupContext) {
     return;
   }
   if (method !== 'login') throw new SetupError(m.invalidMethod);
-  const cli = resolveBundledCli(ctx.platform, ctx.arch, ctx.locale);
   const result = await browserLogin(ctx, cli, options.home);
   const info =
     result?.exitCode === 0
       ? await authStatus(
           ctx,
+          cli,
           { home: options.home, apiKey: undefined, token: undefined },
           ctx.signal,
         )
@@ -303,6 +391,8 @@ async function browserLogin(ctx: SetupContext, cli: string, home: string) {
         CLAUDE_CONFIG_DIR: home,
         NO_COLOR: '1',
         BROWSER: 'false',
+        DISABLE_AUTOUPDATER: '1',
+        CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
       },
       keepInputOpen: true,
       signal: ctx.signal,
@@ -310,17 +400,19 @@ async function browserLogin(ctx: SetupContext, cli: string, home: string) {
       async onChunk(chunk, io) {
         output = (output + chunk).slice(-16_384);
         const line = output.replace(/\x1b\[[0-9;]*m/g, '');
-        const candidate =
-          /https:\/\/(?:claude\.com\/cai|claude\.ai|platform\.claude\.com|console\.anthropic\.com)\/oauth\/authorize\?[^\s"'<>]+(?=[\s"'<>])/.exec(
-            line,
-          )?.[0];
-        if (
-          candidate &&
-          !urlShown &&
-          !/[?&](?:code|token|access_token|refresh_token)=/i.test(candidate)
-        ) {
-          urlShown = true;
-          await ctx.show(m.open(candidate));
+        if (!urlShown) {
+          const urls = line.matchAll(
+            /https:\/\/(?:claude\.com\/cai|claude\.ai|platform\.claude\.com|console\.anthropic\.com)\/oauth\/authorize\?[^\s"'<>]+(?=[\s"'<>])/g,
+          );
+          for (const [url] of urls) {
+            const safe = [...new URL(url).searchParams].every(([key, value]) =>
+              key === 'code' ? value === 'true' : !/code$|token/i.test(key),
+            );
+            if (!safe) continue;
+            urlShown = true;
+            await ctx.show(m.open(url));
+            break;
+          }
         }
         if (
           urlShown &&
@@ -359,6 +451,8 @@ export const claudeSetup: SetupStep[] = [
     id: 'test',
     title: 'Run a Claude test turn',
     localized: { 'zh-TW': '執行 Claude 測試回合' },
+    retryFrom: 'login',
     run: (ctx) => ctx.testTurn(),
+    runOnLogin: true,
   },
 ];

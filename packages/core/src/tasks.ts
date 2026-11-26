@@ -156,16 +156,23 @@ export class Tasks {
       [...this.#approvals.values()].some(
         (approval) => approval.work === running && !approval.signal.aborted,
       );
+    const sessionInfo = sessionId
+      ? selected?.agent.describeSession?.(sessionId)
+      : undefined;
     return {
       agentId,
       model,
       thinking,
-      defaults: selected?.defaults,
+      defaults: sessionInfo
+        ? {
+            ...selected?.defaults,
+            ...(sessionInfo.model && { model: sessionInfo.model }),
+            ...(sessionInfo.effort && { effort: sessionInfo.effort }),
+          }
+        : selected?.defaults,
       compactAt: selected?.config.compactAt,
       quota: selected?.agent.describeQuota?.(),
-      serviceTier: sessionId
-        ? selected?.agent.describeSession?.(sessionId)?.serviceTier
-        : undefined,
+      serviceTier: sessionInfo?.serviceTier,
       sessionScope:
         sessionId && agentId && model
           ? sessionScope(

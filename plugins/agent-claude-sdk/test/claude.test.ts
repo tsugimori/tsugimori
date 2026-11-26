@@ -1,4 +1,7 @@
-import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
+import type {
+  SDKMessage,
+  SDKRateLimitInfo,
+} from '@anthropic-ai/claude-agent-sdk';
 import type {
   AgentCompactionEvent,
   AgentIO,
@@ -48,6 +51,130 @@ const io: AgentIO = {
 function frame(value: Record<string, unknown>) {
   return { session_id: 'claude-native', ...value } as SDKMessage;
 }
+
+const success = frame({
+  type: 'result',
+  subtype: 'success',
+  result: 'pong',
+  usage: { input_tokens: 9, output_tokens: 1 },
+});
+
+test('Claude caches only plan quota windows and merges sparse updates independently', async () => {
+  let quota: SDKRateLimitInfo;
+  const agent = new ClaudeAgent(
+    {
+      async *query() {
+        yield frame({ type: 'rate_limit_event', rate_limit_info: quota });
+        yield success;
+      },
+    },
+    'claude',
+    null,
+  );
+  const update = async (info: SDKRateLimitInfo) => {
+    quota = info;
+    await collect(agent.run(request(tmpdir()), io));
+    return agent.describeQuota();
+  };
+  assert.equal(agent.describeQuota(), undefined);
+  assert.equal(
+    await update({ rateLimitType: 'seven_day_opus', status: 'rejected' }),
+    undefined,
+  );
+  const primary = {
+    usedPercent: 25,
+    resetsAt: 1_800_000_000,
+    windowDurationMins: 300,
+  };
+  const secondary = {
+    usedPercent: 24,
+    resetsAt: 1_800_100_000,
+    windowDurationMins: 10_080,
+  };
+  assert.deepEqual(
+    await update({
+      rateLimitType: 'five_hour',
+      status: 'allowed',
+      utilization: 0.25,
+      resetsAt: primary.resetsAt,
+    }),
+    { primary },
+  );
+  assert.deepEqual(
+    await update({
+      rateLimitType: 'seven_day',
+      status: 'allowed_warning',
+      utilization: 24,
+      resetsAt: secondary.resetsAt,
+    }),
+    { primary, secondary },
+  );
+  assert.deepEqual(
+    await update({ rateLimitType: 'five_hour', status: 'rejected' }),
+    { primary, secondary, rateLimitReachedType: 'five_hour' },
+  );
+  const nextSecondary = { ...secondary, resetsAt: 1_800_200_000 };
+  assert.deepEqual(
+    await update({
+      rateLimitType: 'seven_day',
+      status: 'allowed',
+      resetsAt: nextSecondary.resetsAt,
+    }),
+    { primary, secondary: nextSecondary, rateLimitReachedType: 'five_hour' },
+  );
+  assert.deepEqual(
+    await update({
+      rateLimitType: 'five_hour',
+      status: 'allowed',
+      utilization: 0,
+    }),
+    { primary: { ...primary, usedPercent: 0 }, secondary: nextSecondary },
+  );
+});
+
+test('Claude reports configured defaults and tracks SDK init metadata per session', async () => {
+  let sessionId = 'first';
+  const deps = {
+    async *query() {
+      yield frame({
+        type: 'system',
+        subtype: 'init',
+        session_id: sessionId,
+        model: 'claude-sonnet-4-6',
+        effort: 'medium',
+      });
+      yield { ...success, session_id: sessionId };
+    },
+  };
+  const input = { ...request(tmpdir()), model: 'default', thinking: undefined };
+  const agent = new ClaudeAgent(deps, 'claude', null);
+  assert.deepEqual(agent.describeDefaults(), {});
+  assert.equal(agent.describeSession('first'), undefined);
+  await collect(agent.run(input, io));
+  const observed = { model: 'claude-sonnet-4-6', effort: 'medium' };
+  assert.deepEqual(agent.describeDefaults(), observed);
+  assert.deepEqual(agent.describeSession('first'), observed);
+  assert.equal(agent.describeSession('other'), undefined);
+
+  sessionId = 'summary';
+  await collect(
+    agent.run({ ...input, model: 'claude-haiku-4-5', purpose: 'summary' }, io),
+  );
+  assert.deepEqual(agent.describeDefaults(), observed);
+  assert.equal(agent.describeSession('summary'), undefined);
+
+  const configured = { model: 'claude-opus-4-8', effort: 'high' };
+  const pinned = new ClaudeAgent(deps, 'claude', null, configured);
+  assert.deepEqual(pinned.describeDefaults(), configured);
+  await collect(
+    pinned.run(
+      { ...input, model: configured.model, thinking: configured.effort },
+      io,
+    ),
+  );
+  assert.deepEqual(pinned.describeDefaults(), configured);
+  assert.deepEqual(pinned.describeSession('summary'), observed);
+});
 
 test(
   'Claude isolates settings, routes tool permissions and streams typed SDK events',
@@ -226,6 +353,7 @@ test(
         {
           type: 'compaction',
           trigger: 'native',
+          status: 'ok',
           tokensBefore: 125_000,
           tokensAfter: 600,
           durationMs: 15,
@@ -348,7 +476,10 @@ test(
             result: 'reply',
             num_turns: 2,
             usage: { input_tokens: 600_000, output_tokens: 10 },
-            modelUsage: { 'fake-model': { contextWindow: 300_000 } },
+            modelUsage: {
+              'subagent-model': { contextWindow: 50_000 },
+              'fake-model': { contextWindow: 300_000 },
+            },
           });
         },
       },
@@ -375,6 +506,16 @@ test(
       );
 
     const first = await collect(turn('first'));
+    assert.deepEqual(
+      first.find(({ type }) => type === 'usage'),
+      {
+        type: 'usage',
+        contextTokens: 260_010,
+        contextWindow: 300_000,
+        inputTokens: 600_000,
+        outputTokens: 10,
+      },
+    );
     assert.ok(
       first.some(
         (event) => event.type === 'text.final' && event.text === 'reply',

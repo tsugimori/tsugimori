@@ -73,7 +73,16 @@ export async function runSetup(
   for (const agent of snapshot.config.agents) {
     if (agent.enabled === false) continue;
     const plugin = registry.forInstance('agent', agent.kind);
-    if (!plugin?.install) continue;
+    if (!plugin?.install) {
+      const items = await checks.plugin(
+        plugin,
+        checks.context(agent, snapshot.env),
+        `agent/${agent.id}`,
+        'agent',
+      );
+      if (items.length) print(doctorText(items, snapshot.config.locale));
+      continue;
+    }
     try {
       const version = await plugin.install(
         checks.context(agent, snapshot.env),
