@@ -1,9 +1,14 @@
 import type {
   AdapterContext,
+  AttachmentContent,
   InboundMessage,
+  MediaDestination,
+  MediaUpload,
   OutboundMessage,
   PlatformAdapter,
+  PlatformCapabilities,
   PlatformFactory,
+  QueuedMedia,
   SendPart,
   WebhookIngress,
   WebhookRoute,
@@ -12,14 +17,18 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 
 import {
   definePlugin,
+  parseWebhookBaseUrl,
   PlatformStartError,
   SendFailure,
+  ToolFailure,
 } from '@tsugimori/plugin-sdk';
+import { randomUUID } from 'node:crypto';
 
-import type { LineText } from './api.ts';
+import type { LineMessage } from './api.ts';
 
 import { LineApi, LineApiError, nonempty, record } from './api.ts';
 import { messageParts } from './message-text.ts';
+import { LineMediaHost } from './outbound-media.ts';
 import {
   defaultReplyTokenTtlMs,
   lineChecks,
@@ -31,8 +40,22 @@ import {
   lineSetup,
   validToken,
 } from './setup.ts';
+import { lineStickers, searchLineStickers } from './stickers.ts';
 import { mapEvent } from './updates.ts';
 import { webhook, webhookPath } from './webhook.ts';
+
+const uploadLimits = {
+  files: { maxBytes: 200 * 1024 * 1024 },
+  images: { maxBytes: 10 * 1024 * 1024 },
+};
+const maxPreview = 1024 * 1024;
+type PendingMedia =
+  | { packageId: string; stickerId: string; type: 'sticker' }
+  | {
+      original: AttachmentContent;
+      preview: AttachmentContent;
+      type: 'image' | 'video';
+    };
 
 const messagesPerRequest = 5;
 const profileTtlMs = 5 * 60_000;
@@ -91,7 +114,9 @@ function messageKey(chatId: string, messageId: string) {
 export class LineAdapter implements PlatformAdapter {
   readonly id: string;
   readonly kind = 'line';
-  readonly capabilities = {
+  readonly capabilities: PlatformCapabilities = {
+    ...uploadLimits,
+    stickers: true,
     deleteEvents: false,
     inlineButtons: false,
     outboundPush: 'metered' as const,
@@ -101,6 +126,11 @@ export class LineAdapter implements PlatformAdapter {
   readonly #api: LineApi;
   readonly #options: LineOptions;
   readonly #now: () => number;
+  readonly #mediaHost: LineMediaHost;
+  readonly #queued = new WeakMap<
+    QueuedMedia,
+    PendingMedia & { destination: MediaDestination }
+  >();
   readonly #seen = new Lru<true>(4096);
   readonly #sent = new Lru<true>(4096);
   readonly #quotes = new Lru<string>(4096);
@@ -127,6 +157,7 @@ export class LineAdapter implements PlatformAdapter {
     this.#api = new LineApi(fetch, options.token);
     this.#options = options;
     this.#now = now;
+    this.#mediaHost = new LineMediaHost(now);
     this.id = id;
   }
 
@@ -146,8 +177,26 @@ export class LineAdapter implements PlatformAdapter {
     const signal = ctx.signal
       ? AbortSignal.any([ctx.signal, controller.signal])
       : controller.signal;
+    const path = webhookPath(this.id);
+    const mediaPath = path + 'media/';
     const route = (request: IncomingMessage, response: ServerResponse) => {
-      if (request.method !== 'POST' || signal.aborted) {
+      const target = request.url?.split('?', 1)[0];
+      if (!signal.aborted && target?.startsWith(mediaPath)) {
+        this.#mediaHost.serve(
+          target.slice(mediaPath.length),
+          request,
+          response,
+          () => ctx.logInfo?.('line.media_served'),
+        );
+        return;
+      }
+      if (
+        request.method !== 'POST' ||
+        signal.aborted ||
+        (target !== path &&
+          target !== path.slice(0, -1) &&
+          target !== path + 'webhook')
+      ) {
         response.writeHead(404).end();
         return;
       }
@@ -201,7 +250,12 @@ export class LineAdapter implements PlatformAdapter {
     signal.throwIfAborted();
     try {
       const path = webhookPath(this.id);
-      const release = await this.#options.ingress.register(path, route, signal);
+      const release = await this.#options.ingress.register(
+        path,
+        route,
+        signal,
+        { prefix: true },
+      );
       try {
         const releaseAlias = await this.#options.ingress.register(
           path + 'webhook',
@@ -238,6 +292,7 @@ export class LineAdapter implements PlatformAdapter {
       const release = await listener.start.catch(() => undefined); // start() reports its failure.
       await release?.();
     } finally {
+      this.#mediaHost.clear();
       this.#botIdentity = undefined;
       this.#seen.clear();
       this.#sent.clear();
@@ -302,38 +357,215 @@ export class LineAdapter implements PlatformAdapter {
     if (!signal.aborted) await ctx.emit({ ...inbound, userDisplay });
   }
 
-  async send(message: OutboundMessage) {
+  searchStickers(query: string, limit: number) {
+    return searchLineStickers(query, limit);
+  }
+
+  async sendSticker(
+    message: MediaDestination & { fileId: string; packageId?: string },
+    signal: AbortSignal,
+  ) {
+    signal.throwIfAborted();
+    const { fileId, packageId } = message;
+    const sticker = lineStickers.get(fileId);
+    if (!sticker?.packageId || (packageId && sticker.packageId !== packageId))
+      throw new ToolFailure(
+        'LINE only supports official sendable stickers. Use sticker.search to find one.',
+      );
+    return this.#queue(message, {
+      type: 'sticker',
+      packageId: sticker.packageId,
+      stickerId: fileId,
+    });
+  }
+
+  sendImage(message: MediaUpload, signal: AbortSignal) {
+    return this.#queueUpload(
+      message,
+      'image',
+      uploadLimits.images.maxBytes,
+      signal,
+    );
+  }
+
+  sendFile(message: MediaUpload, signal: AbortSignal) {
+    return this.#queueUpload(
+      message,
+      'video',
+      uploadLimits.files.maxBytes,
+      signal,
+    );
+  }
+
+  async #queueUpload(
+    message: MediaUpload,
+    type: 'image' | 'video',
+    limit: number,
+    signal: AbortSignal,
+  ) {
+    signal.throwIfAborted();
+    this.#mediaBase();
+    const { file } = message;
+    if (file.bytes.byteLength > limit)
+      throw new ToolFailure(
+        `LINE ${type} exceeds the ${limit / 1024 ** 2} MB size limit`,
+      );
+    const bytes = Buffer.from(
+      file.bytes.buffer,
+      file.bytes.byteOffset,
+      file.bytes.byteLength,
+    );
+    const mime =
+      type === 'video'
+        ? bytes.length >= 12 && bytes.toString('ascii', 4, 8) === 'ftyp'
+          ? 'video/mp4'
+          : undefined
+        : bytes.subarray(0, 8).equals(Buffer.from('89504e470d0a1a0a', 'hex'))
+          ? 'image/png'
+          : bytes.subarray(0, 3).equals(Buffer.from('ffd8ff', 'hex'))
+            ? 'image/jpeg'
+            : undefined;
+    if (!mime)
+      throw new ToolFailure(
+        type === 'video'
+          ? 'LINE can send MP4 video files only'
+          : 'LINE images must be JPEG or PNG',
+      );
+    const original = { bytes: file.bytes, mime };
+    const preview =
+      type === 'image' && bytes.byteLength <= maxPreview
+        ? original
+        : await message.preview(maxPreview);
+    if (
+      preview.bytes.byteLength > maxPreview ||
+      (preview.mime !== 'image/jpeg' && preview.mime !== 'image/png')
+    )
+      throw new ToolFailure('LINE requires a JPEG or PNG preview up to 1 MB');
+    signal.throwIfAborted();
+    return this.#queue(message, { type, original, preview });
+  }
+
+  #queue(
+    { chatId, replyTo, threadId }: MediaDestination,
+    media: PendingMedia,
+  ): QueuedMedia {
+    if (!this.#listener || !this.#botIdentity)
+      throw new ToolFailure('LINE adapter is detached');
+    const handle = { queued: true as const, id: randomUUID() };
+    this.#queued.set(handle, {
+      ...media,
+      destination: { chatId, replyTo, threadId },
+    });
+    return handle;
+  }
+
+  #mediaBase() {
+    const path = this.#options.ingress.url(webhookPath(this.id));
+    if (!parseWebhookBaseUrl(path))
+      throw new ToolFailure(
+        'LINE media requires healthy public HTTPS webhook ingress',
+      );
+    return path!.replace(/\/?$/, '/') + 'media/';
+  }
+
+  async send(
+    message: OutboundMessage,
+    options?: Parameters<PlatformAdapter['send']>[1],
+  ) {
     const parts: SendPart[] = [];
     try {
-      const signal = this.#listener?.signal;
-      if (!signal || !this.#botIdentity)
+      const listener = this.#listener;
+      if (!listener || !this.#botIdentity)
         throw new Error('LINE adapter is detached');
-      const { chatId, replyTo } = message;
-      const chunks = messageParts(message);
+      const signal = options?.signal
+        ? AbortSignal.any([options.signal, listener.signal])
+        : listener.signal;
+      const { chatId, replyTo, threadId } = message;
+      const media = options?.media ?? [];
+      const chunks =
+        media.length && !message.text.trim() ? [] : messageParts(message);
       const quoteToken =
         replyTo === undefined
           ? undefined
           : this.#quotes.get(messageKey(chatId, replyTo));
-      for (let i = 0; i < chunks.length; i += messagesPerRequest) {
+      const items: {
+        mediaId?: string;
+        payload: LineMessage | PendingMedia;
+        text: string;
+      }[] = chunks.map((text, index) => ({
+        payload: {
+          type: 'text',
+          text,
+          ...(index === 0 && quoteToken ? { quoteToken } : {}),
+        },
+        text,
+      }));
+      for (const handle of media) {
+        const queued = this.#queued.get(handle);
+        if (
+          !queued ||
+          queued.destination.chatId !== chatId ||
+          queued.destination.threadId !== threadId ||
+          queued.destination.replyTo !== replyTo
+        )
+          throw new ToolFailure(
+            'LINE queued media belongs to a different reply',
+          );
+        this.#queued.delete(handle);
+        const { type } = queued;
+        items.push({
+          mediaId: handle.id,
+          payload:
+            type === 'sticker'
+              ? {
+                  type,
+                  packageId: queued.packageId,
+                  stickerId: queued.stickerId,
+                }
+              : queued,
+          text: `[${type}]`,
+        });
+      }
+      for (let i = 0; i < items.length; i += messagesPerRequest) {
         signal.throwIfAborted();
         const requestSignal = AbortSignal.any([
           signal,
           AbortSignal.timeout(8000),
         ]);
-        const batch = chunks
-          .slice(i, i + messagesPerRequest)
-          .map((text, j): LineText => ({
-            type: 'text',
-            text,
-            ...(i === 0 && j === 0 && quoteToken ? { quoteToken } : {}),
-          }));
-        const token =
-          i === 0 ? this.#takeReplyToken(chatId, replyTo) : undefined;
-        const ids = await this.#sendBatch(batch, chatId, token, requestSignal);
-        for (const [index, messageId] of ids.entries()) {
-          if (!signal.aborted)
-            this.#sent.set(messageKey(chatId, messageId), true);
-          parts.push({ messageId, text: batch[index]!.text });
+        const batch = items.slice(i, i + messagesPerRequest);
+        const releases: (() => void)[] = [];
+        try {
+          const payload = batch.map(({ payload }): LineMessage => {
+            if (!('original' in payload)) return payload;
+            const base = this.#mediaBase();
+            const original = this.#mediaHost.publish(base, payload.original);
+            releases.push(original.release);
+            const preview = this.#mediaHost.publish(base, payload.preview);
+            releases.push(preview.release);
+            return {
+              type: payload.type,
+              originalContentUrl: original.url,
+              previewImageUrl: preview.url,
+            };
+          });
+          const token =
+            i === 0 ? this.#takeReplyToken(chatId, replyTo) : undefined;
+          const ids = await this.#sendBatch(
+            payload,
+            chatId,
+            token,
+            requestSignal,
+          );
+          for (const [index, messageId] of ids.entries()) {
+            if (!signal.aborted)
+              this.#sent.set(messageKey(chatId, messageId), true);
+            const { mediaId, text } = batch[index]!;
+            parts.push({ messageId, text, ...(mediaId && { mediaId }) });
+          }
+        } catch (error) {
+          if (!(error instanceof LineApiError) || !error.deliveryUnknown)
+            for (const release of releases) release();
+          throw error;
         }
       }
       return {
@@ -366,7 +598,7 @@ export class LineAdapter implements PlatformAdapter {
   }
 
   async #sendBatch(
-    batch: LineText[],
+    batch: LineMessage[],
     chatId: string,
     token: string | undefined,
     signal: AbortSignal,

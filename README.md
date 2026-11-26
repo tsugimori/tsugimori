@@ -85,27 +85,43 @@ PATH, supported inbound images and Telegram stickers are also sent to the
 model from memory. LINE stickers include webhook metadata. The LINE content
 API serves attachments hosted by LINE.
 
+Agents can send media in the current conversation using the tools supported by
+its platform. `send.image` and `send.file` accept a chat workspace path or
+`{ "attachment": { "messageId": "...", "index": 0 } }`. Telegram sends media
+immediately. LINE includes media with the final text when it can use a reply
+token and sends queued media even when the agent returns no text. [LINE delivery](plugins/platform-line/README.md#delivery-and-limits)
+
+Telegram sticker sets are indexed in the background for `sticker.search`. The
+index stores file IDs and descriptions without retaining image grids. The
+default agent needs vision support and `ffmpeg` must be on PATH. Set
+`stickers.model` in `tsugimori.json` to select a low-cost vision model for
+that backend. By default the gateway uses the connector's economy model when
+available, then the default agent's configured model. LINE searches its bundled
+official sticker catalog.
+
 ## Chat commands
 
-| Command                                     | Who                                                       | What it does                                                                                                |
-| ------------------------------------------- | --------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| `/help`                                     | Owner                                                     | Lists owner commands.                                                                                       |
-| `/status`                                   | Owner                                                     | Shows gateway health, chat activity, and system state.                                                      |
-| `/agent <id>`                               | Owner                                                     | Switches this chat to an available agent and reports any incompatible thinking or fast overrides it clears. |
-| `/model [name]`                             | Owner                                                     | Shows the current model and its source, or sets a chat override. Use `default` to clear it.                 |
-| `/thinking [level]`                         | Owner                                                     | Shows or sets reasoning effort for this chat. Use `default` to clear the override.                          |
-| `/fast [on\|off\|default]`                  | Owner                                                     | Shows or sets speed on a supported agent. `off` selects standard speed and `default` clears the override.   |
-| `/compact`                                  | Owner                                                     | Requests compaction of this chat's current agent session.                                                   |
-| `/allow`                                    | Owner                                                     | Lets members trigger the bot in this chat.                                                                  |
-| `/deny`                                     | Owner                                                     | Removes this chat from the allowlist and cancels active approval waits here.                                |
-| `/pair <code>`                              | Pairing code holder, in a DM to an unowned bot            | Claims ownership using an unexpired code.                                                                   |
-| `/pair new <adapterId>`                     | Owner, in a DM to a bot they own                          | Issues a fresh pairing code for an unowned platform.                                                        |
-| `/add <agent\|platform> <kind> [--id <id>]` | Owner                                                     | Runs guided setup for a plugin instance.                                                                    |
-| `/login <agentId>`                          | Owner                                                     | Signs an existing agent in again.                                                                           |
-| `/remove <platform\|agent> <id>`            | Owner                                                     | Lists categories or IDs when omitted, and asks for confirmation before removal.                             |
-| `/cancel`                                   | Owner in the originating chat or setup's secret-prompt DM | Cancels guided setup or a pending removal.                                                                  |
-| `/previews`                                 | Owner                                                     | Lists open previews on this adapter.                                                                        |
-| `/preview close <id>`                       | Owner                                                     | Closes a preview on this adapter.                                                                           |
+| Command                                          | Who                                                       | What it does                                                                                                |
+| ------------------------------------------------ | --------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `/help`                                          | Owner                                                     | Lists owner commands.                                                                                       |
+| `/status`                                        | Owner                                                     | Shows gateway health, chat activity, and system state.                                                      |
+| `/agent <id>`                                    | Owner                                                     | Switches this chat to an available agent and reports any incompatible thinking or fast overrides it clears. |
+| `/model [name]`                                  | Owner                                                     | Shows the current model and its source, or sets a chat override. Use `default` to clear it.                 |
+| `/thinking [level]`                              | Owner                                                     | Shows or sets reasoning effort for this chat. Use `default` to clear the override.                          |
+| `/fast [on\|off\|default]`                       | Owner                                                     | Shows or sets speed on a supported agent. `off` selects standard speed and `default` clears the override.   |
+| `/sticker`                                       | Owner in DM                                               | Lists indexed Telegram sets and their sticker counts and block status.                                      |
+| `/sticker block <set>`, `/sticker unblock <set>` | Owner                                                     | Blocks or unblocks a set for indexing and search across the workspace.                                      |
+| `/compact`                                       | Owner                                                     | Requests compaction of this chat's current agent session.                                                   |
+| `/allow`                                         | Owner                                                     | Lets members trigger the bot in this chat.                                                                  |
+| `/deny`                                          | Owner                                                     | Removes this chat from the allowlist and cancels active approval waits here.                                |
+| `/pair <code>`                                   | Pairing code holder, in a DM to an unowned bot            | Claims ownership using an unexpired code.                                                                   |
+| `/pair new <adapterId>`                          | Owner, in a DM to a bot they own                          | Issues a fresh pairing code for an unowned platform.                                                        |
+| `/add <agent\|platform> <kind> [--id <id>]`      | Owner                                                     | Runs guided setup for a plugin instance.                                                                    |
+| `/login <agentId>`                               | Owner                                                     | Signs an existing agent in again.                                                                           |
+| `/remove <platform\|agent> <id>`                 | Owner                                                     | Lists categories or IDs when omitted, and asks for confirmation before removal.                             |
+| `/cancel`                                        | Owner in the originating chat or setup's secret-prompt DM | Cancels guided setup or a pending removal.                                                                  |
+| `/previews`                                      | Owner                                                     | Lists open previews on this adapter.                                                                        |
+| `/preview close <id>`                            | Owner                                                     | Closes a preview on this adapter.                                                                           |
 
 `/status` uses the workspace locale and time zone. The header shows health, build information when available, and uptime. **This chat** shows the agent implementation and effective model, effort, and speed. When available, it adds context usage, session age, cached quota, last compaction and count, summary coverage, running or queued work, approvals, and schedules. **System** lists platform and agent states, the rich message setting for each Telegram instance, sandbox availability, and the count of failed environment checks. The card uses cached provider information and local state, and shows today's timestamps without a date.
 

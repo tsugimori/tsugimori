@@ -81,6 +81,7 @@ import { defaultAgent, Removal } from './removal.ts';
 import { Runtime } from './runtime.ts';
 import { GuidedSetup } from './setup.ts';
 import { statusCard } from './status.ts';
+import { StickerIndex } from './stickers.ts';
 import { BackgroundSummaries } from './summary.ts';
 import { systemMessages } from './system-messages.ts';
 import { reply, Tasks } from './tasks.ts';
@@ -157,6 +158,7 @@ export class Gateway {
   readonly #auth: Auth;
   readonly #outbound: Outbound;
   readonly #tasks: Tasks;
+  readonly #stickers: StickerIndex;
   readonly #summaries: BackgroundSummaries;
   readonly #scheduler: Scheduler;
   readonly #previews?: Previews;
@@ -247,6 +249,7 @@ export class Gateway {
           agents,
           target?.category === 'agent' ? target.id : undefined,
         );
+        await this.#stickers.interrupt(adapters, agents);
         if (target) await this.#summaries.interrupt(target);
         await this.#previews?.detach(adapters);
         await this.#execution.stop(adapters);
@@ -349,6 +352,13 @@ export class Gateway {
       recordWorkspace: () => !this.#runtime.disabled('workspace.record'),
       workdir: (chat) => context.workdir(chat),
     });
+    this.#stickers = new StickerIndex({
+      scope,
+      log,
+      runtime: this.#runtime,
+      store,
+      trace: this.#trace,
+    });
     this.#summaries = new BackgroundSummaries({
       toolDetails,
       scope,
@@ -441,6 +451,7 @@ export class Gateway {
       },
       outbound: this.#outbound,
       runtime: this.#runtime,
+      stickerTools: (adapter) => this.#stickers.tools(adapter),
       log,
       tools: [
         ...registry.plugins.flatMap((plugin) => [...(plugin.tools ?? [])]),
@@ -794,6 +805,7 @@ export class Gateway {
       try {
         await this.#chatSetup.stop();
         await this.#chatChoices.stop();
+        await this.#stickers.stop();
         await this.#summaries.stop();
         await this.#expiry;
         await this.#runtime.stop();
@@ -1099,6 +1111,8 @@ export class Gateway {
       recordDecision('duplicate', false);
       return;
     }
+    this.#stickers.observe(adapter, chat, event.attachments);
+    this.#stickers.observe(adapter, chat, replyTo?.attachments);
     if (inbound.type === 'chat-migrated') {
       recordDecision('not-addressed', false, stored.seq);
       return;
@@ -1931,6 +1945,11 @@ export class Gateway {
     }
     if (!owner) return;
     switch (name) {
+      case 'sticker':
+        await send(
+          this.#stickers.command(args, locale, message.chatKind === 'dm'),
+        );
+        break;
       case 'help':
         await send(
           chatCommands(locale)

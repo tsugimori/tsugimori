@@ -185,9 +185,11 @@ export class TurnOutput {
     }
     if (method === 'thread/tokenUsage/updated') {
       const usage = lastUsage(params);
+      const costUsd = usage.costUsd;
       return [
         {
           type: 'usage',
+          ...(typeof costUsd === 'number' && { costUsd }),
           contextTokens:
             typeof usage.totalTokens === 'number' ? usage.totalTokens : null,
           inputTokens:

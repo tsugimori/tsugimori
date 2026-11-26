@@ -213,6 +213,13 @@
         ]
       }
     },
+    "stickers": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "model": { "type": "string", "minLength": 1, "pattern": "\\S" }
+      }
+    },
     "defaultAgent": {
       "$ref": "#/definitions/id"
     },

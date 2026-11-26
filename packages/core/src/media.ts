@@ -212,6 +212,8 @@ export async function prepareImage(
       : attachment.stickerFormat === 'video'
         ? await videoFrames(command, input, signal)
         : input;
+  const seekableVideo =
+    attachment.kind === 'video' && attachment.mime === 'video/mp4';
   const png = attachment.kind === 'sticker';
   const mime = png ? 'image/png' : 'image/jpeg';
   for (let edge = limits.maxEdge; edge >= 1; edge = Math.floor(edge / 2)) {
@@ -221,8 +223,18 @@ export async function prepareImage(
       [
         ...pipeInput,
         ...(animated ? rawSticker : []),
+        ...(seekableVideo
+          ? [
+              '-protocol_whitelist',
+              'cache,pipe',
+              '-read_ahead_limit',
+              '-1',
+              '-f',
+              'mov',
+            ]
+          : []),
         '-i',
-        'pipe:0',
+        seekableVideo ? 'cache:pipe:0' : 'pipe:0',
         '-an',
         '-sn',
         '-map_metadata',
@@ -251,4 +263,102 @@ export async function prepareImage(
       return { data: output.toString('base64'), mime };
   }
   throw new Error('Image could not be encoded within the agent size limit');
+}
+
+/** Assemble one row-major sheet from the same thumbnails used for agent image input. */
+export async function prepareStickerGrid(
+  thumbnails: readonly AgentImage[],
+  limits: ImageLimits,
+  signal: AbortSignal,
+  command: string,
+): Promise<AgentImage> {
+  const columns = Math.min(4, thumbnails.length);
+  const rows = Math.ceil(thumbnails.length / columns);
+  const edge = Math.min(
+    128,
+    Math.floor(limits.maxEdge / Math.max(rows, columns)),
+    Math.floor(Math.sqrt((limits.maxPixels ?? Infinity) / (rows * columns))),
+  );
+  if (!Number.isFinite(edge) || edge < 1)
+    throw new Error('Sticker grid exceeds the agent image dimensions');
+  const width = columns * edge;
+  const height = rows * edge;
+  const rowBytes = edge * 3;
+  const frames = Buffer.alloc(width * height * 3, 235);
+  for (const [index, thumbnail] of thumbnails.entries()) {
+    const tile = await ffmpeg(
+      command,
+      Buffer.from(thumbnail.data, 'base64'),
+      [
+        ...pipeInput,
+        '-i',
+        'pipe:0',
+        '-vf',
+        `scale=${edge}:${edge}:force_original_aspect_ratio=decrease,format=rgba,pad=${edge}:${edge}:(ow-iw)/2:(oh-ih)/2:color=white@0`,
+        '-frames:v',
+        '1',
+        '-pix_fmt',
+        'rgba',
+        '-threads',
+        '1',
+        '-f',
+        'rawvideo',
+        'pipe:1',
+      ],
+      edge * edge * 4,
+      signal,
+    );
+    if (tile.length !== edge * edge * 4)
+      throw new Error('Could not render a complete sticker thumbnail');
+    const tileRow = Math.floor(index / columns) * edge;
+    const tileColumn = (index % columns) * rowBytes;
+    for (let y = 0; y < edge; y++) {
+      const offset = (tileRow + y) * width * 3 + tileColumn;
+      for (let x = 0; x < edge; x++) {
+        const start = (y * edge + x) * 4;
+        const alpha = tile[start + 3]! / 255;
+        for (let channel = 0; channel < 3; channel++)
+          frames[offset + x * 3 + channel] = Math.round(
+            tile[start + channel]! * alpha + 235 * (1 - alpha),
+          );
+      }
+    }
+  }
+  for (const quality of [4, 10, 20, 31]) {
+    const jpeg = await ffmpeg(
+      command,
+      frames,
+      [
+        ...pipeInput,
+        '-f',
+        'rawvideo',
+        '-pixel_format',
+        'rgb24',
+        '-video_size',
+        `${width}x${height}`,
+        '-i',
+        'pipe:0',
+        '-frames:v',
+        '1',
+        '-c:v',
+        'mjpeg',
+        '-pix_fmt',
+        'yuvj444p',
+        '-q:v',
+        String(quality),
+        '-threads',
+        '1',
+        '-f',
+        'image2pipe',
+        'pipe:1',
+      ],
+      Math.max(limits.maxBytes, frames.byteLength + 65_536),
+      signal,
+    );
+    if (jpeg.length && jpeg.length <= limits.maxBytes)
+      return { data: jpeg.toString('base64'), mime: 'image/jpeg' };
+  }
+  throw new Error(
+    'Sticker grid could not be encoded within the agent size limit',
+  );
 }

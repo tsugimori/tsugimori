@@ -131,6 +131,24 @@ export class CodexAgent implements AgentConnector {
     return this.#quota;
   }
 
+  async economyModel() {
+    if (!this.#server) return;
+    const models = await this.#models(this.#server);
+    const light = new Map<string, string>();
+    for (const { model, id, hidden, inputModalities } of models) {
+      const value = typeof model === 'string' ? model : id;
+      if (
+        hidden ||
+        typeof value !== 'string' ||
+        (Array.isArray(inputModalities) && !inputModalities.includes('image'))
+      )
+        continue;
+      const tier = /(?:^|-)(nano|mini)(?:-|$)/.exec(value)?.[1];
+      if (tier && !light.has(tier)) light.set(tier, value);
+    }
+    return light.get('nano') ?? light.get('mini');
+  }
+
   async listModels() {
     if (!this.#server) return [];
     const models = await this.#models(this.#server);
@@ -515,7 +533,7 @@ export class CodexAgent implements AgentConnector {
       request,
       resumeSessionId,
     );
-    const summarize = request.purpose === 'summary';
+    const summarize = request.purpose !== undefined;
     const scope = request.sandbox;
     const { support, windows } = await this.#inspection!;
     const window = await this.#window(

@@ -1179,3 +1179,195 @@ test('retries a rate-limited rich message as a rich message', async (t) => {
   );
   assert.deepEqual(warnings, []);
 });
+
+test('sends reactions, stickers, photos, documents and videos to the current Telegram topic', async (t) => {
+  const calls: { body: unknown; method: string }[] = [];
+  const fetch: typeof globalThis.fetch = async (input, init) => {
+    const method = new URL(String(input)).pathname.split('/').at(-1)!;
+    if (method === 'getMe') return ok(me);
+    if (method === 'getUpdates') return longPoll(init);
+    const { body } = init ?? {};
+    calls.push({
+      method,
+      body: typeof body === 'string' ? JSON.parse(body) : body,
+    });
+    return ok(
+      method === 'setMessageReaction'
+        ? true
+        : { message_id: 30 + calls.length },
+    );
+  };
+  const adapter = new TelegramAdapter({ fetch }, 'tg', '1:fake');
+  await adapter.start({ emit: async () => {} });
+  t.after(() => adapter.stop());
+  const signal = AbortSignal.timeout(3000);
+  const dest = { chatId: '-1001', threadId: '17', replyTo: '23' };
+  await adapter.sendReaction({ ...dest, messageId: '23', emoji: '👍' }, signal);
+  await assert.rejects(
+    adapter.sendReaction({ ...dest, messageId: '23', emoji: '🐱' }, signal),
+    /does not support/,
+  );
+  assert.equal(
+    (await adapter.sendSticker({ ...dest, fileId: 'CAAC_file-ID' }, signal))
+      .messageId,
+    '32',
+  );
+  assert.throws(
+    () =>
+      adapter.sendSticker(
+        { ...dest, fileId: 'https://example.test/sticker' },
+        signal,
+      ),
+    /file ID/,
+  );
+  const upload = {
+    ...dest,
+    file: {
+      bytes: Buffer.from('file bytes'),
+      name: 'test.png',
+      mime: 'image/png',
+    },
+    preview: () => assert.fail('Telegram uploads need no preview'),
+  };
+  assert.equal((await adapter.sendImage(upload, signal)).messageId, '33');
+  assert.equal((await adapter.sendFile(upload, signal)).messageId, '34');
+  assert.equal(
+    (
+      await adapter.sendFile(
+        {
+          ...upload,
+          file: { ...upload.file, mime: 'video/mp4', name: 'test.mp4' },
+        },
+        signal,
+      )
+    ).messageId,
+    '35',
+  );
+  const large = {
+    ...upload,
+    file: { ...upload.file, bytes: Buffer.alloc(10 * 1024 ** 2 + 1) },
+  };
+  assert.throws(() => adapter.sendImage(large, signal), /10 MB size limit/);
+  assert.deepEqual(
+    calls.map(({ method }) => method),
+    [
+      'setMessageReaction',
+      'sendSticker',
+      'sendPhoto',
+      'sendDocument',
+      'sendVideo',
+    ],
+  );
+  assert.deepEqual(calls[0]?.body, {
+    chat_id: dest.chatId,
+    message_id: 23,
+    reaction: [{ type: 'emoji', emoji: '👍' }],
+  });
+  const reply = { message_id: 23, allow_sending_without_reply: true };
+  assert.deepEqual(calls[1]?.body, {
+    chat_id: dest.chatId,
+    message_thread_id: 17,
+    reply_parameters: reply,
+    sticker: 'CAAC_file-ID',
+  });
+  for (const [i, field] of ['photo', 'document', 'video'].entries()) {
+    const form = calls[i + 2]?.body;
+    assert.ok(form instanceof FormData);
+    assert.equal(form.get('chat_id'), dest.chatId);
+    assert.equal(form.get('message_thread_id'), '17');
+    assert.deepEqual(JSON.parse(String(form.get('reply_parameters'))), reply);
+    const file = form.get(field);
+    assert.ok(file instanceof File);
+    assert.equal(file.name, field === 'video' ? 'test.mp4' : 'test.png');
+    assert.equal(await file.text(), 'file bytes');
+  }
+});
+
+test('Telegram media retries a group migration and returns the new native destination', async (t) => {
+  const forms: FormData[] = [];
+  const events: InboundEvent[] = [];
+  const fetch: typeof globalThis.fetch = async (input, init) => {
+    const method = new URL(String(input)).pathname.split('/').at(-1)!;
+    if (method === 'getMe') return ok(me);
+    if (method === 'getUpdates') return longPoll(init);
+    assert.equal(method, 'sendDocument');
+    assert.ok(init?.body instanceof FormData);
+    forms.push(init.body);
+    if (forms.length === 1)
+      return Response.json({
+        ok: false,
+        error_code: 400,
+        parameters: { migrate_to_chat_id: -2002 },
+      });
+    return ok({ message_id: 3 });
+  };
+  const adapter = new TelegramAdapter({ fetch }, 'tg', '1:fake');
+  await adapter.start({
+    emit: async (event) => {
+      events.push(event);
+    },
+  });
+  t.after(() => adapter.stop());
+  const result = await adapter.sendFile(
+    {
+      chatId: '-1001',
+      replyTo: '3',
+      threadId: '7',
+      file: { name: 'note.txt', bytes: Buffer.from('note') },
+      preview: () => assert.fail('unexpected preview'),
+    },
+    AbortSignal.timeout(3000),
+  );
+  assert.deepEqual(events, [
+    { type: 'chat-migrated', chatId: '-1001', newChatId: '-2002' },
+  ]);
+  assert.equal(forms[0]?.get('chat_id'), '-1001');
+  assert.equal(forms[1]?.get('chat_id'), '-2002');
+  assert.equal(forms[1]?.has('message_thread_id'), false);
+  assert.equal(forms[1]?.has('reply_parameters'), false);
+  assert.equal(result.parts?.[0]?.chatId, '-2002');
+  assert.equal(result.messageId, '3');
+});
+
+test('Telegram retrieves file references and types for a sticker set', async (t) => {
+  const fetch: typeof globalThis.fetch = async (input, init) => {
+    const method = new URL(String(input)).pathname.split('/').at(-1)!;
+    if (method === 'getMe') return ok(me);
+    if (method === 'getUpdates') return longPoll(init);
+    assert.equal(method, 'getStickerSet');
+    assert.deepEqual(JSON.parse(String(init?.body)), { name: 'example' });
+    return ok({
+      stickers: [
+        { file_id: 'static', file_unique_id: 'one', emoji: '🥰' },
+        {
+          file_id: 'tgs',
+          file_unique_id: 'two',
+          is_animated: true,
+          thumbnail: { file_id: 'thumb' },
+        },
+        { file_id: 'webm', file_unique_id: 'three', is_video: true },
+      ],
+    });
+  };
+  const adapter = new TelegramAdapter({ fetch }, 'tg', '1:fake');
+  await adapter.start({ emit: async () => {} });
+  t.after(() => adapter.stop());
+  const stickers = await adapter.getStickerSet(
+    'example',
+    AbortSignal.timeout(3000),
+  );
+  assert.deepEqual(
+    stickers.map(({ fileId, uniqueId, stickerFormat }) => [
+      fileId,
+      uniqueId,
+      stickerFormat,
+    ]),
+    [
+      ['static', 'one', 'static'],
+      ['tgs', 'two', 'lottie'],
+      ['webm', 'three', 'video'],
+    ],
+  );
+  assert.equal(stickers[0]?.emoji, '🥰');
+  assert.equal(stickers[1]?.thumbnail?.fileId, 'thumb');
+});

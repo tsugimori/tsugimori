@@ -329,3 +329,36 @@ test('owner webhook setup saves only after a successful probe and gates the LINE
   await find(({ text }) => text.includes('new-line 已接上'));
   assert.equal(store.getSetupRun(key)?.status, 'complete');
 });
+
+test('webhook ingress keeps descendant routes scoped to their registered prefix', async (t) => {
+  const listen = await freeAddress();
+  const listener = new WebhookListener();
+  t.after(() => listener.stop());
+  await listener.configure(listen);
+  const signal = AbortSignal.timeout(5000);
+  const release = await listener.register(
+    '/line/main/',
+    (_req, res) => {
+      res.writeHead(200).end('prefix');
+    },
+    signal,
+    { prefix: true },
+  );
+  await listener.register(
+    '/line/main/webhook',
+    (_req, res) => {
+      res.writeHead(200).end('exact');
+    },
+    signal,
+  );
+  const request = (path: string) => fetch('http://' + listen + path);
+  assert.equal(
+    await (await request('/line/main/media/token')).text(),
+    'prefix',
+  );
+  assert.equal(await (await request('/line/main/webhook')).text(), 'exact');
+  assert.equal((await request('/line/main-other/media/token')).status, 404);
+  assert.deepEqual(listener.paths(), ['/line/main', '/line/main/webhook']);
+  await release();
+  assert.equal((await request('/line/main/media/token')).status, 404);
+});

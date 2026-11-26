@@ -318,6 +318,20 @@ export interface ActiveTaskRefs extends ChatRef {
   taskId: string;
 }
 
+export interface IndexedSticker {
+  description: string;
+  emoji: string | null;
+  fileId: string;
+  format: 'animated' | 'static' | 'video';
+  uniqueId: string;
+}
+
+export interface StickerSetStatus {
+  blocked: boolean;
+  count: number;
+  name: string;
+}
+
 export interface Store {
   adminAgentActivity(
     agentId: string,
@@ -388,7 +402,6 @@ export interface Store {
     sourceMessageId?: string,
     sourceChatId?: string,
   ): void;
-
   claimPairing(principal: PrincipalRef, digest: string, now: number): boolean;
   claimScheduleRun(
     schedule: ScheduleRecord,
@@ -401,6 +414,7 @@ export interface Store {
   clearSession(ref: ChatRef): void;
   clearUnavailableCommandScopes(ref: CommandScopeChat): void;
   close(): void;
+
   closePreview(
     id: string,
     closedAt: number,
@@ -469,6 +483,9 @@ export interface Store {
     model?: string,
   ): AgentSession | undefined;
   getSetupRun(id: string): SetupRun | undefined;
+  getStickerDescriptions(
+    name: string,
+  ): { description: string; uniqueId: string }[];
   getSummary(ref: ChatRef): ChatSummary | undefined;
   getSummaryStatus(
     ref: ChatRef,
@@ -480,6 +497,7 @@ export interface Store {
   getUser(ref: PrincipalRef): UserRecord | undefined;
   getUserDisplay(ref: PrincipalRef): string | undefined;
   getWorkspaceSettings(ref: ChatRef): WorkspaceSettings | undefined;
+  hasStickerSet(name: string, botId: string): boolean;
   historyMessages(ref: ChatRef, query: HistoryQuery): HistoryMessage[];
   insertGrant(grant: StoredGrant): void;
   inspectInstanceData(
@@ -490,6 +508,7 @@ export interface Store {
   interruptScheduleRuns(now: number): void;
   interruptTasks(now: number): void;
   isSetupSecret(ref: ChatRef, messageId: string): boolean;
+  isStickerSetBlocked(name: string): boolean;
   latestSessionSpan(
     scope: string,
     metric: SessionMetric,
@@ -512,6 +531,7 @@ export interface Store {
   listPendingApprovals(ref: ChatRef): ApprovalRecord[];
   listPreviews(adapterId?: string): StoredPreview[];
   listSchedules(ref: ChatRef): ScheduleRecord[];
+  listStickerSets(): StickerSetStatus[];
   listUnavailableCommandScopes(
     ref: Omit<CommandScopeChat, 'chatId'>,
   ): { chatId: string; scope: string }[];
@@ -567,6 +587,12 @@ export interface Store {
   saveCursor(adapterId: string, stream: string, cursor: AdapterCursor): void;
   savePairingCode(adapterId: string, digest: string, expiresAt: number): void;
   saveSetupRun(run: SetupRun, lease: string): boolean;
+  saveStickerSet(
+    name: string,
+    botId: string,
+    source: ChatRef,
+    stickers: readonly IndexedSticker[],
+  ): boolean;
   saveSummary(summary: ChatSummary): boolean;
   saveTaskExecution(taskId: string, record: TaskExecution): void;
   saveTrigger(decision: TriggerDecision, messageSeq?: number): void;
@@ -581,6 +607,11 @@ export interface Store {
       'action' | 'id' | 'nextDueAt' | 'timezone' | 'trigger'
     >;
   };
+  searchStickers(
+    botId: string,
+    query: string,
+    limit: number,
+  ): { description: string; emoji?: string; fileId: string }[];
   sessionHistory(scope: string): SessionHistory;
   setAllowlisted(ref: ChatRef, allowlisted: boolean): void;
   setChatRoute(
@@ -589,6 +620,7 @@ export interface Store {
     invalidateSession?: boolean,
   ): void;
   setSession(session: AgentSession): void;
+  setStickerSetBlocked(name: string, blocked: boolean): void;
   setWorkspaceSettings(ref: ChatRef, settings: WorkspaceSettings): void;
   subscribeAdmin?(listener: (event: AdminEvent) => void): () => void;
   summaryMessages(

@@ -20,7 +20,7 @@ import { createServer, type Server } from 'node:http';
 import { test } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 
-import type { LineText } from '../src/api.ts';
+import type { LineMessage } from '../src/api.ts';
 
 import line, { LineAdapter } from '../src/index.ts';
 
@@ -39,7 +39,7 @@ interface ApiCall {
   body?: {
     chatId?: string;
     endpoint?: string;
-    messages?: LineText[];
+    messages?: LineMessage[];
     replyToken?: string;
     to?: string;
   };
@@ -98,11 +98,14 @@ async function closeServer(server: Server) {
 }
 
 async function fakeIngress(t: TestContext) {
-  const routes = new Map<string, WebhookRoute>();
+  const routes = new Map<string, { prefix: boolean; route: WebhookRoute }>();
   const server = createServer((req, res) => {
-    const route = routes.get(
-      req.url?.split('?', 1)[0]?.replace(/\/$/, '') ?? '',
+    const path = req.url?.split('?', 1)[0]?.replace(/\/$/, '') ?? '';
+    const exact = routes.get(path);
+    const prefix = [...routes].find(
+      ([base, value]) => value.prefix && path.startsWith(base + '/'),
     );
+    const route = exact?.route ?? prefix?.[1].route;
     if (route) route(req, res);
     else res.writeHead(404).end();
   });
@@ -110,9 +113,9 @@ async function fakeIngress(t: TestContext) {
   t.after(() => closeServer(server));
   return {
     ingress: {
-      async register(path, route) {
+      async register(path, route, _signal, { prefix = false } = {}) {
         const key = path.replace(/\/$/, '');
-        routes.set(key, route);
+        routes.set(key, { prefix, route });
         return async () => {
           routes.delete(key);
         };
@@ -169,10 +172,16 @@ async function fixture(
   api = fakeApi(),
   options: {
     emit?: AdapterContext['emit'];
+    publicMedia?: boolean;
     replyTokenTtlMs?: number;
   } = {},
 ) {
   const { ingress, port } = await fakeIngress(t);
+  if (options.publicMedia) {
+    Object.assign(ingress, publicIngress('https://hooks.example.test'), {
+      register: ingress.register,
+    });
+  }
   let now = 1000;
   const adapter = new LineAdapter(
     { fetch: api.fetch, now: () => now },
@@ -188,6 +197,7 @@ async function fixture(
   const events: InboundMessage[] = [];
   const warnings: string[] = [];
   const debug: string[] = [];
+  const info: string[] = [];
   await adapter.start({
     async emit(event) {
       assert.equal(event.type, 'message');
@@ -195,6 +205,7 @@ async function fixture(
       await options.emit?.(event);
     },
     logDebug: (event) => debug.push(event),
+    logInfo: (event) => info.push(event),
     logWarning: (event) => warnings.push(event),
   });
   const base = `http://127.0.0.1:${port}`;
@@ -229,6 +240,7 @@ async function fixture(
     api,
     base,
     debug,
+    info,
     events,
     post,
     warnings,
@@ -464,11 +476,14 @@ test('uses push for older and expired tokens and falls back for an invalid token
   assert.deepEqual(
     api.calls
       .filter(({ path }) => path.includes('/message/'))
-      .map(({ path, body }) => [
-        path.split('/').at(-1),
-        body?.replyToken,
-        body?.messages?.[0]?.quoteToken,
-      ]),
+      .map(({ path, body }) => {
+        const first = body?.messages?.[0];
+        return [
+          path.split('/').at(-1),
+          body?.replyToken,
+          first?.type === 'text' ? first.quoteToken : undefined,
+        ];
+      }),
     [
       ['push', undefined, 'quote-old'],
       ['push', undefined, 'quote-new'],
@@ -933,4 +948,158 @@ test('LINE completion confirms an endpoint change before setting and testing it'
       scenario.methods,
     );
   }
+});
+
+const tinyPng = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jL1sAAAAASUVORK5CYII=',
+  'base64',
+);
+
+test('LINE queues validated stickers, replies with final text and pushes overflow', async (t) => {
+  const f = await fixture(t);
+  assert.equal(f.adapter.capabilities.reactions, undefined);
+  const sticker = f.adapter.searchStickers('apology bow', 1)[0];
+  assert.ok(sticker?.packageId);
+  assert.match(sticker.description, /apology/);
+  assert.equal(f.adapter.searchStickers('1993', 1)[0]?.fileId, '1993');
+  const signal = AbortSignal.timeout(3000);
+  const destination = { chatId: userId, replyTo: '71' };
+  await f.post([message('71')]);
+  await f.waitFor(1);
+  await assert.rejects(
+    f.adapter.sendSticker({ ...destination, fileId: '1234567' }, signal),
+    /official sendable stickers/,
+  );
+  await assert.rejects(
+    f.adapter.sendSticker(
+      { ...destination, ...sticker, packageId: '1' },
+      signal,
+    ),
+    /official sendable stickers/,
+  );
+  const queued = await Promise.all(
+    Array.from({ length: 5 }, () =>
+      f.adapter.sendSticker(
+        {
+          ...destination,
+          fileId: sticker.fileId,
+          packageId: sticker.packageId,
+        },
+        signal,
+      ),
+    ),
+  );
+  assert.ok(
+    f.api.calls.every(
+      ({ path }) => !path.endsWith('/reply') && !path.endsWith('/push'),
+    ),
+  );
+  const to = { chatId: groupId, replyTo: '71', text: '' };
+  await assert.rejects(
+    f.adapter.send(to, { media: [queued[0]!] }),
+    (error: unknown) =>
+      error instanceof SendFailure &&
+      /different reply/.test(String(error.cause)),
+  );
+  const receipt = await f.adapter.send(
+    { ...destination, text: 'Here are your stickers' },
+    { media: queued },
+  );
+  const requests = f.api.calls.filter(
+    ({ path }) => path.endsWith('/reply') || path.endsWith('/push'),
+  );
+  assert.deepEqual(
+    requests.map(({ path }) => path),
+    ['/v2/bot/message/reply', '/v2/bot/message/push'],
+  );
+  assert.equal(requests[0]?.body?.replyToken, 'token-71');
+  assert.deepEqual(
+    requests.map(({ body }) => body?.messages?.map(({ type }) => type)),
+    [['text', 'sticker', 'sticker', 'sticker', 'sticker'], ['sticker']],
+  );
+  assert.deepEqual(requests[1]?.body?.messages?.[0], {
+    type: 'sticker',
+    stickerId: sticker.fileId,
+    packageId: sticker.packageId,
+  });
+  assert.deepEqual(
+    receipt.parts
+      .slice(1)
+      .map(({ mediaId, messageId }) => [mediaId, messageId]),
+    queued.map(({ id }, i) => [id, String(i + 2)]),
+  );
+});
+
+test('LINE media-only delivery serves one HTTPS fetch per asset and expires unused links', async (t) => {
+  const f = await fixture(t, fakeApi(), { publicMedia: true });
+  await f.post([message('72')]);
+  await f.waitFor(1);
+  const signal = AbortSignal.timeout(3000);
+  const destination = { chatId: userId, replyTo: '72' };
+  const large = {
+    ...destination,
+    file: { name: 'large.png', bytes: Buffer.alloc(10 * 1024 ** 2 + 1) },
+    preview: () => assert.fail('unexpected preview'),
+  };
+  await assert.rejects(f.adapter.sendImage(large, signal), /10 MB size limit/);
+  await assert.rejects(
+    f.adapter.sendFile(
+      { ...large, file: { ...large.file, bytes: tinyPng } },
+      signal,
+    ),
+    /MP4 video files only/,
+  );
+  const queued = await f.adapter.sendImage(
+    { ...large, file: { name: 'small.png', bytes: tinyPng } },
+    signal,
+  );
+  const mp4 = Buffer.from('0000ftypmp42synthetic test video');
+  const video = await f.adapter.sendFile(
+    {
+      ...destination,
+      file: { name: 'clip.mp4', bytes: mp4 },
+      async preview() {
+        return { bytes: tinyPng, mime: 'image/png' };
+      },
+    },
+    signal,
+  );
+  const receipt = await f.adapter.send(
+    { ...destination, text: '' },
+    { media: [queued, video] },
+  );
+  assert.equal(receipt.messageId, '1');
+  assert.equal(receipt.parts[0]?.mediaId, queued.id);
+  const reply = f.api.calls.find(({ path }) => path.endsWith('/reply'));
+  const [sent, sentVideo] = reply?.body?.messages ?? [];
+  assert.equal(sent?.type, 'image');
+  assert.equal(sentVideo?.type, 'video');
+  assert.match(
+    sent.originalContentUrl,
+    /^https:\/\/hooks\.example\.test\/line\/main\/media\/[A-Za-z0-9_-]{32}$/,
+  );
+  assert.notEqual(sent.previewImageUrl, sent.originalContentUrl);
+  const path = new URL(sent.originalContentUrl).pathname;
+  const previewPath = new URL(sent.previewImageUrl).pathname;
+  const fetchLocal = (pathname: string) => fetch(f.base + pathname);
+  const concurrent = await Promise.all([fetchLocal(path), fetchLocal(path)]);
+  assert.deepEqual(concurrent.map(({ status }) => status).sort(), [200, 404]);
+  const success = concurrent.find(({ ok }) => ok)!;
+  assert.equal(success.headers.get('content-type'), 'image/png');
+  assert.equal(success.headers.get('cache-control'), 'private, no-store');
+  assert.deepEqual(Buffer.from(await success.arrayBuffer()), tinyPng);
+  const videoResponse = await fetchLocal(
+    new URL(sentVideo.originalContentUrl).pathname,
+  );
+  assert.equal(videoResponse.headers.get('content-type'), 'video/mp4');
+  assert.deepEqual(Buffer.from(await videoResponse.arrayBuffer()), mp4);
+  assert.deepEqual(f.info, ['line.media_served', 'line.media_served']);
+  assert.equal((await fetchLocal(path)).status, 404);
+  assert.equal(
+    (await fetchLocal('/line/main/media/' + 'a'.repeat(32))).status,
+    404,
+  );
+  assert.equal((await fetchLocal('/line/main/media/')).status, 404);
+  f.advance(10 * 60_000);
+  assert.equal((await fetchLocal(previewPath)).status, 404);
 });

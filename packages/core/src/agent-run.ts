@@ -262,6 +262,9 @@ export async function runAgent(
               contextTokens,
               ...(contextWindow === undefined ? {} : { contextWindow }),
               inputTokens: event.inputTokens ?? null,
+              ...(request.purpose === 'sticker-index' && {
+                costUsd: event.costUsd ?? null,
+              }),
               outputTokens: event.outputTokens ?? null,
             });
             break;

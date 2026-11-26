@@ -1,3 +1,41 @@
+import type { OutboundMessage, SendReceipt } from './index.ts';
+
+export type MediaDestination = Pick<
+  OutboundMessage,
+  'chatId' | 'replyTo' | 'threadId'
+>;
+
+export interface MediaFile extends AttachmentContent {
+  name: string;
+}
+
+export interface QueuedMedia {
+  id: string;
+  queued: true;
+}
+
+export type MediaReceipt = QueuedMedia | SendReceipt;
+
+export interface MediaUpload extends MediaDestination {
+  file: MediaFile;
+  preview(maxBytes: number): Promise<AttachmentContent>;
+}
+
+export interface StickerChoice {
+  description: string;
+  emoji?: string;
+  fileId: string;
+  packageId?: string;
+}
+
+export interface PlatformSticker extends InboundAttachment {
+  fileId: string;
+  kind: 'sticker';
+  stickerFormat: NonNullable<InboundAttachment['stickerFormat']>;
+  thumbnail?: InboundAttachment;
+  uniqueId: string;
+}
+
 export interface MessageSender {
   id: string;
   name?: string;

@@ -40,6 +40,10 @@ const descriptions = {
     'zh-TW': '移除實例（/remove <platform|agent> <id>）',
   },
   status: { en: 'Show status', 'zh-TW': '查看狀態' },
+  sticker: {
+    en: 'List, block or unblock sticker sets',
+    'zh-TW': '查看、封鎖或解除封鎖貼圖集',
+  },
   thinking: {
     en: 'Show or set reasoning effort (default to reset)',
     'zh-TW': '查看或設定推理強度（default 還原）',

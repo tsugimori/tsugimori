@@ -226,6 +226,7 @@ test(
         'previews',
         'remove',
         'status',
+        'sticker',
         'thinking',
         'webhook',
       ],

@@ -3,6 +3,8 @@ import type {
   ApprovalFeedback,
   ApprovalReaction,
   InboundMessage,
+  MediaDestination,
+  MediaUpload,
   OutboundMessage,
   PlatformAdapter,
   PlatformCapabilities,
@@ -17,18 +19,21 @@ import {
   definePlugin,
   PlatformStartError,
   SendFailure,
+  ToolFailure,
 } from '@tsugimori/plugin-sdk';
 import { setTimeout as delay } from 'node:timers/promises';
 
 import type { BotIdentity } from './updates.ts';
 
 import { BotApi, BotApiError, nativeId, record } from './api.ts';
+import { telegramSetSticker } from './inbound-media.ts';
 import {
   maxMessage,
   parseTelegramMarkdown,
   splitText,
   telegramMessageParts,
 } from './message-text.ts';
+import { normalizeReaction, telegramReactions } from './outbound-media.ts';
 import { telegramRichMessage } from './rich-message.ts';
 import {
   telegramChecks,
@@ -37,6 +42,18 @@ import {
   telegramSetup,
 } from './setup.ts';
 import { mapUpdate } from './updates.ts';
+
+const telegramUploadLimits = {
+  files: { maxBytes: 50 * 1024 * 1024 },
+  images: { maxBytes: 10 * 1024 * 1024 },
+};
+type SendMethod =
+  | 'sendMessage'
+  | 'sendRichMessage'
+  | 'sendSticker'
+  | 'sendPhoto'
+  | 'sendDocument'
+  | 'sendVideo';
 
 const cursorLifetimeMs = 6 * 24 * 60 * 60 * 1_000;
 const unavailableScopeReasons = [
@@ -103,6 +120,9 @@ export class TelegramAdapter implements PlatformAdapter {
     this.id = id;
     this.capabilities = {
       deleteEvents: false,
+      ...telegramUploadLimits,
+      reactions: true,
+      stickers: true,
       inlineButtons: true,
       outboundPush: 'free',
       richText: richMessages,
@@ -301,33 +321,28 @@ export class TelegramAdapter implements PlatformAdapter {
     );
   }
 
-  async send(message: OutboundMessage) {
-    const signal = this.#signal();
-    const parts: SendPart[] = [];
+  #sender(message: MediaDestination, signal: AbortSignal) {
     let chatId = this.#ctx?.resolveChatId?.(message.chatId) ?? message.chatId;
     let migrated = false;
-    const send = async (
-      method: 'sendMessage' | 'sendRichMessage',
-      body: object,
+    return async (
+      method: SendMethod,
+      body: Record<string, unknown>,
       retries?: number,
     ) => {
-      const post = (retries?: number) =>
-        this.#api.call(
-          method,
-          {
-            ...body,
-            ...destination(chatId === message.chatId ? message : { chatId }),
-            reply_parameters:
-              chatId === message.chatId && message.replyTo
-                ? {
-                    message_id: Number(message.replyTo),
-                    allow_sending_without_reply: true,
-                  }
-                : undefined,
-          },
-          signal,
-          retries,
-        );
+      const post = (retries?: number) => {
+        const fields = {
+          ...body,
+          ...destination(chatId === message.chatId ? message : { chatId }),
+          reply_parameters:
+            chatId === message.chatId && message.replyTo
+              ? {
+                  message_id: Number(message.replyTo),
+                  allow_sending_without_reply: true,
+                }
+              : undefined,
+        };
+        return this.#api.call(method, fields, signal, retries);
+      };
       let result;
       try {
         result = await post(retries);
@@ -348,7 +363,11 @@ export class TelegramAdapter implements PlatformAdapter {
         raw: { message_id: sent?.message_id },
       };
     };
+  }
 
+  async send(message: OutboundMessage) {
+    const send = this.#sender(message, this.#signal());
+    const parts: SendPart[] = [];
     let messages: ReturnType<typeof telegramMessageParts>;
     let markdown: ReturnType<typeof parseTelegramMarkdown> | undefined;
     let rich: ReturnType<typeof telegramRichMessage> | undefined;
@@ -461,6 +480,156 @@ export class TelegramAdapter implements PlatformAdapter {
       parts,
       approvalEntities,
     };
+  }
+
+  async sendReaction(
+    {
+      chatId,
+      emoji,
+      messageId,
+    }: MediaDestination & { emoji: string; messageId: string },
+    signal: AbortSignal,
+  ) {
+    const normalized = normalizeReaction(emoji);
+    if (!telegramReactions.has(normalized))
+      throw new ToolFailure('Telegram does not support this reaction emoji');
+    const id = Number(messageId);
+    if (!Number.isSafeInteger(id) || id < 1 || String(id) !== messageId)
+      throw new ToolFailure('Invalid Telegram reaction message ID');
+    if ((this.#ctx?.resolveChatId?.(chatId) ?? chatId) !== chatId)
+      throw new ToolFailure(
+        'Cannot react to a message before the chat migrated',
+      );
+    try {
+      await this.#api.call(
+        'setMessageReaction',
+        {
+          chat_id: chatId,
+          message_id: id,
+          reaction: [{ type: 'emoji', emoji: normalized }],
+        },
+        AbortSignal.any([this.#signal(), signal]),
+      );
+    } catch (error) {
+      await this.#recordMigration(chatId, error);
+      if (
+        error instanceof BotApiError &&
+        /reaction_invalid|reaction is not allowed/i.test(
+          error.description ?? '',
+        )
+      )
+        throw new ToolFailure(
+          'This Telegram chat does not allow that reaction',
+        );
+      throw error;
+    }
+  }
+
+  sendSticker(
+    message: MediaDestination & { fileId: string },
+    signal: AbortSignal,
+  ) {
+    if (!/^[\w-]+$/.test(message.fileId))
+      throw new ToolFailure('Expected a Telegram sticker file ID');
+    return this.#sendMedia(
+      message,
+      'sendSticker',
+      { sticker: message.fileId },
+      '[sticker]',
+      signal,
+    );
+  }
+
+  sendImage(message: MediaUpload, signal: AbortSignal) {
+    return this.#upload(
+      message,
+      'sendPhoto',
+      'photo',
+      telegramUploadLimits.images.maxBytes,
+      signal,
+    );
+  }
+
+  sendFile(message: MediaUpload, signal: AbortSignal) {
+    return message.file.mime === 'video/mp4'
+      ? this.#upload(
+          message,
+          'sendVideo',
+          'video',
+          telegramUploadLimits.files.maxBytes,
+          signal,
+        )
+      : this.#upload(
+          message,
+          'sendDocument',
+          'document',
+          telegramUploadLimits.files.maxBytes,
+          signal,
+        );
+  }
+
+  #upload(
+    message: MediaUpload,
+    method: SendMethod,
+    field: 'photo' | 'video' | 'document',
+    limit: number,
+    signal: AbortSignal,
+  ) {
+    if (message.file.bytes.byteLength > limit)
+      throw new ToolFailure(
+        `Telegram ${field} upload exceeds the ${limit / 1024 ** 2} MB size limit`,
+      );
+    const { bytes, mime, name } = message.file;
+    const file = new File([new Uint8Array(bytes)], name, { type: mime });
+    return this.#sendMedia(
+      message,
+      method,
+      { [field]: file },
+      field === 'photo' ? '[image]' : field === 'video' ? '[video]' : '[file]',
+      signal,
+    );
+  }
+
+  async #sendMedia(
+    message: MediaDestination,
+    method: SendMethod,
+    body: Record<string, unknown>,
+    text: string,
+    signal: AbortSignal,
+  ) {
+    const send = this.#sender(
+      message,
+      AbortSignal.any([this.#signal(), signal]),
+    );
+    try {
+      const part = await send(method, body);
+      return { messageId: part.messageId, parts: [{ ...part, text }] };
+    } catch (error) {
+      throw new SendFailure(
+        {
+          parts: [],
+          deliveryUnknown:
+            !(error instanceof BotApiError) || error.unknownDelivery,
+        },
+        error,
+      );
+    }
+  }
+
+  async getStickerSet(name: string, signal: AbortSignal) {
+    const response = record(
+      await this.#api.call(
+        'getStickerSet',
+        { name },
+        AbortSignal.any([this.#signal(), signal]),
+      ),
+    );
+    const stickers = response?.stickers;
+    if (!Array.isArray(stickers) || !stickers.length)
+      throw new Error('Telegram returned an empty or invalid sticker set');
+    return stickers.map((value: unknown, index) =>
+      telegramSetSticker(value, name, index),
+    );
   }
 
   downloadAttachment(

@@ -12,8 +12,10 @@ import type {
   InboundMessage,
   OutboundMessage,
   PlatformAdapter,
+  QueuedMedia,
   ScheduleApproval,
   ScheduleApprovalRequest,
+  SendPart,
   TaskOutcome,
   ToolContext,
   ToolDefinition,
@@ -43,7 +45,7 @@ import type { MemoryResult } from './memory.ts';
 import type { Runtime } from './runtime.ts';
 import type { BackgroundSummaries } from './summary.ts';
 import type { TaskInput } from './supplements.ts';
-import type { ToolDetails } from './tool-details.ts';
+import type { ToolDetail, ToolDetails } from './tool-details.ts';
 
 import { untilAborted } from './abort.ts';
 import { protectTools, runAgent, sessionScope } from './agent-run.ts';
@@ -54,6 +56,7 @@ import { describeError } from './errors.ts';
 import { FfmpegMissing, findFfmpeg, prepareImage } from './media.ts';
 import { memoryAction } from './memory.ts';
 import { conversationId, DeliveryError, Outbound } from './outbound.ts';
+import { sendTools } from './send-tools.ts';
 import { Supplements } from './supplements.ts';
 import { systemMessages } from './system-messages.ts';
 import { silentReason, TaskRecorder } from './task-recorder.ts';
@@ -69,6 +72,7 @@ interface TaskDependencies {
   outbound: Outbound;
   runtime: Runtime;
   scope(workdir: string): ExecScope;
+  stickerTools(adapter: PlatformAdapter): readonly ToolDefinition[];
   store: Store;
   summarize: BackgroundSummaries['enqueue'];
   toolDetails: ToolDetails;
@@ -87,6 +91,8 @@ type Work = {
   execution?: Promise<void>;
   id: string;
   input: TaskInput;
+  mediaDelivered?: boolean;
+  mediaQueued?: { detail?: ToolDetail; handle: QueuedMedia }[];
   messageIds: Set<string>;
   pendingApprovalFallback?: string;
   progress: { stage: TaskStage; startedAt: number };
@@ -595,20 +601,13 @@ export class Tasks {
           fallback: Boolean(fallback),
         });
       }
-      if (silent && !text) {
-        outcome.kind = 'silent';
-        await this.#deps.trace.flush().catch(() => {
-          log({ level: 'error', event: 'trace.flush_failed', taskId: id });
-        });
-        finish('completed');
-      } else if (text) {
-        work.progress.stage = 'delivery';
+      if (text || work.mediaQueued?.length) {
         const scheduled = input.scheduled;
         const output = scheduled
           ? {
               ...scheduled.target,
               allowTextMentions: scheduled.allowTextMentions,
-              text: scheduled.delayNote + text,
+              text: text ? scheduled.delayNote + text : '',
             }
           : reply(message, text);
         if (scheduled && !scheduled.allowTextMentions && containsMention(text))
@@ -620,8 +619,14 @@ export class Tasks {
         });
         delivered = true;
         outcome.kind = 'delivered';
+      } else if (work.mediaDelivered) {
+        finish('sent');
+        outcome.kind = 'delivered';
       } else {
         outcome.kind = 'silent';
+        await this.#deps.trace.flush().catch(() => {
+          log({ level: 'error', event: 'trace.flush_failed', taskId: id });
+        });
         finish('completed');
       }
 
@@ -693,6 +698,11 @@ export class Tasks {
       }
     } finally {
       activity.abort();
+      this.#settleMedia(
+        work,
+        [],
+        new Error('Chat task ended before queued media was delivered'),
+      );
       for (const path of work.temporaryAttachments) {
         try {
           await rm(path, { force: true });
@@ -727,6 +737,23 @@ export class Tasks {
     }
   }
 
+  #settleMedia(work: Work, parts: readonly SendPart[], error?: unknown) {
+    for (const { detail, handle } of work.mediaQueued ?? []) {
+      const part = parts.find(({ mediaId }) => mediaId === handle.id);
+      if (part)
+        detail?.finish('ok', {
+          messageId: part.messageId,
+          messageIds: [part.messageId],
+        });
+      else
+        detail?.finish(
+          'error',
+          error ?? new Error('Adapter did not return a media receipt'),
+        );
+    }
+    work.mediaQueued = undefined;
+  }
+
   async #deliver(work: Work, message: OutboundMessage) {
     work.progress.stage = 'delivery';
     const timed = work.recorder?.timing('deliveryMs');
@@ -736,6 +763,8 @@ export class Tasks {
         taskId: work.id,
         scheduled: work.input.scheduled !== undefined,
         signal: work.abort.signal,
+        media: work.mediaQueued?.map(({ handle }) => handle),
+        onParts: (parts, error) => this.#settleMedia(work, parts, error),
         onDelivery: (ids, error) => {
           recorded = true;
           work.recorder?.delivery(work.adapter.id, ids, error);
@@ -750,13 +779,42 @@ export class Tasks {
   }
 
   #toolDefinitions(adapter: PlatformAdapter, work?: Work) {
-    const { store, context } = this.#deps;
+    const { store, context, toolDetails } = this.#deps;
+    const scheduled = work?.input.scheduled;
+    const message = work?.input.message;
+    const sendAllowed =
+      !scheduled ||
+      (message?.chatId === scheduled.target.chatId &&
+        message?.threadId === scheduled.target.threadId);
     return [
       ...this.#deps.tools.filter(
         ({ name }) =>
           !name.startsWith('exec.') || Boolean(this.#deps.backend()),
       ),
       ...(adapter.tools?.() ?? []),
+      ...this.#deps.stickerTools(adapter),
+      ...(sendAllowed
+        ? sendTools(
+            { ...this.#deps, workdir: (chat) => context.workdir(chat) },
+            adapter,
+            work && message
+              ? {
+                  address: scheduled?.target ?? reply(message, ''),
+                  source: message.messageId,
+                  onDelivery: (ids, error) => {
+                    work.recorder?.delivery(adapter.id, ids, error);
+                    work.mediaDelivered ||= ids.length > 0;
+                  },
+                  onQueued: (handle, task) => {
+                    (work.mediaQueued ??= []).push({
+                      handle,
+                      detail: toolDetails.invocation(task),
+                    });
+                  },
+                }
+              : undefined,
+          )
+        : []),
       ...(adapter.downloadAttachment
         ? [
             attachmentTool(

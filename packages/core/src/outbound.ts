@@ -1,15 +1,18 @@
 import type {
   ApprovalReaction,
   ChatRef,
+  MediaDestination,
+  MediaReceipt,
   OutboundMessage,
   PlatformAdapter,
+  QueuedMedia,
   SendPart,
   SendReceipt,
 } from '@tsugimori/plugin-sdk';
 import type { Store, TaskRecord } from '@tsugimori/storage';
 import type { Tracer } from '@tsugimori/trace';
 
-import { SendFailure } from '@tsugimori/plugin-sdk';
+import { SendFailure, ToolFailure } from '@tsugimori/plugin-sdk';
 
 import type { HookRunner, Logger } from './hooks.ts';
 
@@ -117,11 +120,115 @@ export class Outbound {
     return true;
   }
 
+  #address<T extends MediaDestination>(
+    adapter: PlatformAdapter,
+    message: T,
+  ): T {
+    const { chatId } = this.#deps.store.resolveChat({
+      adapterId: adapter.id,
+      chatId: message.chatId,
+    });
+    return chatId === message.chatId
+      ? message
+      : { ...message, chatId, replyTo: undefined, threadId: undefined };
+  }
+
+  #recordParts(
+    adapterId: string,
+    message: MediaDestination,
+    parts: readonly SendPart[],
+    attrs: Parameters<Tracer['span']>[1],
+    completedTaskId?: string,
+  ) {
+    const { store, trace } = this.#deps;
+    trace.span('outbound.record', attrs, () => {
+      for (const [index, part] of parts.entries()) {
+        const address =
+          part.chatId === undefined ? message : { chatId: part.chatId };
+        store.recordOutbound(
+          {
+            adapterId,
+            chatId: conversationId(address),
+            messageId: part.messageId,
+            direction: 'outbound',
+            userId: null,
+            replyTo: address.replyTo ?? null,
+            threadId: address.threadId ?? null,
+            text: part.text,
+            raw: part.raw ?? null,
+          },
+          index === parts.length - 1 ? completedTaskId : undefined,
+        );
+      }
+    });
+  }
+
+  async sendMedia(
+    adapter: PlatformAdapter,
+    message: OutboundMessage,
+    signal: AbortSignal,
+    taskId: string,
+    run: (address: MediaDestination) => Promise<MediaReceipt>,
+    onDelivery: (ids: readonly string[], error?: unknown) => void,
+  ) {
+    const { hooks, trace } = this.#deps;
+    message = this.#address(adapter, message);
+    const chat = { adapterId: adapter.id, chatId: conversationId(message) };
+    const attrs = { ...chat, taskId };
+    await hooks.emit('outbound.before', { chat, message });
+    signal.throwIfAborted();
+    let receipt: MediaReceipt;
+    try {
+      receipt = await trace.span('outbound.send_media', attrs, () =>
+        run(message),
+      );
+    } catch (error) {
+      const sent = error instanceof SendFailure ? error.parts : [];
+      onDelivery(
+        sent.map(({ messageId }) => messageId),
+        error,
+      );
+      if (sent.length) this.#recordParts(adapter.id, message, sent, attrs);
+      if (error instanceof SendFailure && error.cause instanceof Error)
+        throw new ToolFailure(
+          error.deliveryUnknown
+            ? 'Media delivery could not be confirmed'
+            : error.cause.message,
+        );
+      throw error;
+    }
+    if ('queued' in receipt) return receipt;
+    const parts = receipt.parts?.length
+      ? receipt.parts
+      : [{ ...receipt, text: message.text }];
+    onDelivery(parts.map(({ messageId }) => messageId));
+    this.#recordParts(adapter.id, message, parts, attrs);
+    const delivered = parts[0]!.chatId;
+    if (delivered !== undefined)
+      message = {
+        ...message,
+        chatId: delivered,
+        replyTo: undefined,
+        threadId: undefined,
+      };
+    await hooks.emit('outbound.sent', {
+      chat: { adapterId: adapter.id, chatId: conversationId(message) },
+      message,
+      receipt,
+    });
+    return {
+      messageId: receipt.messageId,
+      messageIds: parts.map(({ messageId }) => messageId),
+    };
+  }
+
   async send(
     adapter: PlatformAdapter,
     message: OutboundMessage,
     options: {
+      media?: readonly QueuedMedia[];
       onDelivery?(messageIds: readonly string[], error?: unknown): void;
+      onParts?(parts: readonly SendPart[], error?: unknown): void;
       onReceipt?(receipt: SendReceipt): void;
       scheduled?: boolean;
       signal?: AbortSignal;
@@ -130,12 +237,7 @@ export class Outbound {
   ) {
     const { store, trace, hooks } = this.#deps;
     const { signal, taskId } = options;
-    const { chatId } = store.resolveChat({
-      adapterId: adapter.id,
-      chatId: message.chatId,
-    });
-    if (chatId !== message.chatId)
-      message = { ...message, chatId, replyTo: undefined, threadId: undefined };
+    message = this.#address(adapter, message);
     const chat: ChatRef = {
       adapterId: adapter.id,
       chatId: conversationId(message),
@@ -153,38 +255,15 @@ export class Outbound {
     signal?.throwIfAborted();
     if (taskId) store.updateTask(taskId, { status: 'sending' });
     let receipt: SendReceipt;
-    const record = (parts: readonly SendPart[], completedTaskId?: string) => {
-      trace.span('outbound.record', attrs, () => {
-        for (const [index, part] of parts.entries()) {
-          const address =
-            part.chatId === undefined
-              ? message
-              : {
-                  chatId: part.chatId,
-                  replyTo: undefined,
-                  threadId: undefined,
-                };
-          store.recordOutbound(
-            {
-              adapterId: adapter.id,
-              chatId: conversationId(address),
-              messageId: part.messageId,
-              direction: 'outbound',
-              userId: null,
-              replyTo: address.replyTo ?? null,
-              threadId: address.threadId ?? null,
-              text: part.text,
-              raw: part.raw ?? null,
-            },
-            index === parts.length - 1 ? completedTaskId : undefined,
-          );
-        }
-      });
-    };
     try {
       try {
         receipt = await trace.span('outbound.send', attrs, () =>
-          adapter.send(message),
+          adapter.send(
+            message,
+            options.media?.length
+              ? { media: options.media, signal }
+              : undefined,
+          ),
         );
       } catch (error) {
         const sent = error instanceof SendFailure ? error.parts : [];
@@ -192,14 +271,16 @@ export class Outbound {
           sent.map(({ messageId }) => messageId),
           error,
         );
-        if (sent.length) record(sent);
+        options.onParts?.(sent, error);
+        if (sent.length) this.#recordParts(adapter.id, message, sent, attrs);
         throw error;
       }
       const parts = receipt.parts?.length
         ? receipt.parts
         : [{ ...receipt, text: message.text }];
       options.onDelivery?.(parts.map(({ messageId }) => messageId));
-      record(parts, taskId);
+      options.onParts?.(parts);
+      this.#recordParts(adapter.id, message, parts, attrs, taskId);
       options.onReceipt?.(receipt);
     } catch (error) {
       if (!taskId || (error instanceof SendFailure && !error.deliveryUnknown))

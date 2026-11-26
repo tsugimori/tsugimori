@@ -146,19 +146,33 @@ export class BotApi {
 
   async #post(
     method: string,
-    body: object,
+    body: Record<string, unknown>,
     signal: AbortSignal,
   ): Promise<unknown> {
     signal.throwIfAborted();
     const timeout = AbortSignal.timeout(
       method === 'getUpdates' ? 60_000 : 10_000,
     );
+    const multipart = Object.values(body).some(
+      (value) => value instanceof File,
+    );
+    const form = multipart ? new FormData() : undefined;
+    if (form)
+      for (const [key, value] of Object.entries(body)) {
+        if (value === undefined) continue;
+        form.set(
+          key,
+          value instanceof File || typeof value === 'string'
+            ? value
+            : JSON.stringify(value),
+        );
+      }
     let response: Response;
     try {
       response = await this.#fetch(this.#url + method, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
+        headers: form ? undefined : { 'Content-Type': 'application/json' },
+        body: form ?? JSON.stringify(body),
         signal: AbortSignal.any([signal, timeout]),
       });
     } catch {
@@ -197,12 +211,11 @@ export class BotApi {
 
   async call(
     method: string,
-    body: object,
+    body: Record<string, unknown>,
     signal: AbortSignal,
     retries = 2,
   ): Promise<unknown> {
-    const sendsMessage =
-      method === 'sendMessage' || method === 'sendRichMessage';
+    const sendsMessage = method.startsWith('send');
     for (let attempt = 0; ; attempt++) {
       try {
         return await this.#post(method, body, signal);

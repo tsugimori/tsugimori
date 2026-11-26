@@ -53,6 +53,15 @@ export interface LineText {
   type: 'text';
 }
 
+export type LineMessage =
+  | LineText
+  | { packageId: string; stickerId: string; type: 'sticker' }
+  | {
+      originalContentUrl: string;
+      previewImageUrl: string;
+      type: 'image' | 'video';
+    };
+
 const webhookEndpoint = '/v2/bot/channel/webhook/endpoint';
 
 export class LineApi {
@@ -158,7 +167,11 @@ export class LineApi {
     });
   }
 
-  async reply(replyToken: string, messages: LineText[], signal: AbortSignal) {
+  async reply(
+    replyToken: string,
+    messages: LineMessage[],
+    signal: AbortSignal,
+  ) {
     const body = await this.#request('/v2/bot/message/reply', signal, {
       messages,
       replyToken,
@@ -166,7 +179,7 @@ export class LineApi {
     return sentIds(body, messages.length);
   }
 
-  async push(to: string, messages: LineText[], signal: AbortSignal) {
+  async push(to: string, messages: LineMessage[], signal: AbortSignal) {
     const retryKey = randomUUID();
     const send = () =>
       this.#request('/v2/bot/message/push', signal, { messages, to }, retryKey);

@@ -1,6 +1,6 @@
 # LINE
 
-The LINE adapter receives signed Messaging API webhooks for direct messages, groups, and rooms. It sends plain text and uses LINE reply tokens when available. Other sends use metered push.
+The LINE adapter receives signed Messaging API webhooks for direct messages, groups, and rooms. It sends text, stickers, images, and MP4 video. It uses LINE reply tokens when available. Other sends use metered push.
 
 ## Configuration
 
@@ -36,5 +36,9 @@ Terminal setup with `corepack pnpm exec tsugimori add platform line --dir ./ws` 
 
 - The listener accepts signed POSTs at `/line/<id>`, `/line/<id>/`, and `/line/<id>/webhook`. It ignores query strings and limits bodies to 1 MiB.
 - The first batch can use the latest reply token for that chat when the outbound message replies to the matching inbound message and the token is fresh. Later batches, messages without a usable token, and replies rejected for an invalid reply token use metered push. Push counts against the LINE account's messaging quota, including scheduled messages.
-- The adapter sends text in chunks of at most 5,000 UTF-16 code units, with up to five messages per API request. Non-text inbound messages appear as type placeholders. Standby messages and messages without a sender ID are ignored.
+- The adapter sends text in chunks of at most 5,000 UTF-16 code units. Stickers, images, and video are queued with the turn's text and sent in batches of up to five. A turn with only media still uses the reply token when available.
+- `send.image` accepts JPEG or PNG up to 10 MiB. `send.file` accepts MP4 video up to 200 MiB. Video and images over 1 MiB need `ffmpeg` to make a preview.
+- Image and video URLs use `/line/<id>/media/<token>` on the existing HTTPS ingress. Each original and preview has its own 192-bit random token. Bytes stay in memory and are released at the first completed GET, after ten minutes, or when the adapter stops. Served events omit the token.
+- `sticker.search` uses the bundled catalog of 456 official stickers, with package keywords and action keywords for common stickers. The catalog was fetched on 2026-11-27. [LINE Messaging API sticker list](https://developers.line.biz/en/docs/messaging-api/sticker-list/)
+- Non-text inbound messages appear as type placeholders. Standby messages and messages without a sender ID are ignored.
 - Quote the approval prompt and reply with the displayed approval or denial word. The adapter has no inline approval buttons, reactions, polls, or deletion events. See the [gateway approval and scheduling rules](../../README.md#approvals-and-schedules).

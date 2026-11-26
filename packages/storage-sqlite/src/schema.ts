@@ -6,6 +6,7 @@ import type {
 import type {
   ApprovalRecord,
   ChatRecord,
+  IndexedSticker,
   MessageRecord,
   ScheduleAddress,
   ScheduleRecord,
@@ -24,6 +25,7 @@ import { sql } from 'drizzle-orm';
 import {
   blob,
   customType,
+  foreignKey,
   index,
   integer,
   primaryKey,
@@ -537,5 +539,43 @@ export const triggerDecisions = sqliteTable(
     index('trigger_decisions_message').on(table.messageSeq, table.id),
     index('trigger_decisions_task').on(table.taskId),
     index('trigger_decisions_adapter').on(table.adapterId),
+  ],
+);
+
+export const stickerSets = sqliteTable('sticker_sets', {
+  name: text('name').primaryKey(),
+  blocked: integer('blocked', { mode: 'boolean' }).notNull().default(false),
+  sourceAdapterId: text('source_adapter_id'),
+  sourceChatId: text('source_chat_id'),
+});
+
+export const indexedStickers = sqliteTable(
+  'indexed_stickers',
+  {
+    setName: text('set_name')
+      .notNull()
+      .references(() => stickerSets.name, { onDelete: 'cascade' }),
+    uniqueId: text('unique_id').notNull(),
+    emoji: text('emoji'),
+    format: text('format').$type<IndexedSticker['format']>().notNull(),
+    description: text('description').notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.setName, table.uniqueId] })],
+);
+
+export const stickerFiles = sqliteTable(
+  'sticker_files',
+  {
+    botId: text('bot_id').notNull(),
+    setName: text('set_name').notNull(),
+    uniqueId: text('unique_id').notNull(),
+    fileId: text('file_id').notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.botId, table.setName, table.uniqueId] }),
+    foreignKey({
+      columns: [table.setName, table.uniqueId],
+      foreignColumns: [indexedStickers.setName, indexedStickers.uniqueId],
+    }).onDelete('cascade'),
   ],
 );

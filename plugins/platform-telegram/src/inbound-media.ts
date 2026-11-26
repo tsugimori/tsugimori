@@ -1,4 +1,4 @@
-import type { InboundAttachment } from '@tsugimori/plugin-sdk';
+import type { InboundAttachment, PlatformSticker } from '@tsugimori/plugin-sdk';
 
 import { record } from './api.ts';
 
@@ -23,7 +23,7 @@ function attachment(
   file: Record<string, unknown> | undefined,
   kind: InboundAttachment['kind'],
   mime?: string,
-): InboundAttachment | undefined {
+): (InboundAttachment & { fileId: string }) | undefined {
   const fileId = string(file?.file_id);
   if (!file || !fileId) return;
   return {
@@ -55,36 +55,60 @@ export function telegramAttachments(
     const image = attachment(largest, 'image', 'image/jpeg');
     if (image) return [image];
   }
-  const sticker = record(message.sticker);
-  if (sticker) {
-    const stickerFormat =
-      sticker.is_video === true
-        ? 'video'
-        : sticker.is_animated === true
-          ? 'lottie'
-          : 'static';
-    const mime = {
-      lottie: 'application/x-tgsticker',
-      static: 'image/webp',
-      video: 'video/webm',
-    }[stickerFormat];
-    const file = attachment(sticker, 'sticker', mime);
-    if (file)
-      return [
-        {
-          ...file,
-          emoji: string(sticker.emoji),
-          set: string(sticker.set_name),
-          stickerFormat,
-        },
-      ];
-  }
+  const sticker = stickerAttachment(record(message.sticker));
+  if (sticker) return [sticker];
   // Telegram includes a document alongside an animation for older clients.
   for (const [field, kind, mime] of media) {
     const file = attachment(record(message[field]), kind, mime);
     if (file) return [file];
   }
   return [];
+}
+
+function stickerAttachment(
+  sticker: Record<string, unknown> | undefined,
+): Omit<PlatformSticker, 'uniqueId'> | undefined {
+  if (!sticker) return;
+  const stickerFormat =
+    sticker.is_video === true
+      ? 'video'
+      : sticker.is_animated === true
+        ? 'lottie'
+        : 'static';
+  const mime = {
+    lottie: 'application/x-tgsticker',
+    static: 'image/webp',
+    video: 'video/webm',
+  }[stickerFormat];
+  const file = attachment(sticker, 'sticker', mime);
+  if (file)
+    return {
+      ...file,
+      kind: 'sticker',
+      emoji: string(sticker.emoji),
+      set: string(sticker.set_name),
+      stickerFormat,
+    };
+}
+
+export function telegramSetSticker(
+  value: unknown,
+  set: string,
+  index: number,
+): PlatformSticker {
+  const recordValue = record(value);
+  const sticker = stickerAttachment(recordValue);
+  const uniqueId = string(recordValue?.file_unique_id);
+  if (!sticker || !uniqueId)
+    throw new Error('Telegram returned an invalid sticker');
+  const thumbnail = attachment(record(recordValue?.thumbnail), 'sticker');
+  return {
+    ...sticker,
+    set,
+    index,
+    uniqueId,
+    thumbnail: thumbnail && { ...thumbnail, stickerFormat: 'static' },
+  };
 }
 
 export function telegramText(message: Record<string, unknown>) {

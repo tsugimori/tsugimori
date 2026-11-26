@@ -172,6 +172,10 @@ export class ClaudeAgent implements AgentConnector {
     return { ...(model && { model }), ...(effort && { effort }) };
   }
 
+  economyModel() {
+    return 'haiku';
+  }
+
   listModels() {
     return ['sonnet', 'opus', 'haiku'];
   }
@@ -340,7 +344,7 @@ export class ClaudeAgent implements AgentConnector {
         cwd: workdir,
         model: request.model === 'default' ? undefined : request.model,
         maxTurns: command ? 1 : undefined,
-        persistSession: request.purpose === 'summary' ? false : undefined,
+        persistSession: request.purpose !== undefined ? false : undefined,
         resume: request.resumeSessionId,
         effort: effortLevels.find((level) => level === request.thinking),
         systemPrompt: instructions.length ? render(instructions) : undefined,
@@ -348,7 +352,7 @@ export class ClaudeAgent implements AgentConnector {
         skills: [],
         strictMcpConfig: true,
         tools:
-          request.purpose === 'summary' || request.toolsDisabled
+          request.purpose !== undefined || request.toolsDisabled
             ? []
             : request.sandbox
               ? ['Read', 'Glob', 'Grep']
@@ -724,6 +728,10 @@ export class ClaudeAgent implements AgentConnector {
       type: 'usage',
       contextTokens: tokens ?? null,
       ...(window === undefined ? {} : { contextWindow: window }),
+      ...(request.purpose === 'sticker-index' &&
+        typeof result.total_cost_usd === 'number' && {
+          costUsd: result.total_cost_usd,
+        }),
       inputTokens: result.usage.input_tokens,
       outputTokens: result.usage.output_tokens,
     };

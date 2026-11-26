@@ -70,6 +70,7 @@ export interface Config {
     maxActivePerUser?: number;
     minIntervalMinutes?: number;
   };
+  stickers?: { model?: string };
   storage: { kind: 'sqlite'; path: string };
   timezone: string;
   web?: {

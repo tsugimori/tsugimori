@@ -16,8 +16,14 @@ import type {
   ContextMessage,
   ImageLimits,
   InboundAttachment,
+  MediaDestination,
+  MediaReceipt,
+  MediaUpload,
   MessageSender,
+  PlatformSticker,
+  QueuedMedia,
   ReplyTarget,
+  StickerChoice,
 } from './media.ts';
 import type {
   CheckContext,
@@ -71,8 +77,15 @@ export type {
   ContextMessage,
   ImageLimits,
   InboundAttachment,
+  MediaDestination,
+  MediaFile,
+  MediaReceipt,
+  MediaUpload,
   MessageSender,
+  PlatformSticker,
+  QueuedMedia,
   ReplyTarget,
+  StickerChoice,
 } from './media.ts';
 
 export interface ChatRef {
@@ -87,11 +100,15 @@ export interface PrincipalRef {
 
 export interface PlatformCapabilities {
   deleteEvents?: boolean;
+  files?: { maxBytes: number };
+  images?: { maxBytes: number };
   inlineButtons?: boolean;
   /** Defaults to `free`. `metered` uses quota for sends outside a current inbound reply. `none` supports only replies to a current inbound. */
   outboundPush?: 'free' | 'metered' | 'none';
   poll?: boolean;
+  reactions?: boolean;
   richText?: boolean;
+  stickers?: boolean;
 }
 
 interface InboundBase {
@@ -194,6 +211,8 @@ export interface SendReceipt {
 export interface SendPart {
   /** Native destination if delivery moved to another chat. */
   chatId?: string;
+  /** Identifier returned by an adapter when it queued this media. */
+  mediaId?: string;
   messageId: string;
   raw?: unknown;
   text: string;
@@ -232,6 +251,7 @@ export interface AdapterContext {
   loadCursor?(stream: string): AdapterCursor | undefined;
   logDebug?(event: string): void;
   logError?(event: string, error?: unknown): void;
+  logInfo?(event: string): void;
   logWarning?(event: string, reason?: string): void;
   ready?: Promise<void>;
   resolveChatId?(chatId: string): string;
@@ -297,10 +317,25 @@ export interface PlatformAdapter {
     signal: AbortSignal,
     maxBytes?: number,
   ): Promise<AttachmentContent>;
+  getStickerSet?(name: string, signal: AbortSignal): Promise<PlatformSticker[]>;
   id: string;
   kind: string;
   respondToApproval?(feedback: ApprovalFeedback): Promise<void>;
-  send(message: OutboundMessage): Promise<SendReceipt>;
+  searchStickers?(query: string, limit: number): readonly StickerChoice[];
+  send(
+    message: OutboundMessage,
+    options?: { media?: readonly QueuedMedia[]; signal?: AbortSignal },
+  ): Promise<SendReceipt>;
+  sendFile?(message: MediaUpload, signal: AbortSignal): Promise<MediaReceipt>;
+  sendImage?(message: MediaUpload, signal: AbortSignal): Promise<MediaReceipt>;
+  sendReaction?(
+    message: MediaDestination & { emoji: string; messageId: string },
+    signal: AbortSignal,
+  ): Promise<void>;
+  sendSticker?(
+    message: MediaDestination & { fileId: string; packageId?: string },
+    signal: AbortSignal,
+  ): Promise<MediaReceipt>;
   /** Replace the approval reaction on the original message, or clear it on expiry. */
   setApprovalReaction?(
     message: Pick<InboundMessage, 'chatId' | 'messageId'>,
@@ -471,7 +506,7 @@ export interface AgentRequest {
   exec?: ExecBackend;
   images?: readonly AgentImage[];
   model: string;
-  purpose?: 'summary';
+  purpose?: 'summary' | 'sticker-index';
   resumeSessionId?: string;
   sandbox?: ExecScope;
   serviceTier?: string;
@@ -554,6 +589,7 @@ export type AgentEvent =
       contextTokens?: number | null;
       /** Context capacity of the model used for this turn, when reported. */
       contextWindow?: number;
+      costUsd?: number;
       inputTokens?: number;
       outputTokens?: number;
       type: 'usage';
@@ -611,6 +647,8 @@ export interface AgentConnector {
     sessionId: string,
     settings?: Pick<AgentRequest, 'model' | 'serviceTier' | 'thinking'>,
   ): AgentSessionInfo | undefined;
+  /** A low-cost vision-capable model ID for background work, when known. */
+  economyModel?(): string | undefined | Promise<string | undefined>;
   id: string;
   imageLimits?: ImageLimits;
   /** Human-readable, unlocalized connector name. */

@@ -144,6 +144,7 @@ async function fixture(
     plugins?: PluginDefinition[];
     previews?: { named?: TunnelProvider; quick: TunnelProvider };
     reactions?: true | PlatformAdapter['setApprovalReaction'];
+    stickers?: Config['stickers'];
     web?: Config['web'];
   } = {},
 ) {
@@ -227,7 +228,12 @@ async function fixture(
     log: (entry) => logs.push(entry),
   });
   const { context: contextSettings } = options;
-  const { locale, web: fixtureWeb, agentOptions } = options;
+  const {
+    locale,
+    web: fixtureWeb,
+    agentOptions,
+    stickers: stickerSettings,
+  } = options;
   const exec = options.plugins?.some((plugin) => plugin.execBackends?.length)
     ? {}
     : undefined;
@@ -263,6 +269,7 @@ async function fixture(
         exec,
         locale,
         web: fixtureWeb,
+        stickers: stickerSettings,
       }),
     );
   }
@@ -4578,3 +4585,379 @@ test('offers the first four album images once and removes explicitly downloaded 
     [{ messageId: 'fresh', index: 0 }],
   );
 });
+
+test('send tools require advertised capabilities and keep files and reactions in the current conversation', async (t) => {
+  const offered: string[][] = [];
+  let uploads = 0;
+  const f = await fixture(
+    t,
+    async function* (request) {
+      offered.push(
+        request.tools
+          .map(({ name }) => name)
+          .filter((name) => name.startsWith('send.')),
+      );
+      if (offered.length === 1) {
+        yield { type: 'text.final', text: 'no media' };
+        return;
+      }
+      const file = request.tools.find(({ name }) => name === 'send.file');
+      const reaction = request.tools.find(
+        ({ name }) => name === 'send.reaction',
+      );
+      assert.ok(file && reaction);
+      const path = join(request.workdir, 'note.txt');
+      await writeFile(path, 'report');
+      await writeFile(join(request.workdir, 'large.txt'), Buffer.alloc(17));
+      await symlink('/dev/null', join(request.workdir, 'outside'));
+      await assert.rejects(
+        file.run({ path: 'outside' }),
+        /accessible chat workspace/,
+      );
+      await assert.rejects(
+        file.run({ path: 'https://example.test/file' }),
+        /accessible chat workspace/,
+      );
+      await assert.rejects(file.run({ path: 'large.txt' }), /size limit/);
+      await assert.rejects(
+        file.run({ path, attachment: { messageId: 'source', index: 0 } }),
+        /Invalid tool arguments/,
+      );
+      await assert.rejects(
+        file.run({ attachment: { messageId: 'foreign', index: 0 } }),
+        /not found in this conversation/,
+      );
+      await assert.rejects(
+        reaction.run({ emoji: '👍', messageId: 'foreign' }),
+        /unavailable in this conversation/,
+      );
+      assert.deepEqual(
+        await reaction.run({ emoji: '👍' }, undefined, 'reaction'),
+        { messageId: 'source' },
+      );
+      assert.deepEqual(await file.run({ path }, undefined, 'disk'), {
+        messageId: 'upload-1',
+        messageIds: ['upload-1'],
+      });
+      assert.deepEqual(
+        await file.run(
+          { attachment: { messageId: 'source', index: 0 } },
+          undefined,
+          'attachment',
+        ),
+        { messageId: 'upload-2', messageIds: ['upload-2'] },
+      );
+      yield { type: 'text.final', text: 'Here is the report.' };
+    },
+    true,
+    {
+      downloadAttachment: async ({ fileId }, _signal, limit) => {
+        assert.equal(fileId, 'attachment-in-this-topic');
+        assert.equal(limit, 16);
+        return { bytes: Buffer.from('report'), mime: 'text/plain' };
+      },
+    },
+  );
+  const platform = f.platform.platform;
+  platform.sendFile = async ({ chatId, threadId, replyTo, file }) => {
+    assert.deepEqual(
+      { chatId, threadId, replyTo },
+      { chatId: chat.chatId, threadId: '17', replyTo: 'source' },
+    );
+    assert.equal(file.name, 'note.txt');
+    assert.equal(Buffer.from(file.bytes).toString(), 'report');
+    return { messageId: 'upload-' + ++uploads };
+  };
+  platform.sendReaction = async ({ chatId, threadId, messageId, emoji }) => {
+    assert.deepEqual(
+      { chatId, threadId, messageId, emoji },
+      { chatId: chat.chatId, threadId: '17', messageId: 'source', emoji: '👍' },
+    );
+  };
+  await f.platform.emit(inbound('capabilities', 'Which tools are offered?'));
+  await f.gateway.idle();
+  assert.deepEqual(offered, [[]]);
+  platform.capabilities.files = { maxBytes: 16 };
+  platform.capabilities.reactions = true;
+  const attachment = {
+    index: 0,
+    kind: 'file',
+    name: 'note.txt',
+    size: 6,
+  } as const;
+  await f.platform.emit(
+    inbound('foreign', '', {
+      userId: 'other',
+      chatId: 'elsewhere',
+      attachments: [{ ...attachment, fileId: 'foreign-file' }],
+    }),
+  );
+  await f.platform.emit(
+    inbound('source', 'Send this report', {
+      threadId: '17',
+      attachments: [{ ...attachment, fileId: 'attachment-in-this-topic' }],
+    }),
+  );
+  await f.gateway.idle();
+  assert.deepEqual(offered[1], ['send.reaction', 'send.file']);
+  const thread = { ...chat, chatId: chat.chatId + '_17' };
+  const task = f.store.listChatTasks(thread)[0]!;
+  assert.equal(task.status, 'sent');
+  const calls = f.store.taskToolCalls([task.id]);
+  assert.equal(calls.length, 9);
+  for (const [callId, result] of [
+    ['reaction', 'source'],
+    ['disk', 'upload-1'],
+    ['attachment', 'upload-2'],
+  ]) {
+    const call = calls.find((call) => call.callId === callId);
+    assert.equal(call?.status, 'ok');
+    assert.equal(JSON.parse(call.result!).messageId, result);
+  }
+  assert.deepEqual(
+    f.store
+      .getTaskExecution(task.id)
+      ?.outcome.delivery?.parts.map(({ messageId }) => messageId),
+    ['source', 'upload-1', 'upload-2', 'bot-2'],
+  );
+  assert.equal(f.store.getMessage(thread, 'upload-1')?.replyTo, 'source');
+  assert.equal(f.platform.sent.at(-1)?.text, 'Here is the report.');
+});
+
+test('media-only rounds record queued IDs with their tool call and complete immediate sends without text', async (t) => {
+  const f = await fixture(t, async function* (request) {
+    const tool = request.tools.find(({ name }) => name === 'send.sticker')!;
+    const source = request.context.findLast(
+      ({ source }) => source === 'message',
+    )?.content;
+    await tool.run({ fileId: source }, undefined, 'sticker-call');
+    yield { type: 'text.final', text: 'NO_REPLY' };
+  });
+  const platform = f.platform.platform;
+  platform.capabilities.stickers = true;
+  platform.sendSticker = async ({ fileId }) =>
+    fileId === 'queued'
+      ? { queued: true, id: 'queued-handle' }
+      : { messageId: 'immediate-sticker' };
+  const send = platform.send.bind(platform);
+  platform.send = async (message, options) => {
+    if (!options?.media?.length) return send(message);
+    assert.equal(message.text, '');
+    assert.equal(message.replyTo, 'queue-round');
+    assert.deepEqual(
+      options.media.map(({ id }) => id),
+      ['queued-handle'],
+    );
+    return {
+      messageId: 'queued-sticker',
+      parts: [
+        {
+          messageId: 'queued-sticker',
+          mediaId: 'queued-handle',
+          text: '[sticker]',
+        },
+      ],
+    };
+  };
+  await f.platform.emit(inbound('queue-round', 'queued'));
+  await f.gateway.idle();
+  await f.platform.emit(inbound('immediate-round', 'immediate'));
+  await f.gateway.idle();
+  const tasks = f.store.listChatTasks(chat);
+  assert.equal(tasks.length, 2);
+  for (const [source, messageId] of [
+    ['queue-round', 'queued-sticker'],
+    ['immediate-round', 'immediate-sticker'],
+  ]) {
+    const task = tasks.find(
+      ({ sourceMessageId }) => sourceMessageId === source,
+    )!;
+    assert.equal(task.status, 'sent');
+    const execution = f.store.getTaskExecution(task.id);
+    assert.equal(execution?.outcome.kind, 'delivered');
+    assert.deepEqual(execution.outcome.delivery?.parts, [
+      { messageId, ok: true },
+    ]);
+    const [call] = f.store.taskToolCalls([task.id]);
+    assert.equal(call?.name, 'send.sticker');
+    assert.equal(call.status, 'ok');
+    assert.equal(JSON.parse(call.result!).messageId, messageId);
+  }
+  assert.deepEqual(f.platform.sent, []);
+});
+
+test(
+  'sticker indexing deduplicates in the background, shares descriptions across chats and honors owner blocks',
+  { timeout: 10000 },
+  async (t) => {
+    if (spawnSync('ffmpeg', ['-version']).status !== 0) {
+      t.skip('ffmpeg is unavailable');
+      return;
+    }
+    const modelStarted = Promise.withResolvers<void>();
+    const allowIndex = Promise.withResolvers<void>();
+    const chatStarted = Promise.withResolvers<void>();
+    const setCalls: string[] = [];
+    const searches: unknown[] = [];
+    let modelCalls = 0;
+    const bytes = execFileSync('ffmpeg', [
+      '-loglevel',
+      'error',
+      '-filter_threads',
+      '1',
+      '-f',
+      'lavfi',
+      '-i',
+      'color=c=red:s=32x32',
+      '-frames:v',
+      '1',
+      '-threads',
+      '1',
+      '-c:v',
+      'png',
+      '-f',
+      'image2pipe',
+      'pipe:1',
+    ]);
+    const f = await fixture(
+      t,
+      async function* (request) {
+        if (request.purpose === 'sticker-index') {
+          modelCalls++;
+          assert.equal(request.model, 'test-cheap');
+          assert.equal(request.tools.length, 0);
+          assert.equal(request.images?.length, 1);
+          assert.equal(request.images[0]?.mime, 'image/jpeg');
+          assert.doesNotMatch(
+            JSON.stringify(request.context),
+            /private-origin/,
+          );
+          modelStarted.resolve();
+          await allowIndex.promise;
+          yield {
+            type: 'usage',
+            inputTokens: 24,
+            outputTokens: 7,
+            costUsd: 0.0001,
+          };
+          yield {
+            type: 'text.final',
+            text: '["Happy red animal waves","Sleepy red animal yawns"]',
+          };
+          return;
+        }
+        chatStarted.resolve();
+        const search = request.tools.find(
+          ({ name }) => name === 'sticker.search',
+        )!;
+        searches.push(await search.run({ query: 'happy', limit: 3 }));
+        yield { type: 'text.final', text: 'Done' };
+      },
+      true,
+      {
+        stickers: { model: 'test-cheap' },
+        imageLimits: { maxBytes: 100_000, maxEdge: 512 },
+        downloadAttachment: async () => ({ bytes, mime: 'image/png' }),
+      },
+    );
+    t.after(() => allowIndex.resolve());
+    f.platform.platform.capabilities.stickers = true;
+    const incoming = {
+      kind: 'sticker',
+      index: 0,
+      fileId: 'file-one',
+      emoji: '😀',
+      set: 'Surprise_Set',
+      stickerFormat: 'static',
+    } as const;
+    f.platform.platform.getStickerSet = async (name) => {
+      setCalls.push(name);
+      return [
+        { ...incoming, uniqueId: 'one' },
+        {
+          ...incoming,
+          index: 1,
+          fileId: 'file-two',
+          emoji: '😴',
+          uniqueId: 'two',
+        },
+      ];
+    };
+    const sendUnaddressed = (
+      id: string,
+      chatId: string,
+      set = incoming.set as string,
+    ) =>
+      f.platform.emit(
+        inbound(id, '', {
+          chatId,
+          chatKind: 'group',
+          userId: 'private-sender',
+          chatTitle: 'private-title',
+          attachments: [{ ...incoming, set }],
+        }),
+      );
+    await sendUnaddressed('sticker-a', 'private-origin');
+    await modelStarted.promise;
+    await sendUnaddressed('sticker-b', 'second-origin');
+    await f.platform.emit(
+      inbound('search-early', 'Search for a happy sticker'),
+    );
+    await chatStarted.promise;
+    await f.gateway.idle();
+    assert.equal(modelCalls, 1);
+    assert.deepEqual(searches, [[]]);
+    assert.deepEqual(setCalls, ['surprise_set']);
+    allowIndex.resolve();
+    for (
+      let i = 0;
+      i < 100 && !f.store.hasStickerSet('surprise_set', adapterId);
+      i++
+    )
+      await delay(10);
+    assert.ok(f.store.hasStickerSet('surprise_set', adapterId));
+    await f.platform.emit(inbound('search-late', 'Search now'));
+    await f.gateway.idle();
+    assert.deepEqual(searches.at(-1), [
+      {
+        fileId: 'file-one',
+        emoji: '😀',
+        description: 'Happy red animal waves',
+      },
+    ]);
+    assert.deepEqual(f.store.getStickerDescriptions('surprise_set'), [
+      { uniqueId: 'one', description: 'Happy red animal waves' },
+      { uniqueId: 'two', description: 'Sleepy red animal yawns' },
+    ]);
+    const usage = f.trace.recent.find(
+      ({ name, attrs }) =>
+        name === 'agent.usage' && attrs.purpose === 'sticker-index',
+    );
+    assert.equal(usage?.attrs.inputTokens, 24);
+    assert.equal(usage?.attrs.costUsd, 0.0001);
+    await f.platform.emit(
+      inbound('not-owner', '/sticker block surprise_set', { userId: 'member' }),
+    );
+    assert.equal(f.store.isStickerSetBlocked('surprise_set'), false);
+    await f.platform.emit(inbound('block', '/sticker block surprise_set'));
+    await f.platform.emit(
+      inbound('block-unknown', '/sticker block never_seen'),
+    );
+    await sendUnaddressed('sticker-c', 'private-origin', 'never_seen');
+    await f.platform.emit(inbound('search-blocked', 'Search again'));
+    await f.gateway.idle();
+    assert.deepEqual(searches.at(-1), []);
+    assert.deepEqual(setCalls, ['surprise_set']);
+    await f.platform.emit(
+      inbound('list-group', '/sticker', { chatKind: 'group' }),
+    );
+    assert.doesNotMatch(f.platform.sent.at(-1)!.text, /surprise_set/);
+    await f.platform.emit(inbound('list-dm', '/sticker'));
+    assert.match(
+      f.platform.sent.at(-1)!.text,
+      /surprise_set · 2 stickers · blocked/,
+    );
+    await f.platform.emit(inbound('unblock', '/sticker unblock SURPRISE_SET'));
+    assert.equal(f.store.searchStickers(adapterId, 'happy', 1).length, 1);
+  },
+);

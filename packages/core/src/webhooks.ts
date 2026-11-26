@@ -5,7 +5,6 @@ import type {
   WebhookConfig,
   WebhookIngress,
   WebhookProvider,
-  WebhookRoute,
   WebhookStatus,
 } from '@tsugimori/plugin-sdk';
 import type { Tracer } from '@tsugimori/trace';
@@ -85,8 +84,8 @@ export class Webhooks implements WebhookIngress {
     this.#listener = new WebhookListener(deps);
   }
 
-  register(path: string, route: WebhookRoute, signal: AbortSignal) {
-    return this.#listener.register(path, route, signal);
+  register(...args: Parameters<WebhookIngress['register']>) {
+    return this.#listener.register(...args);
   }
 
   paths() {

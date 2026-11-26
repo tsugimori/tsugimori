@@ -19,7 +19,7 @@ export function normalizedWebhookPath(path: string) {
 }
 
 export class WebhookListener {
-  readonly #routes = new Map<string, WebhookRoute>();
+  readonly #routes = new Map<string, { prefix: boolean; run: WebhookRoute }>();
   readonly #pending = new Map<string, { consumed: boolean; expires: number }>();
   readonly #now: () => number;
   #address = defaultWebhookListen;
@@ -41,7 +41,12 @@ export class WebhookListener {
     return this.#sync();
   }
 
-  async register(path: string, route: WebhookRoute, signal: AbortSignal) {
+  async register(
+    path: string,
+    route: WebhookRoute,
+    signal: AbortSignal,
+    { prefix = false }: { prefix?: boolean } = {},
+  ) {
     const key = normalizedWebhookPath(path);
     if (
       !/^\/(?!\/)[^?#\s\\]*$/.test(path) ||
@@ -53,7 +58,7 @@ export class WebhookListener {
     if (this.#stopped) throw new Error('Webhook listener has stopped');
     if (this.#routes.has(key))
       throw new Error('Webhook path is already registered');
-    this.#routes.set(key, route);
+    this.#routes.set(key, { prefix, run: route });
     let closing: Promise<void> | undefined;
     const release = () => {
       if (closing) return closing;
@@ -68,6 +73,20 @@ export class WebhookListener {
       await release();
       throw error;
     }
+  }
+
+  #route(path: string) {
+    const exact = this.#routes.get(normalizedWebhookPath(path));
+    if (exact) return exact.run;
+    let length = 0;
+    let route: WebhookRoute | undefined;
+    for (const [base, { prefix, run }] of this.#routes) {
+      if (prefix && base.length > length && path.startsWith(base + '/')) {
+        length = base.length;
+        route = run;
+      }
+    }
+    return route;
   }
 
   has(path: string) {
@@ -169,7 +188,7 @@ export class WebhookListener {
             return;
           }
         } else {
-          const route = this.#routes.get(normalizedWebhookPath(path));
+          const route = this.#route(path);
           if (route) {
             route(request, response);
             return;

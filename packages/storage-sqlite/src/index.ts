@@ -20,6 +20,7 @@ import type {
   GrantQuery,
   HistoryQuery,
   InboundRecord,
+  IndexedSticker,
   NewMessage,
   RemovalRows,
   RemovalTarget,
@@ -82,6 +83,7 @@ import {
   chatSummaryVersions,
   contextBlobs,
   grants,
+  indexedStickers,
   messageEdits,
   messages,
   owners,
@@ -92,6 +94,8 @@ import {
   sessionScope,
   setupRuns,
   setupSecrets,
+  stickerFiles,
+  stickerSets,
   taskEvents,
   taskRecords,
   tasks,
@@ -947,6 +951,142 @@ export class SqliteStore implements Store {
         )
         .get(),
     );
+  }
+
+  isStickerSetBlocked(name: string) {
+    return (
+      this.#db
+        .select({ blocked: stickerSets.blocked })
+        .from(stickerSets)
+        .where(eq(stickerSets.name, name))
+        .get()?.blocked === true
+    );
+  }
+
+  hasStickerSet(name: string, botId: string) {
+    return (
+      this.#db
+        .select({ botId: stickerFiles.botId })
+        .from(stickerFiles)
+        .where(
+          and(eq(stickerFiles.botId, botId), eq(stickerFiles.setName, name)),
+        )
+        .get() !== undefined
+    );
+  }
+
+  getStickerDescriptions(name: string) {
+    return this.#db
+      .select({
+        description: indexedStickers.description,
+        uniqueId: indexedStickers.uniqueId,
+      })
+      .from(indexedStickers)
+      .where(eq(indexedStickers.setName, name))
+      .all();
+  }
+
+  saveStickerSet(
+    name: string,
+    botId: string,
+    source: ChatRef,
+    stickers: readonly IndexedSticker[],
+  ) {
+    return this.#db.transaction((tx) => {
+      const set = tx
+        .select()
+        .from(stickerSets)
+        .where(eq(stickerSets.name, name))
+        .get();
+      if (set?.blocked || !stickers.length) return false;
+      if (!set?.sourceAdapterId) {
+        const sourceFields = {
+          sourceAdapterId: source.adapterId,
+          sourceChatId: source.chatId,
+        };
+        tx.insert(stickerSets)
+          .values({ name, ...sourceFields })
+          .onConflictDoUpdate({ target: stickerSets.name, set: sourceFields })
+          .run();
+      }
+      for (const { fileId, ...sticker } of stickers) {
+        tx.insert(indexedStickers)
+          .values({ setName: name, ...sticker })
+          .onConflictDoNothing()
+          .run();
+        tx.insert(stickerFiles)
+          .values({ botId, setName: name, uniqueId: sticker.uniqueId, fileId })
+          .onConflictDoUpdate({
+            target: [
+              stickerFiles.botId,
+              stickerFiles.setName,
+              stickerFiles.uniqueId,
+            ],
+            set: { fileId },
+          })
+          .run();
+      }
+      return true;
+    });
+  }
+
+  searchStickers(botId: string, query: string, limit: number) {
+    const terms = query.toLowerCase().split(/\s+/u).filter(Boolean);
+    return this.#db
+      .select({
+        fileId: stickerFiles.fileId,
+        emoji: indexedStickers.emoji,
+        description: indexedStickers.description,
+      })
+      .from(stickerFiles)
+      .innerJoin(
+        indexedStickers,
+        and(
+          eq(indexedStickers.setName, stickerFiles.setName),
+          eq(indexedStickers.uniqueId, stickerFiles.uniqueId),
+        ),
+      )
+      .innerJoin(stickerSets, eq(stickerSets.name, indexedStickers.setName))
+      .where(
+        and(
+          eq(stickerFiles.botId, botId),
+          eq(stickerSets.blocked, false),
+          ...terms.map(
+            (term) =>
+              sql`instr(lower(${indexedStickers.description} || ' ' || coalesce(${indexedStickers.emoji}, '') || ' ' || ${stickerSets.name}), ${term}) > 0`,
+          ),
+        ),
+      )
+      .orderBy(stickerFiles.setName, stickerFiles.uniqueId)
+      .limit(limit)
+      .all()
+      .map(({ fileId, emoji, description }) => ({
+        fileId,
+        emoji: emoji ?? undefined,
+        description,
+      }));
+  }
+
+  listStickerSets() {
+    return this.#db
+      .select({
+        name: stickerSets.name,
+        count: count(indexedStickers.uniqueId),
+        blocked: stickerSets.blocked,
+      })
+      .from(stickerSets)
+      .leftJoin(indexedStickers, eq(stickerSets.name, indexedStickers.setName))
+      .groupBy(stickerSets.name)
+      .orderBy(stickerSets.name)
+      .all();
+  }
+
+  setStickerSetBlocked(name: string, blocked: boolean) {
+    this.#db
+      .insert(stickerSets)
+      .values({ name, blocked })
+      .onConflictDoUpdate({ target: stickerSets.name, set: { blocked } })
+      .run();
   }
 
   constructor(path: string) {

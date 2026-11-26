@@ -45,6 +45,7 @@ export interface WebhookIngress {
     path: string,
     route: WebhookRoute,
     signal: AbortSignal,
+    options?: { prefix?: boolean },
   ): Promise<() => Promise<void>>;
   status(): WebhookStatus;
   url(path: string): string | undefined;

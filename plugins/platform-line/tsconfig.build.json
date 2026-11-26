@@ -1,5 +1,6 @@
 {
   "extends": "../../tsconfig.package.json",
+  "include": ["src/**/*.ts", "src/stickers.json"],
   "references": [
     {
       "path": "../../packages/plugin-sdk/tsconfig.build.json"
