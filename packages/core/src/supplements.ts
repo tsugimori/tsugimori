@@ -1,6 +1,7 @@
 import type { InboundMessage, OutboundMessage } from '@tsugimori/plugin-sdk';
 
 export interface TaskInput {
+  compact?: boolean;
   message: InboundMessage;
   scheduled?: {
     allowTextMentions: boolean;

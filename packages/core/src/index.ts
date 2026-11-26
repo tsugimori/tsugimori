@@ -498,7 +498,7 @@ export class Gateway {
       await this.#trace.span(
         'trigger.command',
         { ...chat, command: command.name },
-        () => this.#command(adapter, chat, message, owner, command),
+        () => this.#command(adapter, chat, message, stored.seq, owner, command),
       );
       return;
     }
@@ -664,6 +664,7 @@ export class Gateway {
     adapter: PlatformAdapter,
     chat: ChatRef,
     message: InboundMessage,
+    seq: number,
     owner: boolean,
     { name, args }: Command,
   ) {
@@ -733,6 +734,11 @@ export class Gateway {
         }
         await send(m.modelSet(args));
         break;
+      case 'compact':
+        if (args) await send(m.compactUsage);
+        else
+          this.#tasks.dispatch(adapter, chat, { message, seq, compact: true });
+        break;
       case 'previews': {
         const open = this.#previews?.list(chat.adapterId) ?? [];
         await send(
@@ -788,6 +794,7 @@ type Command = {
     | 'deny'
     | 'agent'
     | 'model'
+    | 'compact'
     | 'status'
     | 'preview'
     | 'previews';
@@ -795,7 +802,7 @@ type Command = {
 
 function parseCommand(text: string): Command | undefined {
   const match =
-    /^\/(add|login|pair|allow|deny|agent|model|status|preview|previews)(?:\s+([\s\S]*))?$/.exec(
+    /^\/(add|login|pair|allow|deny|agent|model|compact|status|preview|previews)(?:\s+([\s\S]*))?$/.exec(
       text.trim(),
     );
   if (!match) return;

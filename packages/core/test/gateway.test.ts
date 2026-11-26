@@ -93,6 +93,7 @@ async function fixture(
   run: AgentConnector['run'],
   enableAgent = true,
   options: {
+    compact?: AgentConnector['compact'];
     context?: { recentMessages: number; summary?: { model: string } };
     locale?: 'en' | 'zh-TW';
     plugins?: PluginDefinition[];
@@ -116,6 +117,7 @@ async function fixture(
           id,
           kind: 'fake',
           loop: 'external',
+          compact: options.compact,
           run,
           start() {
             agentStarts++;
@@ -172,7 +174,7 @@ async function fixture(
     : undefined;
   function configure(
     enabled: boolean,
-    options: { model?: string; platform?: boolean } = {},
+    options: { compactAt?: number; model?: string; platform?: boolean } = {},
   ) {
     return writeFile(
       path,
@@ -181,7 +183,14 @@ async function fixture(
         platforms:
           options.platform === false ? [] : [{ id: adapterId, kind: 'fake' }],
         agents: enabled
-          ? [{ id: 'test', kind: 'fake', model: options.model ?? 'first' }]
+          ? [
+              {
+                id: 'test',
+                kind: 'fake',
+                model: options.model ?? 'first',
+                compactAt: options.compactAt,
+              },
+            ]
           : [],
         defaultAgent: 'test',
         context: contextSettings,
@@ -217,6 +226,122 @@ async function fixture(
     },
   };
 }
+
+test(
+  'queues owner /compact behind the chat turn, preserves its session and records both triggers',
+  { timeout: 5_000 },
+  async (t) => {
+    const turnStarted = Promise.withResolvers<void>();
+    const finishTurn = Promise.withResolvers<void>();
+    const order: string[] = [];
+    const { configure, gateway, logs, platform, store, trace } = await fixture(
+      t,
+      async function* (request) {
+        if (!request.resumeSessionId) {
+          order.push('turn');
+          turnStarted.resolve();
+          await finishTurn.promise;
+          yield { type: 'sessionId', sessionId: 'native-1' };
+          yield {
+            type: 'compaction',
+            trigger: 'auto',
+            tokensBefore: 251_000,
+            durationMs: 12,
+          };
+        } else {
+          assert.equal(request.resumeSessionId, 'native-1');
+          order.push('resume');
+        }
+        yield { type: 'text.final', text: 'reply' };
+      },
+      true,
+      {
+        async compact(request) {
+          order.push('compact');
+          assert.equal(request.sessionId, 'native-1');
+          assert.equal(request.model, 'first');
+          assert.ok(request.workdir.endsWith(join(adapterId, chat.chatId)));
+          assert.equal(request.signal.aborted, false);
+          return { status: 'compacted', tokensBefore: 2400, tokensAfter: 600 };
+        },
+      },
+    );
+    t.after(() => finishTurn.resolve());
+    await platform.emit(inbound('no-session', '/compact'));
+    await gateway.idle();
+    assert.equal(
+      platform.sent.at(-1)?.text,
+      'There is no active agent session in this chat.',
+    );
+
+    await platform.emit(inbound('allow', '/allow'));
+    await platform.emit(inbound('first-turn', 'hello'));
+    await turnStarted.promise;
+    try {
+      await platform.emit(
+        inbound('member', '/compact', { userId: 'member', mentionsBot: true }),
+      );
+      await platform.emit(
+        inbound('owner', '/compact', { replyTo: 'first-turn' }),
+      );
+      assert.deepEqual(order, ['turn']);
+    } finally {
+      finishTurn.resolve();
+    }
+    await gateway.idle();
+    assert.deepEqual(order, ['turn', 'compact']);
+    assert.equal(platform.sent.at(-1)?.text, 'Agent session compacted.');
+    assert.equal(platform.sent.at(-1)?.replyTo, 'owner');
+    assert.equal(
+      store.getSession(chat, 'test', 'first')?.throughSeq,
+      store.getMessage(chat, 'first-turn')?.seq,
+    );
+
+    await trace.flush();
+    const spans = store
+      .listChatTasks(chat)
+      .flatMap(({ id }) => store.taskTrace(id))
+      .filter(({ name }) => name === 'agent.compaction');
+    assert.deepEqual(
+      spans
+        .map(({ attrs }) => [
+          attrs.trigger,
+          attrs.tokensBefore,
+          attrs.tokensAfter,
+        ])
+        .sort(),
+      [
+        ['auto', 251_000, null],
+        ['manual', 2400, 600],
+      ],
+    );
+    assert.equal(
+      spans.find(({ attrs }) => attrs.trigger === 'auto')?.durationMs,
+      12,
+    );
+
+    await configure(true, { compactAt: 150_000 });
+    while (!logs.some(({ event }) => event === 'config.reloaded'))
+      await delay(10, undefined, { signal: t.signal });
+    await platform.emit(inbound('next-turn', 'continue'));
+    await gateway.idle();
+    assert.deepEqual(order, ['turn', 'compact', 'resume']);
+  },
+);
+
+test('localizes /compact when the selected agent has no compaction capability', async (t) => {
+  const { gateway, platform } = await fixture(
+    t,
+    async function* () {
+      assert.fail('The command must not become a normal turn');
+    },
+    true,
+    { locale: 'zh-TW' },
+  );
+  await platform.emit(inbound('compact', '/compact'));
+  await gateway.idle();
+  assert.equal(platform.sent.at(-1)?.text, '此代理程式不支援壓縮工作階段。');
+});
 
 async function until(t: TestContext, condition: () => boolean) {
   while (!condition()) await delay(10, undefined, { signal: t.signal });

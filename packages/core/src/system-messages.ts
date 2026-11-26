@@ -16,6 +16,13 @@ const messages = {
     agentSet: (id: string) => `Agent set to ${id}.`,
     modelUsage: 'Usage: /model <name>',
     modelSet: (name: string) => `Model set to ${name}.`,
+    compactUsage: 'Usage: /compact',
+    compactUnsupported: 'This agent does not support session compaction.',
+    compactNoSession: 'There is no active agent session in this chat.',
+    compactSkipped:
+      'The agent did not compact the session. It may need more conversation history.',
+    compactFailed: 'The agent could not compact the session.',
+    compactSuccess: 'Agent session compacted.',
     noPreviews: 'No open previews.',
     preview: (id: string, url: string, port: number, expires: string) =>
       `${id} · ${url} · port ${port} · expires ${expires}`,
@@ -73,6 +80,12 @@ const messages = {
     agentSet: (id: string) => `已切換到代理程式 ${id}。`,
     modelUsage: '用法：/model <name>',
     modelSet: (name: string) => `已切換到模型 ${name}。`,
+    compactUsage: '用法：/compact',
+    compactUnsupported: '此代理程式不支援壓縮工作階段。',
+    compactNoSession: '此聊天室目前沒有使用中的代理程式工作階段。',
+    compactSkipped: '代理程式未壓縮工作階段，可能需要更多對話紀錄。',
+    compactFailed: '代理程式無法壓縮工作階段。',
+    compactSuccess: '已壓縮代理程式的工作階段。',
     noPreviews: '目前沒有開啟的預覽。',
     preview: (id: string, url: string, port: number, expires: string) =>
       `${id} · ${url} · 連接埠 ${port} · 到期時間 ${expires}`,

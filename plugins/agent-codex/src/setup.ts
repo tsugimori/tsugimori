@@ -7,8 +7,9 @@ import type {
 } from '@tsugimori/plugin-sdk';
 
 import { agentHome, SetupError } from '@tsugimori/plugin-sdk';
-import { mkdir } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 
 import { asRecord } from './app-server.ts';
@@ -115,6 +116,37 @@ async function loggedIn(ctx: CheckContext, signal?: AbortSignal) {
   }
 }
 
+async function supportsCompaction(ctx: CheckContext) {
+  const { argv, ...options } = authContext(ctx);
+  const dir = await mkdtemp(join(tmpdir(), 'tsugimori-codex-schema-'));
+  try {
+    const result = await ctx.runCommand(
+      [
+        argv,
+        'app-server',
+        'generate-json-schema',
+        '--experimental',
+        '--out',
+        dir,
+      ],
+      options,
+    );
+    if (result.exitCode !== 0) return false;
+    const [requests, config] = await Promise.all([
+      readFile(join(dir, 'ClientRequest.json'), 'utf8'),
+      readFile(join(dir, 'v2', 'ConfigReadResponse.json'), 'utf8'),
+    ]);
+    return (
+      requests.includes('"thread/compact/start"') &&
+      config.includes('"model_auto_compact_token_limit"')
+    );
+  } catch {
+    return false;
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
 export async function codexChecks(ctx: CheckContext): Promise<CheckItem[]> {
   const { argv, ...options } = authContext(ctx);
   const pinned = pinnedVersion(ctx.entry);
@@ -164,6 +196,7 @@ export async function codexChecks(ctx: CheckContext): Promise<CheckItem[]> {
       },
     ];
   const login = await loggedIn(ctx);
+  const compaction = await supportsCompaction(ctx);
   return [
     { ...cli, status: 'ok', detail: 'The Codex CLI is available.' },
     {
@@ -183,6 +216,23 @@ export async function codexChecks(ctx: CheckContext): Promise<CheckItem[]> {
         },
       },
       capabilities,
+    },
+    {
+      id: 'codex-compaction',
+      title: 'Codex context compaction',
+      status: compaction ? 'ok' : 'warn',
+      detail: compaction
+        ? 'The app-server schema exposes manual and automatic compaction settings.'
+        : 'The app-server schema could not confirm support for native context compaction.',
+      fix: compaction
+        ? undefined
+        : { hint: 'Upgrade the configured Codex CLI.' },
+      localized: {
+        'zh-TW': {
+          title: 'Codex 上下文壓縮',
+          hint: '請更新設定使用的 Codex CLI。',
+        },
+      },
     },
   ];
 }

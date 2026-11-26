@@ -69,6 +69,7 @@ test(
           assert.deepEqual(options.skills, []);
           assert.equal(options.permissionMode, 'default');
           assert.equal(options.sandbox?.allowUnsandboxedCommands, false);
+          assert.equal(options.env?.CLAUDE_CODE_AUTO_COMPACT_WINDOW, '250000');
           assert.match(String(options.systemPrompt), /trusted rule/);
           assert.doesNotMatch(String(options.systemPrompt), /member rule/);
           if (options.resume) {
@@ -168,6 +169,107 @@ test(
     assert.deepEqual(second, first);
   },
 );
+
+test(
+  'passes the Claude threshold and compacts the resumed session with the native slash command',
+  { timeout: 5_000 },
+  async () => {
+    const agent = new ClaudeAgent(
+      {
+        async *query({ options, prompt }) {
+          assert.equal(options?.env?.CLAUDE_CODE_AUTO_COMPACT_WINDOW, '125000');
+          const manual = prompt === '/compact';
+          if (manual) {
+            assert.equal(options?.resume, 'claude-native');
+            assert.deepEqual(options?.tools, []);
+          } else {
+            assert.match(String(prompt), /reply pong/);
+          }
+          yield await Promise.resolve(
+            frame({
+              type: 'system',
+              subtype: 'init',
+              slash_commands: ['compact'],
+            }),
+          );
+          yield frame({
+            type: 'system',
+            subtype: 'compact_boundary',
+            compact_metadata: {
+              trigger: manual ? 'manual' : 'auto',
+              pre_tokens: 125_000,
+              post_tokens: 600,
+              duration_ms: 15,
+            },
+          });
+          yield frame({
+            type: 'result',
+            subtype: 'success',
+            result: 'Complete',
+            usage: { input_tokens: 9, output_tokens: 1 },
+          });
+        },
+      },
+      'claude',
+      null,
+      { compactAt: 125_000 },
+    );
+    const input = request(tmpdir());
+    const events = await collect(agent.run(input, io));
+    assert.deepEqual(
+      events.filter(({ type }) => type === 'compaction'),
+      [
+        {
+          type: 'compaction',
+          trigger: 'auto',
+          tokensBefore: 125_000,
+          tokensAfter: 600,
+          durationMs: 15,
+        },
+      ],
+    );
+    assert.deepEqual(
+      await agent.compact({ ...input, sessionId: 'claude-native' }),
+      {
+        status: 'compacted',
+        tokensBefore: 125_000,
+        tokensAfter: 600,
+        durationMs: 15,
+      },
+    );
+  },
+);
+
+test('Claude manual compaction distinguishes unsupported commands from sessions without a compaction boundary', async () => {
+  for (const supported of [false, true]) {
+    const agent = new ClaudeAgent(
+      {
+        async *query() {
+          yield await Promise.resolve(
+            frame({
+              type: 'system',
+              subtype: 'init',
+              slash_commands: supported ? ['compact'] : [],
+            }),
+          );
+          yield frame({
+            type: 'result',
+            subtype: 'success',
+            result: 'Not enough messages to compact.',
+          });
+        },
+      },
+      'claude',
+      null,
+    );
+    assert.deepEqual(
+      await agent.compact({ ...request(tmpdir()), sessionId: 'claude-native' }),
+      {
+        status: supported ? 'skipped' : 'unsupported',
+      },
+    );
+  }
+});
 
 test(
   'Claude propagates cancellation to the SDK abort controller',

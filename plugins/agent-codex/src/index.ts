@@ -1,4 +1,6 @@
 import type {
+  AgentCompactRequest,
+  AgentCompactResult,
   AgentConnector,
   AgentEvent,
   AgentIO,
@@ -6,13 +8,18 @@ import type {
   AgentTool,
 } from '@tsugimori/plugin-sdk';
 
-import { definePlugin, ToolFailure, toolWireName } from '@tsugimori/plugin-sdk';
+import {
+  defaultCompactAt,
+  definePlugin,
+  ToolFailure,
+  toolWireName,
+} from '@tsugimori/plugin-sdk';
 import { createHash } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 
 import type { ServerFrame, SpawnServer } from './app-server.ts';
 
-import { AppServer, asRecord } from './app-server.ts';
+import { AppServer, asRecord, RpcError } from './app-server.ts';
 import { installCodex } from './install.ts';
 import {
   codexChecks,
@@ -24,8 +31,10 @@ import {
   approvalPolicy,
   approvalsReviewer,
   approve,
+  lastUsage,
   renderContext,
   replyToApproval,
+  TurnCompactions,
   TurnFrames,
   TurnOutput,
 } from './turn.ts';
@@ -33,6 +42,7 @@ import {
 interface CodexOptions {
   codexHome?: string;
   command?: string;
+  compactAt?: number;
 }
 
 interface CodexDependencies {
@@ -45,6 +55,7 @@ export class CodexAgent implements AgentConnector {
   readonly loop = 'external';
   readonly #deps: CodexDependencies;
   readonly #options: CodexOptions;
+  readonly #contextTokens = new WeakMap<AppServer, Map<string, number>>();
   #lifecycle?: AbortController;
   #connection?: Promise<AppServer>;
   #server?: AppServer;
@@ -122,9 +133,23 @@ export class CodexAgent implements AgentConnector {
     );
     // Route server requests centrally so inactive threads never leave a prompt hanging.
     const listeners = new Map<string, (frame: ServerFrame) => void>();
+    const contextTokens = new Map<string, number>();
     this.#listeners.set(server, listeners);
+    this.#contextTokens.set(server, contextTokens);
     server.on('frame', (frame) => {
       const { threadId } = frame.params;
+      if (
+        typeof threadId === 'string' &&
+        frame.method === 'thread/tokenUsage/updated'
+      ) {
+        const { totalTokens } = lastUsage(frame.params);
+        if (typeof totalTokens === 'number') {
+          contextTokens.delete(threadId);
+          contextTokens.set(threadId, totalTokens);
+          if (contextTokens.size > 256)
+            contextTokens.delete(contextTokens.keys().next().value!);
+        }
+      }
       const listener =
         typeof threadId === 'string' ? listeners.get(threadId) : undefined;
       if (listener) listener(frame);
@@ -166,20 +191,20 @@ export class CodexAgent implements AgentConnector {
     return prefix ? id.startsWith(prefix) : !id.startsWith('tools:');
   }
 
-  async *run(request: AgentRequest, io: AgentIO): AsyncIterable<AgentEvent> {
+  async #thread(
+    request: Pick<
+      AgentRequest,
+      'model' | 'purpose' | 'sandbox' | 'signal' | 'workdir'
+    >,
+    resumeSessionId?: string,
+    dynamicTools?: ReturnType<typeof describeTools>,
+  ) {
     request.signal.throwIfAborted();
     if (!this.#lifecycle) await this.start();
     const server = await this.#connect();
     const signal = AbortSignal.any([request.signal, server.signal]);
     signal.throwIfAborted();
     const { workdir } = request;
-    const dynamicTools = describeTools(request.tools);
-    const stamp = sessionPrefix(dynamicTools);
-    const resumeSessionId =
-      request.resumeSessionId &&
-      this.acceptsSession(request.resumeSessionId, request.tools)
-        ? request.resumeSessionId.slice(stamp.length)
-        : undefined;
     const model = request.model === 'default' ? undefined : request.model;
     const summarize = request.purpose === 'summary';
     const scope = request.sandbox;
@@ -199,6 +224,8 @@ export class CodexAgent implements AgentConnector {
       approvalsReviewer,
       ...(scoped ?? { sandbox: summarize ? 'read-only' : 'workspace-write' }),
       config: {
+        model_auto_compact_token_limit:
+          this.#options.compactAt ?? defaultCompactAt,
         ...(scope
           ? { project_doc_max_bytes: 0 }
           : {
@@ -227,7 +254,7 @@ export class CodexAgent implements AgentConnector {
       : await server.request('thread/start', {
           ...threadOptions,
           ephemeral: summarize || undefined,
-          dynamicTools: dynamicTools.length ? dynamicTools : undefined,
+          dynamicTools: dynamicTools?.length ? dynamicTools : undefined,
         });
     signal.throwIfAborted();
     const threadId = asRecord(result.thread).id;
@@ -236,12 +263,91 @@ export class CodexAgent implements AgentConnector {
       (resumeSessionId && threadId !== resumeSessionId)
     )
       throw new Error('Codex returned an invalid thread ID');
+    return { server, signal, threadId, model, summarize };
+  }
+
+  async compact(request: AgentCompactRequest): Promise<AgentCompactResult> {
+    const nativeId = request.sessionId.replace(/^tools:[a-f0-9]{64}:/, '');
+    const { server, signal, threadId } = await this.#thread(request, nativeId);
+    const listeners = this.#listeners.get(server)!;
+    if (listeners.has(threadId))
+      throw new Error('Codex thread already has an active turn');
+
+    const compactions = new TurnCompactions(
+      this.#contextTokens.get(server)?.get(threadId),
+    );
+    const frames = new TurnFrames();
+    listeners.set(threadId, frames.push);
+    let started = false;
+    let complete = false;
+    let turnId: string | undefined;
+    let result: AgentCompactResult = { status: 'skipped' };
+    try {
+      signal.throwIfAborted();
+      try {
+        await server.request('thread/compact/start', { threadId });
+        started = true;
+      } catch (error) {
+        if (error instanceof RpcError && error.code === -32601)
+          return { status: 'unsupported' };
+        throw error;
+      }
+      for (;;) {
+        const frame = await frames.next(signal);
+        if (frame.id !== undefined) {
+          await server.reject(frame.id);
+          continue;
+        }
+        const turn = asRecord(frame.params.turn);
+        if (frame.method === 'turn/started' && typeof turn.id === 'string')
+          turnId ??= turn.id;
+        if (frame.method === 'turn/completed' && turnId && turn.id === turnId) {
+          complete = true;
+          if (turn.status !== 'completed')
+            throw new Error('Codex compaction turn failed');
+          return result;
+        }
+        if (turnId && frame.params.turnId === turnId) {
+          const details = compactions.observe(frame);
+          if (details) result = { ...details, status: 'compacted' };
+        }
+      }
+    } finally {
+      listeners.delete(threadId);
+      if (started && !complete && !server.signal.aborted) {
+        if (turnId) {
+          await server
+            .request('turn/interrupt', { threadId, turnId }, 5_000)
+            .catch(() => server.fail('Codex could not interrupt compaction'));
+        } else
+          server.fail('Codex compaction stopped before receiving a turn ID');
+      }
+    }
+  }
+
+  async *run(request: AgentRequest, io: AgentIO): AsyncIterable<AgentEvent> {
+    const { workdir, sandbox: scope } = request;
+    const dynamicTools = describeTools(request.tools);
+    const stamp = sessionPrefix(dynamicTools);
+    const resumeSessionId =
+      request.resumeSessionId &&
+      this.acceptsSession(request.resumeSessionId, request.tools)
+        ? request.resumeSessionId.slice(stamp.length)
+        : undefined;
+    const { server, signal, threadId, model, summarize } = await this.#thread(
+      request,
+      resumeSessionId,
+      dynamicTools,
+    );
     const listeners = this.#listeners.get(server)!;
     if (listeners.has(threadId))
       throw new Error('Codex thread already has an active turn');
 
     const frames = new TurnFrames();
     const output = new TurnOutput();
+    const compactions = new TurnCompactions(
+      this.#contextTokens.get(server)?.get(threadId),
+    );
     listeners.set(threadId, frames.push);
     let turnId: string | undefined;
     let complete = false;
@@ -355,6 +461,9 @@ export class CodexAgent implements AgentConnector {
               await replyToApproval(server, frame, allowed);
           }
         } else if (frame.params.turnId === turnId) {
+          const details = compactions.observe(frame);
+          if (details)
+            yield { ...details, trigger: 'auto', type: 'compaction' };
           yield* output.events(frame);
         }
       }
@@ -389,7 +498,10 @@ export default definePlugin({
   name: 'agent-codex',
   agents: {
     codex(config, { workspace }) {
-      return new CodexAgent({}, config.id, codexLocation(config, workspace));
+      return new CodexAgent({}, config.id, {
+        ...codexLocation(config, workspace),
+        compactAt: config.compactAt,
+      });
     },
   },
   checks: codexChecks,

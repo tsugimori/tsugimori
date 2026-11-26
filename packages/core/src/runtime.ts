@@ -40,7 +40,14 @@ interface RuntimeDeps {
   measure<T>(target: string, run: () => Promise<T>): Promise<T>;
   receive(adapter: PlatformAdapter, event: PlatformInboundEvent): Promise<void>;
   registry: PluginRegistry;
-  store: Pick<Store, 'getCursor' | 'getSetupRun' | 'getUser' | 'saveCursor'>;
+  store: Pick<
+    Store,
+    | 'clearAgentSessions'
+    | 'getCursor'
+    | 'getSetupRun'
+    | 'getUser'
+    | 'saveCursor'
+  >;
   workspace: string;
 }
 
@@ -306,6 +313,16 @@ export class Runtime {
         sandboxChanged ? new Set(this.#adapters.keys()) : changedAdapters,
         changedAgents,
       );
+      for (const id of changedAgents) {
+        const old = this.#agents.get(id)!;
+        const next = nextAgents.get(id)?.config;
+        if (
+          !next ||
+          credentialsChanged('agent', next) ||
+          !isDeepStrictEqual({ ...old.config, compactAt: next.compactAt }, next)
+        )
+          this.#deps.store.clearAgentSessions(id);
+      }
       for (const entry of stoppedAdapters) {
         try {
           await entry.adapter.stop();

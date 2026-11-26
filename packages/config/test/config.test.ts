@@ -19,6 +19,7 @@ test('validates workspace JSON and accepts disabled, unregistered plugin kinds',
   );
   assert.equal(config.platforms[0]?.enabled, false);
   assert.equal(config.agents[0]?.enabled, true);
+  assert.equal(config.agents[0]?.compactAt, 250_000);
   assert.equal(config.context.recentMessages, 30);
   assert.equal(config.locale, 'en');
   assert.equal(parseConfig('{"locale":"zh-TW"}').locale, 'zh-TW');
@@ -37,6 +38,16 @@ test('validates workspace JSON and accepts disabled, unregistered plugin kinds',
     () => parseConfig('{"platforms":[{"id":"..","kind":"test"}]}'),
     /pattern/,
   );
+});
+
+test('preserves per-agent compaction thresholds and rejects invalid counts', () => {
+  const agent = { id: 'fake', kind: 'fake', enabled: false };
+  const compactAt = (value: unknown) =>
+    parseConfig(JSON.stringify({ agents: [{ ...agent, compactAt: value }] }))
+      .agents[0]?.compactAt;
+  assert.equal(compactAt(180_000), 180_000);
+  for (const invalid of [0, -1, 1.5, '250000', null])
+    assert.throws(() => compactAt(invalid), /\/agents\/0\/compactAt/);
 });
 
 test('parses shell-style assignments without evaluating them or leaking errors', () => {

@@ -74,6 +74,18 @@ export class Tracer {
     }
   }
 
+  record(name: string, attrs: TraceSpan['attrs'], durationMs = 0) {
+    const endedAt = Date.now();
+    this.#record({
+      name,
+      attrs,
+      startedAt: endedAt - Math.round(durationMs),
+      endedAt,
+      durationMs,
+      status: 'ok',
+    });
+  }
+
   #record(span: TraceSpan) {
     const size = this.#options.ringSize ?? 0;
     if (size > 0) {

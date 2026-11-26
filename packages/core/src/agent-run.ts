@@ -78,6 +78,18 @@ export async function runAgent(
               outputTokens: event.outputTokens ?? null,
             })();
             break;
+          case 'compaction':
+            trace.record(
+              'agent.compaction',
+              {
+                ...attrs,
+                trigger: event.trigger,
+                tokensBefore: event.tokensBefore ?? null,
+                tokensAfter: event.tokensAfter ?? null,
+              },
+              event.durationMs,
+            );
+            break;
           case 'error':
             throw event.error;
         }

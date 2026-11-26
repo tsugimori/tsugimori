@@ -17,6 +17,15 @@ export interface ServerFrame {
   params: Record<string, unknown>;
 }
 
+export class RpcError extends Error {
+  readonly code: number | undefined;
+
+  constructor(code: unknown) {
+    super(`Codex RPC rejected${typeof code === 'number' ? ` (${code})` : ''}`);
+    this.code = typeof code === 'number' ? code : undefined;
+  }
+}
+
 export function asRecord(value: unknown): Record<string, unknown> {
   if (value !== null && typeof value === 'object' && !Array.isArray(value))
     return value as Record<string, unknown>;
@@ -158,12 +167,7 @@ export class AppServer extends EventEmitter<{ frame: [ServerFrame] }> {
     if (typeof id !== 'number') return;
     const pending = this.#requests.get(id);
     if (payload.error) {
-      const { code } = asRecord(payload.error);
-      pending?.reject(
-        new Error(
-          `Codex RPC rejected${typeof code === 'number' ? ` (${code})` : ''}`,
-        ),
-      );
+      pending?.reject(new RpcError(asRecord(payload.error).code));
     } else pending?.resolve(payload.result);
   }
 }

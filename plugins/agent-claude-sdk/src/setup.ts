@@ -168,6 +168,20 @@ async function authStatus(
 
 export async function claudeChecks(ctx: CheckContext): Promise<CheckItem[]> {
   const info = await authStatus(ctx);
+  let supportsCompaction = false;
+  try {
+    const cli = resolveBundledCli(ctx.platform, ctx.arch);
+    const help = await ctx.runCommand([cli, '--help'], {
+      cwd: ctx.workspace,
+      env: claudeEnvironment(),
+    });
+    supportsCompaction =
+      help.exitCode === 0 && /(?:^|\s)--autocompact\s/.test(help.stdout);
+  } catch {
+    // Report unavailable compaction support without exposing CLI output.
+  }
+  const compactAt = 'compactAt' in ctx.entry ? ctx.entry.compactAt : undefined;
+  const tooLow = typeof compactAt === 'number' && compactAt < 100_000;
   return [
     {
       id: 'claude-login',
@@ -188,6 +202,29 @@ export async function claudeChecks(ctx: CheckContext): Promise<CheckItem[]> {
         },
       },
       capabilities: ['agent'],
+    },
+    {
+      id: 'claude-compaction',
+      title: 'Claude context compaction',
+      status: supportsCompaction && !tooLow ? 'ok' : 'warn',
+      detail: !supportsCompaction
+        ? 'The bundled Claude CLI does not advertise a configurable auto-compact window.'
+        : tooLow
+          ? 'Claude Code requires an auto-compact window of at least 100,000 tokens.'
+          : 'The bundled Claude CLI supports a configurable auto-compact window.',
+      fix: !supportsCompaction
+        ? { hint: 'Update the Claude Agent SDK and its bundled CLI.' }
+        : tooLow
+          ? { hint: 'Set this Claude agent’s compactAt to 100000 or more.' }
+          : undefined,
+      localized: {
+        'zh-TW': {
+          title: 'Claude 上下文壓縮',
+          hint: !supportsCompaction
+            ? '請更新 Claude Agent SDK 及其隨附的 CLI。'
+            : '請將此 Claude 代理程式的 compactAt 設為 100000 或更高。',
+        },
+      },
     },
   ];
 }

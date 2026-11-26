@@ -50,6 +50,12 @@ Add an `agents` entry with `kind: "claude-sdk"` and optionally set `model` and `
 
 Set `defaultAgent` to an agent ID to route new conversations by default. With a platform and zero agents, the gateway records incoming messages and tells the owner when a triggered message has no agent attached.
 
+### Session compaction
+
+Set `agents[].compactAt` to a positive integer to configure the agent's native auto-compaction window in tokens. The default is 250,000. Codex receives `model_auto_compact_token_limit`, and Claude Code receives `CLAUDE_CODE_AUTO_COMPACT_WINDOW`. Claude Code requires at least 100,000 tokens for this setting. `tsugimori doctor` reports when the configured CLI cannot support compaction.
+
+Owners can run `/compact` to compact the current chat's existing agent session. Task traces record automatic and manual compaction and include before and after token counts when available. The gateway's rolling conversation summaries are configured separately.
+
 ## Conversation summaries
 
 The gateway updates rolling summaries in a background queue as older messages fall outside `context.recentMessages`. Set `context.summary.model` to a lower-cost model accepted by the conversation's connector, or set `context.summary.enabled` to `false`. Fresh agent sessions receive the stored summary and subsequent messages.

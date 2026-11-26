@@ -4,6 +4,8 @@ import type {
   SDKMessage,
 } from '@anthropic-ai/claude-agent-sdk';
 import type {
+  AgentCompactRequest,
+  AgentCompactResult,
   AgentConnector,
   AgentEvent,
   AgentIO,
@@ -11,7 +13,7 @@ import type {
   ContextBlock,
 } from '@tsugimori/plugin-sdk';
 
-import { definePlugin } from '@tsugimori/plugin-sdk';
+import { defaultCompactAt, definePlugin } from '@tsugimori/plugin-sdk';
 import { realpath } from 'node:fs/promises';
 
 import {
@@ -57,6 +59,7 @@ export class ClaudeAgent implements AgentConnector {
   readonly loop = 'external';
   readonly #query?: Query;
   readonly #apiKey?: string;
+  readonly #compactAt: number;
   readonly #home?: string;
   readonly #token?: string;
   readonly #active = new Set<AbortController>();
@@ -65,13 +68,14 @@ export class ClaudeAgent implements AgentConnector {
     { query }: ClaudeDependencies,
     id: string,
     apiKey: string | null = process.env.ANTHROPIC_API_KEY ?? null,
-    auth?: { home: string; token?: string },
+    options?: { compactAt?: number; home?: string; token?: string },
   ) {
     this.id = id;
     this.#query = query;
     this.#apiKey = apiKey ?? undefined;
-    this.#home = auth?.home;
-    this.#token = auth?.token;
+    this.#compactAt = options?.compactAt ?? defaultCompactAt;
+    this.#home = options?.home;
+    this.#token = options?.token;
   }
 
   stop() {
@@ -79,7 +83,40 @@ export class ClaudeAgent implements AgentConnector {
     return Promise.resolve();
   }
 
-  async *run(request: AgentRequest, io: AgentIO): AsyncIterable<AgentEvent> {
+  async compact(request: AgentCompactRequest): Promise<AgentCompactResult> {
+    let compacted: AgentCompactResult = { status: 'skipped' };
+    const input: AgentRequest = {
+      ...request,
+      context: [],
+      resumeSessionId: request.sessionId,
+      tools: [],
+      toolsDisabled: true,
+    };
+    for await (const event of this.#session(input, undefined, '/compact')) {
+      if (event.session_id !== request.sessionId)
+        throw new Error(
+          'Claude returned a different session during compaction',
+        );
+      if (event.type === 'system') {
+        if (
+          event.subtype === 'init' &&
+          !event.slash_commands.includes('compact')
+        )
+          return { status: 'unsupported' };
+        if (
+          event.subtype === 'compact_boundary' &&
+          event.compact_metadata.trigger === 'manual'
+        )
+          compacted = { status: 'compacted', ...compactionDetails(event) };
+      } else if (event.type === 'result') {
+        assertSuccess(event);
+        return compacted;
+      }
+    }
+    throw new Error('Claude compaction ended before a result');
+  }
+
+  async *#session(request: AgentRequest, io?: AgentIO, command?: '/compact') {
     request.signal.throwIfAborted();
     const abortController = new AbortController();
     const abort = () => abortController.abort(request.signal.reason);
@@ -106,6 +143,7 @@ export class ClaudeAgent implements AgentConnector {
         abortController,
         cwd: workdir,
         model: request.model === 'default' ? undefined : request.model,
+        maxTurns: command ? 1 : undefined,
         resume: request.resumeSessionId,
         effort:
           request.thinking && effortLevels.has(request.thinking)
@@ -137,15 +175,18 @@ export class ClaudeAgent implements AgentConnector {
           [apiKeyName]: this.#apiKey,
           [oauthTokenName]: this.#token,
           CLAUDE_AGENT_SDK_CLIENT_APP: 'tsugimori/0.0.0',
+          CLAUDE_CODE_AUTO_COMPACT_WINDOW: String(this.#compactAt),
         },
         permissionMode: 'default',
-        canUseTool: toolPermission(
-          workdir,
-          io,
-          signal,
-          new Set(registered?.allowedTools),
-          request.sandbox?.denyRead,
-        ),
+        canUseTool: io
+          ? toolPermission(
+              workdir,
+              io,
+              signal,
+              new Set(registered?.allowedTools),
+              request.sandbox?.denyRead,
+            )
+          : async () => ({ behavior: 'deny', message: 'Permission denied.' }),
         includePartialMessages: true,
         hooks: {
           PreToolUse: [
@@ -197,88 +238,123 @@ export class ClaudeAgent implements AgentConnector {
               },
             },
       };
-      let sessionId: string | undefined;
-      let lastText = '';
-      const tools = new Map<string, string>();
-      for await (const event of query({ prompt: render(context), options })) {
+      for await (const event of query({
+        prompt: command ?? render(context),
+        options,
+      })) {
         signal.throwIfAborted();
-        if (event.session_id && sessionId !== event.session_id) {
-          sessionId = event.session_id;
-          yield { type: 'sessionId', sessionId };
-        }
-        if (
-          event.type === 'stream_event' &&
-          event.parent_tool_use_id === null
-        ) {
-          const { event: part } = event;
-          if (
-            part.type === 'content_block_delta' &&
-            part.delta.type === 'text_delta'
-          )
-            yield { type: 'text.delta', text: part.delta.text };
-          if (
-            part.type === 'content_block_start' &&
-            part.content_block.type === 'tool_use'
-          ) {
-            const { id: callId, name } = part.content_block;
-            tools.set(callId, name);
-            yield { type: 'tool.started', callId, name };
-          }
-        } else if (event.type === 'assistant') {
-          if (event.error)
-            throw new Error(`Claude assistant failed (${event.error})`);
-          const text: string[] = [];
-          for (const block of event.message.content) {
-            if (block.type === 'text') text.push(block.text);
-            if (block.type === 'tool_use' && !tools.has(block.id)) {
-              tools.set(block.id, block.name);
-              yield {
-                type: 'tool.started',
-                callId: block.id,
-                name: block.name,
-              };
-            }
-          }
-          if (text.length && event.parent_tool_use_id === null)
-            lastText = text.join('');
-        } else if (
-          event.type === 'user' &&
-          Array.isArray(event.message.content)
-        ) {
-          for (const block of event.message.content) {
-            if (block.type !== 'tool_result') continue;
-            const callId = block.tool_use_id;
-            const name = tools.get(callId);
-            if (!name) continue;
-            tools.delete(callId);
-            yield {
-              type: 'tool.finished',
-              callId,
-              name,
-              status: block.is_error ? 'error' : 'ok',
-            };
-          }
-        } else if (event.type === 'result') {
-          yield {
-            type: 'usage',
-            inputTokens: event.usage.input_tokens,
-            outputTokens: event.usage.output_tokens,
-          };
-          if (event.subtype !== 'success' || event.is_error)
-            throw new Error(`Claude query failed (${event.subtype})`);
-          const text = event.result || lastText;
-          if (text) yield { type: 'text.final', text };
-          return;
-        }
+        yield event;
       }
       signal.throwIfAborted();
-      throw new Error('Claude query ended before a result');
     } finally {
       abortController.abort();
       request.signal.removeEventListener('abort', abort);
       this.#active.delete(abortController);
     }
   }
+
+  async *run(request: AgentRequest, io: AgentIO): AsyncIterable<AgentEvent> {
+    let sessionId: string | undefined;
+    let lastText = '';
+    const tools = new Map<string, string>();
+    for await (const event of this.#session(request, io)) {
+      if (event.session_id && sessionId !== event.session_id) {
+        sessionId = event.session_id;
+        yield { type: 'sessionId', sessionId };
+      }
+      if (event.type === 'stream_event' && event.parent_tool_use_id === null) {
+        const { event: part } = event;
+        if (
+          part.type === 'content_block_delta' &&
+          part.delta.type === 'text_delta'
+        )
+          yield { type: 'text.delta', text: part.delta.text };
+        if (
+          part.type === 'content_block_start' &&
+          part.content_block.type === 'tool_use'
+        ) {
+          const { id: callId, name } = part.content_block;
+          tools.set(callId, name);
+          yield { type: 'tool.started', callId, name };
+        }
+      } else if (event.type === 'assistant') {
+        if (event.error)
+          throw new Error(`Claude assistant failed (${event.error})`);
+        const text: string[] = [];
+        for (const block of event.message.content) {
+          if (block.type === 'text') text.push(block.text);
+          if (block.type === 'tool_use' && !tools.has(block.id)) {
+            tools.set(block.id, block.name);
+            yield {
+              type: 'tool.started',
+              callId: block.id,
+              name: block.name,
+            };
+          }
+        }
+        if (text.length && event.parent_tool_use_id === null)
+          lastText = text.join('');
+      } else if (
+        event.type === 'user' &&
+        Array.isArray(event.message.content)
+      ) {
+        for (const block of event.message.content) {
+          if (block.type !== 'tool_result') continue;
+          const callId = block.tool_use_id;
+          const name = tools.get(callId);
+          if (!name) continue;
+          tools.delete(callId);
+          yield {
+            type: 'tool.finished',
+            callId,
+            name,
+            status: block.is_error ? 'error' : 'ok',
+          };
+        }
+      } else if (
+        event.type === 'system' &&
+        event.subtype === 'compact_boundary'
+      ) {
+        yield {
+          type: 'compaction',
+          trigger: event.compact_metadata.trigger,
+          ...compactionDetails(event),
+        };
+      } else if (event.type === 'result') {
+        yield {
+          type: 'usage',
+          inputTokens: event.usage.input_tokens,
+          outputTokens: event.usage.output_tokens,
+        };
+        assertSuccess(event);
+        const text = event.result || lastText;
+        if (text) yield { type: 'text.final', text };
+        return;
+      }
+    }
+    throw new Error('Claude query ended before a result');
+  }
+}
+
+function assertSuccess(
+  event: Extract<SDKMessage, { type: 'result' }>,
+): asserts event is Extract<
+  SDKMessage,
+  { subtype: 'success'; type: 'result' }
+> {
+  if (event.subtype !== 'success' || event.is_error)
+    throw new Error(`Claude query failed (${event.subtype})`);
+}
+
+function compactionDetails(
+  event: Extract<SDKMessage, { subtype: 'compact_boundary' }>,
+) {
+  const { pre_tokens, post_tokens, duration_ms } = event.compact_metadata;
+  return {
+    tokensBefore: pre_tokens,
+    tokensAfter: post_tokens,
+    durationMs: duration_ms,
+  };
 }
 
 export default definePlugin({
@@ -292,7 +368,10 @@ export default definePlugin({
   agents: {
     'claude-sdk': (config, ctx) => {
       const auth = claudeOptions(config, ctx);
-      return new ClaudeAgent({}, config.id, auth.apiKey ?? null, auth);
+      return new ClaudeAgent({}, config.id, auth.apiKey ?? null, {
+        ...auth,
+        compactAt: config.compactAt,
+      });
     },
   },
 });

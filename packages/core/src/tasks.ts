@@ -1,6 +1,7 @@
 import type { Auth } from '@tsugimori/auth';
 import type { ContextAssembler } from '@tsugimori/context';
 import type {
+  AgentConnector,
   AgentIO,
   ApprovalFeedback,
   ApprovalRequest,
@@ -95,6 +96,7 @@ export class Tasks {
     const running = this.#running.get(key);
     const { replyTo, messageId } = input.message;
     if (
+      !input.compact &&
       !input.scheduled &&
       running?.acceptsSupplements &&
       !running.abort.signal.aborted &&
@@ -180,7 +182,6 @@ export class Tasks {
       }
     }
     await Promise.allSettled(active);
-    for (const id of agents) this.#deps.store.clearAgentSessions(id);
   }
 
   #withPendingApprovals() {
@@ -225,9 +226,11 @@ export class Tasks {
       const current = store.getChat(chat);
       const allowlisted = current?.allowlisted ?? false;
       if (
-        input.scheduled
-          ? !owner && !allowlisted
-          : !shouldTrigger(message, owner, allowlisted)
+        input.compact
+          ? !owner
+          : input.scheduled
+            ? !owner && !allowlisted
+            : !shouldTrigger(message, owner, allowlisted)
       ) {
         finish('cancelled');
         return;
@@ -282,6 +285,16 @@ export class Tasks {
             },
           );
         else finish('completed');
+        return;
+      }
+
+      if (input.compact) {
+        const text = await this.#compact(work, selected.agent, model);
+        abort.signal.throwIfAborted();
+        await outbound.send(adapter, reply(message, text), {
+          taskId: id,
+          signal: abort.signal,
+        });
         return;
       }
 
@@ -370,6 +383,82 @@ export class Tasks {
     }
   }
 
+  #toolDefinitions(adapter: PlatformAdapter) {
+    return [
+      ...this.#deps.tools.filter(
+        ({ name }) =>
+          !name.startsWith('exec.') || Boolean(this.#deps.backend()),
+      ),
+      ...(adapter.tools?.() ?? []),
+    ];
+  }
+
+  async #compact(
+    { abort, adapter, chat, id }: Work,
+    agent: AgentConnector,
+    model: string,
+  ) {
+    const { context, log, runtime, store, trace } = this.#deps;
+    const m = systemMessages(runtime.config.locale);
+    if (!agent.compact) return m.compactUnsupported;
+    const session = store.getSession(chat, agent.id, model);
+    if (
+      !session ||
+      agent.acceptsSession?.(
+        session.sessionId,
+        this.#toolDefinitions(adapter),
+      ) === false
+    )
+      return m.compactNoSession;
+
+    const attrs = {
+      ...chat,
+      taskId: id,
+      agentId: agent.id,
+      model,
+      trigger: 'manual',
+      tokensBefore: null as number | null,
+      tokensAfter: null as number | null,
+    };
+    const end = trace.begin('agent.compaction', attrs);
+    const signal = AbortSignal.any([
+      abort.signal,
+      AbortSignal.timeout(120_000),
+    ]);
+    try {
+      const workdir = await context.workdir(chat);
+      signal.throwIfAborted();
+      const result = await agent.compact({
+        model,
+        sessionId: session.sessionId,
+        signal,
+        workdir,
+        sandbox: this.#deps.scope(workdir),
+      });
+      signal.throwIfAborted();
+      if (result.status !== 'compacted') {
+        end('error');
+        return result.status === 'unsupported'
+          ? m.compactUnsupported
+          : m.compactSkipped;
+      }
+      attrs.tokensBefore = result.tokensBefore ?? null;
+      attrs.tokensAfter = result.tokensAfter ?? null;
+      end();
+      return m.compactSuccess;
+    } catch {
+      end('error');
+      abort.signal.throwIfAborted();
+      log({
+        level: 'error',
+        event: 'agent.compaction_failed',
+        taskId: id,
+        target: `agent/${agent.id}`,
+      });
+      return m.compactFailed;
+    }
+  }
+
   async #run(
     work: Work,
     selected: NonNullable<ReturnType<Runtime['getAgent']>>,
@@ -386,13 +475,7 @@ export class Tasks {
       principal: { adapterId: chat.adapterId, userId: input.message.userId },
     };
     const attrs = { ...chat, taskId: id };
-    const definitions = [
-      ...this.#deps.tools.filter(
-        ({ name }) =>
-          !name.startsWith('exec.') || Boolean(this.#deps.backend()),
-      ),
-      ...(adapter.tools?.() ?? []),
-    ];
+    const definitions = this.#toolDefinitions(adapter);
     const storedSession = input.scheduled
       ? undefined
       : store.getSession(chat, agent.id, model);

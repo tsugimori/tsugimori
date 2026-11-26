@@ -27,6 +27,7 @@ for await (const line of createInterface({ input: process.stdin })) {
   } else if (method === 'thread/start' || method === 'thread/resume') {
     assert.ok(initialized);
     assert.equal(params.cwd, '/tmp/work');
+    assert.equal(params.config.model_auto_compact_token_limit, Number(process.env.TEST_CODEX_COMPACT_AT ?? 250000));
     const scoped = Array.isArray(params.environments);
     if (scoped) {
       assert.deepEqual(params.runtimeWorkspaceRoots, ['/tmp/work']);
@@ -44,6 +45,22 @@ for await (const line of createInterface({ input: process.stdin })) {
     threads.set(threadId, { scoped, resumed: method === 'thread/resume' });
     if (params.threadId) assert.equal(params.excludeTurns, true);
     answer({ thread: { id: threadId } });
+  } else if (method === 'thread/compact/start') {
+    const { threadId } = params;
+    assert.ok(threads.get(threadId)?.resumed);
+    if (process.env.TEST_CODEX_NO_COMPACT) {
+      write({ id, error: { code: -32601, message: 'Method not found' } });
+      continue;
+    }
+    const turnId = 'turn-' + ++next;
+    const notify = (method, params) => write({ method, params: { threadId, turnId, ...params } });
+    const item = { type: 'contextCompaction', id: 'compact-' + turnId };
+    notify('turn/started', { turn: { id: turnId, status: 'inProgress' } });
+    answer({});
+    notify('item/started', { item, startedAtMs: 100 });
+    notify('thread/tokenUsage/updated', { tokenUsage: { last: { totalTokens: 30, inputTokens: 0, outputTokens: 0 } } });
+    notify('item/completed', { item, completedAtMs: 120 });
+    notify('turn/completed', { turn: { id: turnId, status: 'completed', items: [item] } });
   } else if (method === 'turn/start') {
     const threadId = params.threadId;
     const thread = threads.get(threadId);
@@ -80,6 +97,13 @@ for await (const line of createInterface({ input: process.stdin })) {
       // A cancellation can arrive between dispatching turn/start and receiving its ID.
       setTimeout(() => answer({ turn: { id: turnId, status: 'inProgress' } }), 30);
       continue;
+    }
+    if (input === 'auto compact') {
+      const item = { type: 'contextCompaction', id: 'compact-' + turnId };
+      notify('thread/tokenUsage/updated', { tokenUsage: { last: { totalTokens: 800, inputTokens: 700, outputTokens: 100 } } });
+      notify('item/started', { item, startedAtMs: 100 });
+      notify('thread/tokenUsage/updated', { tokenUsage: { last: { totalTokens: 100, inputTokens: 0, outputTokens: 0 } } });
+      notify('item/completed', { item, completedAtMs: 110 });
     }
     if (input === 'scheduled tools') {
       answer({ turn: { id: turnId, status: 'inProgress' } });
@@ -163,6 +187,82 @@ function request(
     resumeSessionId,
   };
 }
+
+test(
+  'passes Codex compaction config and tracks automatic and manual compaction',
+  { timeout: 5_000 },
+  async (t) => {
+    const agent = new CodexAgent(
+      {
+        spawn(_command, _args, options) {
+          return spawn(
+            process.execPath,
+            ['--input-type=module', '--eval', fakeServer],
+            {
+              ...options,
+              env: { ...options.env, TEST_CODEX_COMPACT_AT: '150000' },
+            },
+          );
+        },
+      },
+      'codex',
+      { compactAt: 150_000 },
+    );
+    t.after(() => agent.stop());
+    const input = request('auto compact');
+    const events = await collect(agent.run(input, io));
+    assert.deepEqual(
+      events.filter(({ type }) => type === 'compaction'),
+      [
+        {
+          type: 'compaction',
+          trigger: 'auto',
+          tokensBefore: 800,
+          tokensAfter: 100,
+          durationMs: 10,
+        },
+      ],
+    );
+    const session = events.find((event) => event.type === 'sessionId');
+    assert.ok(session);
+    assert.deepEqual(
+      await agent.compact({ ...input, sessionId: session.sessionId }),
+      {
+        status: 'compacted',
+        tokensBefore: 100,
+        tokensAfter: 30,
+        durationMs: 20,
+      },
+    );
+  },
+);
+
+test(
+  'maps Codex method-not-found to unsupported compaction',
+  { timeout: 5_000 },
+  async (t) => {
+    const agent = new CodexAgent(
+      {
+        spawn(_command, _args, options) {
+          return spawn(
+            process.execPath,
+            ['--input-type=module', '--eval', fakeServer],
+            {
+              ...options,
+              env: { ...options.env, TEST_CODEX_NO_COMPACT: '1' },
+            },
+          );
+        },
+      },
+      'codex',
+    );
+    t.after(() => agent.stop());
+    assert.deepEqual(
+      await agent.compact({ ...request(''), sessionId: 'thread-1' }),
+      { status: 'unsupported' },
+    );
+  },
+);
 
 test(
   'streams Codex turns, resumes native threads and answers all three approval methods',

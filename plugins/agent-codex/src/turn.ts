@@ -1,4 +1,5 @@
 import type {
+  AgentCompaction,
   AgentEvent,
   AgentIO,
   ApprovalRequest,
@@ -65,6 +66,57 @@ export class TurnFrames {
   }
 }
 
+export function lastUsage(params: ServerFrame['params']) {
+  return asRecord(asRecord(params.tokenUsage).last);
+}
+
+export class TurnCompactions {
+  readonly #items = new Map<
+    string,
+    { startedAt: number; tokensAfter?: number; tokensBefore?: number }
+  >();
+  #latest?: number;
+
+  constructor(tokensBefore?: number) {
+    this.#latest = tokensBefore;
+  }
+
+  observe({ method, params }: ServerFrame): AgentCompaction | undefined {
+    if (method === 'thread/tokenUsage/updated') {
+      const { totalTokens, inputTokens, outputTokens } = lastUsage(params);
+      if (typeof totalTokens === 'number') {
+        this.#latest = totalTokens;
+        // Codex publishes a replacement context estimate with zero billable input/output.
+        if (this.#items.size === 1 && inputTokens === 0 && outputTokens === 0) {
+          const active = this.#items.values().next().value!;
+          active.tokensAfter = totalTokens;
+        }
+      }
+      return;
+    }
+    const { item, startedAtMs, completedAtMs } = params;
+    const { type, id } = asRecord(item);
+    if (type !== 'contextCompaction' || typeof id !== 'string') return;
+    if (method === 'item/started') {
+      this.#items.set(id, {
+        startedAt: typeof startedAtMs === 'number' ? startedAtMs : Date.now(),
+        tokensBefore: this.#latest,
+      });
+      return;
+    }
+    if (method !== 'item/completed') return;
+    const start = this.#items.get(id);
+    this.#items.delete(id);
+    const endedAt =
+      typeof completedAtMs === 'number' ? completedAtMs : Date.now();
+    return {
+      durationMs: start && Math.max(0, endedAt - start.startedAt),
+      tokensBefore: start?.tokensBefore,
+      tokensAfter: start?.tokensAfter,
+    };
+  }
+}
+
 export class TurnOutput {
   readonly #items = new Map<string, Record<string, unknown>>();
   #final: string | undefined;
@@ -77,7 +129,7 @@ export class TurnOutput {
     )
       return [{ type: 'text.delta', text: params.delta }];
     if (method === 'thread/tokenUsage/updated') {
-      const usage = asRecord(asRecord(params.tokenUsage).last);
+      const usage = lastUsage(params);
       return [
         {
           type: 'usage',

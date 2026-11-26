@@ -318,6 +318,26 @@ export interface AgentIO {
   supplements: AsyncIterable<InboundMessage>;
 }
 
+export interface AgentCompactRequest {
+  model: string;
+  sandbox?: ExecScope;
+  sessionId: string;
+  signal: AbortSignal;
+  workdir: string;
+}
+
+export interface AgentCompaction {
+  durationMs?: number;
+  tokensAfter?: number;
+  tokensBefore?: number;
+}
+
+export type AgentCompactResult =
+  | { status: 'unsupported' | 'skipped' }
+  | (AgentCompaction & { status: 'compacted' });
+
+export const defaultCompactAt = 250_000;
+
 export type AgentEvent =
   | { text: string; type: 'text.delta' }
   | { text: string; type: 'text.final' }
@@ -330,6 +350,7 @@ export type AgentEvent =
     }
   | { request: ApprovalRequest; type: 'approval.requested' }
   | { error: Error; type: 'error' }
+  | (AgentCompaction & { trigger: 'auto' | 'manual'; type: 'compaction' })
   | { inputTokens?: number; outputTokens?: number; type: 'usage' }
   | { sessionId: string; type: 'sessionId' };
 
@@ -339,6 +360,7 @@ export function toolWireName(name: string) {
 
 export interface AgentConnector {
   acceptsSession?(id: string, tools: readonly ToolDefinition[]): boolean;
+  compact?(request: AgentCompactRequest): Promise<AgentCompactResult>;
   id: string;
   kind: string;
   loop: 'framework' | 'external';
@@ -361,6 +383,7 @@ export interface PlatformInstanceConfig extends PluginInstanceConfig {
 
 export type AgentInstanceConfig = PluginInstanceConfig & {
   [option: string]: unknown;
+  compactAt?: number;
   version?: string;
 };
 
