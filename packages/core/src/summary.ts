@@ -12,6 +12,8 @@ import { runAgent } from './agent-run.ts';
 
 interface SummaryJob {
   agentId: string;
+  /** Set on follow-up runs while a full batch left at least another full batch behind. */
+  catchUp?: boolean;
   chat: ChatRef;
   model: string;
   taskId: string;
@@ -27,10 +29,15 @@ interface SummaryDependencies {
   trace: Tracer;
 }
 
-const batchLimit = 40;
+const maxTimerMs = 2 ** 31 - 1;
+
+function chatKey(chat: ChatRef) {
+  return JSON.stringify([chat.adapterId, chat.chatId]);
+}
 
 export class BackgroundSummaries implements SummaryProvider {
   readonly #deps: SummaryDependencies;
+  readonly #delayed = new Map<string, NodeJS.Timeout>();
   readonly #pending = new Map<string, SummaryJob>();
   readonly #stop = new AbortController();
   #drain?: Promise<void>;
@@ -57,15 +64,19 @@ export class BackgroundSummaries implements SummaryProvider {
 
   enqueue(job: SummaryJob) {
     if (this.#stop.signal.aborted) return;
+    const key = chatKey(job.chat);
+    const queued = this.#pending.get(key);
     this.#pending.set(
-      JSON.stringify([job.chat.adapterId, job.chat.chatId]),
-      job,
+      key,
+      queued?.catchUp && !job.catchUp ? { ...job, catchUp: true } : job,
     );
     this.#drain ??= this.#run();
   }
 
   async stop() {
     this.#stop.abort();
+    for (const timer of this.#delayed.values()) clearTimeout(timer);
+    this.#delayed.clear();
     this.#pending.clear();
     await this.#drain;
   }
@@ -74,6 +85,10 @@ export class BackgroundSummaries implements SummaryProvider {
     try {
       while (this.#pending.size && !this.#stop.signal.aborted) {
         await setImmediate();
+        // Leave jobs queued so a delayed re-check can coalesce during reload.
+        const transition = this.#deps.runtime.transition;
+        if (transition) await transition;
+        if (this.#stop.signal.aborted) return;
         const next = this.#pending.entries().next().value;
         if (!next) return;
         const [key, job] = next;
@@ -97,10 +112,10 @@ export class BackgroundSummaries implements SummaryProvider {
   async #update(job: SummaryJob) {
     const { store, runtime, trace } = this.#deps;
     const { taskId } = job;
-    const transition = runtime.transition;
-    if (transition) await transition;
-    if (this.#stop.signal.aborted) return;
     const chat = store.resolveChat(job.chat);
+    const key = chatKey(chat);
+    clearTimeout(this.#delayed.get(key));
+    this.#delayed.delete(key);
     const { recentMessages, summary } = runtime.config.context;
     if (summary?.enabled === false) return;
     const selected = runtime.getAgent(job.agentId);
@@ -115,23 +130,46 @@ export class BackgroundSummaries implements SummaryProvider {
     const afterSeq = previous?.throughSeq ?? 0;
     if (afterSeq >= cutoff) return;
     const minMessages = summary?.minMessages ?? 20;
-    const batch = store.summaryMessages(chat, afterSeq, cutoff, batchLimit);
-    if (minMessages > batchLimit) {
-      if (
-        batch.length < batchLimit ||
-        !store.summaryMessages(chat, afterSeq, cutoff, 1, minMessages - 1)
-          .length
-      )
+    if (
+      !store.summaryMessages(chat, afterSeq, cutoff, 1, minMessages - 1).length
+    )
+      return;
+
+    const minIntervalMs = (summary?.minIntervalMinutes ?? 15) * 60_000;
+    if (!job.catchUp && minIntervalMs > 0 && previous?.updatedAt != null) {
+      const delayMs = previous.updatedAt + minIntervalMs - Date.now();
+      if (delayMs > 0) {
+        const timer = setTimeout(
+          () => {
+            this.#delayed.delete(key);
+            if (!this.#pending.has(key)) this.enqueue({ ...job, chat });
+          },
+          Math.min(delayMs, maxTimerMs),
+        );
+        this.#delayed.set(key, timer.unref());
         return;
-    } else if (batch.length < minMessages) return;
+      }
+    }
+
+    const maxMessages = summary?.maxMessages ?? 200;
+    const batch = store.summaryMessages(chat, afterSeq, cutoff, maxMessages);
     const last = batch.at(-1);
     if (!last) return;
+    // A backlog of another full batch skips the interval so busy chats catch up.
+    const catchUp = () => {
+      if (
+        batch.length === maxMessages &&
+        store.summaryMessages(chat, last.seq, cutoff, 1, maxMessages - 1).length
+      )
+        this.enqueue({ ...job, chat, catchUp: true });
+    };
     const current = previous ?? store.beginSummary(chat);
     const excerpts = batch.filter(
       ({ direction, text }) => direction !== 'inbound' || text.trim(),
     );
     if (!excerpts.length) {
       store.saveSummary({ ...current, throughSeq: last.seq });
+      catchUp();
       return;
     }
     const language =
@@ -189,12 +227,14 @@ export class BackgroundSummaries implements SummaryProvider {
         },
       );
       signal.throwIfAborted();
-      if (text.trim())
+      if (text.trim()) {
         store.saveSummary({
           ...current,
           text: text.trim().slice(0, 4_000),
           throughSeq: last.seq,
         });
+        catchUp();
+      }
     });
   }
 }

@@ -58,7 +58,7 @@ Create a Messaging API channel, then run `corepack pnpm exec tsugimori add platf
 
 For manual setup, add a `platforms` entry with `kind: "line"`, a unique `id`, and credentials in `LINE_CHANNEL_SECRET` and `LINE_CHANNEL_ACCESS_TOKEN`. Use `secretEnv` and `tokenEnv` to change the credential names. The `listen` address defaults to `127.0.0.1:8789`. Startup and `tsugimori doctor` report duplicate addresses among enabled LINE instances, admin web, and named previews.
 
-Use a reverse proxy or a named Cloudflare Tunnel to route a public HTTPS URL to the loopback listener. For instance `main`, route `/line/main/webhook` to that same path on the listener and leave it accessible to LINE without an interactive login. In the LINE Developers Console, set the Webhook URL, verify it, and turn on **Use webhook**. To receive group and room messages, also enable **Allow bot to join group chats**.
+Use a reverse proxy or a named Cloudflare Tunnel to route a public HTTPS URL at `/line/<id>/` to that same path on the loopback listener. For instance `main`, use `https://webhooks.example.com/line/main/` and leave it accessible to LINE without an interactive login. The listener accepts POST requests at `/line/<id>`, `/line/<id>/`, and `/line/<id>/webhook` and ignores query strings. In the LINE Developers Console, set the Webhook URL, verify it, and turn on **Use webhook**. To receive group and room messages, also enable **Allow bot to join group chats**.
 
 A fresh reply token can send the first batch of a response. `replyTokenTtlMs` defaults to 50,000 milliseconds and accepts up to 60,000. Other batches and messages without a usable token use metered push and count toward the LINE account's messaging quota. To decide an approval, quote the prompt and reply with the displayed approval or denial word.
 
@@ -86,7 +86,9 @@ Claude starts `/compact` in the background when a completed turn's reported cont
 
 ## Conversation summaries
 
-The gateway updates rolling summaries in the background once `context.summary.minMessages` unsummarized messages fall outside `context.recentMessages`. The threshold defaults to 20, and each run processes up to 40 messages. Fresh agent sessions receive any stored summary and all subsequent raw messages, including messages waiting to be summarized.
+The gateway updates rolling summaries in the background when at least `context.summary.minMessages` unsummarized messages (20 by default) fall outside `context.recentMessages`. The first summary can run as soon as the backlog reaches that threshold. Subsequent runs wait at least `context.summary.minIntervalMinutes` (15 by default) after the last saved update. When only the interval blocks a run, the gateway rechecks the chat when the interval ends, even without another bot turn. When a full batch leaves at least another `maxMessages` unsummarized messages behind, the next run starts immediately until the backlog falls below that size. Set the interval to `0` to disable the delay.
+
+Each run processes up to `context.summary.maxMessages` messages (200 by default) and saves up to 4,000 characters. Fresh agent sessions receive any stored summary and up to `context.recentMessages + 40` raw messages. Older unsummarized messages wait for the next summary and remain available in storage.
 
 Summary runs use `context.summary.thinking` (`low` by default) and `context.summary.timeoutMs` (120,000 ms by default). Set `context.summary.model` to a lower-cost model supported by the connector, or set `context.summary.enabled` to `false`. The gateway reloads summary settings while running.
 

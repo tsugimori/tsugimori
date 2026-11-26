@@ -45,6 +45,7 @@ export interface ChatSummary extends ChatRef {
   revision: number;
   text: string;
   throughSeq: number;
+  updatedAt: number | null;
 }
 
 export type SessionMetric = 'context' | 'compaction' | 'contextWindow';

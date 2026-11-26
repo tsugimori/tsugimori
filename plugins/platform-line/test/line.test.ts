@@ -152,7 +152,7 @@ async function fixture(
   async function post(
     events: unknown[],
     {
-      path = '/line/main/webhook',
+      path = '/line/main/',
       mode = 'valid',
       raw,
     }: { mode?: 'bad' | 'missing' | 'valid'; path?: string; raw?: string } = {},
@@ -208,10 +208,6 @@ test('webhook validates the raw signature and body, and acknowledges before emit
     assert.equal(await f.post([event], { mode }), 401);
   assert.equal(await f.post([], { mode: 'bad', raw: '{' }), 401);
   assert.equal(await f.post([], { raw: '{' }), 400);
-  assert.equal(await f.post([event], { path: '/line/other/webhook' }), 404);
-  const get = await fetch(f.base + '/line/main/webhook');
-  assert.equal(get.status, 404);
-  await get.arrayBuffer();
   assert.equal(await f.post([], { raw: 'x'.repeat(1024 * 1024 + 1) }), 413);
   assert.equal(f.events.length, 0);
   assert.equal(
@@ -221,6 +217,31 @@ test('webhook validates the raw signature and body, and acknowledges before emit
   await f.waitFor(1);
   assert.equal(f.events[0]?.text, '嗨 👋\nhello');
   assert.equal(await f.post([]), 200);
+});
+
+test('accepts the three webhook paths with query strings and rejects other routes', async (t) => {
+  const f = await fixture(t);
+  const paths = ['/line/main', '/line/main/', '/line/main/webhook'];
+  for (const [index, path] of paths.entries()) {
+    assert.equal(await f.post([], { path }), 200);
+    assert.equal(
+      await f.post([message(String(index))], { path: path + '?source=line' }),
+      200,
+    );
+    const get = await fetch(f.base + path);
+    assert.equal(get.status, 404);
+    await get.arrayBuffer();
+  }
+  await f.waitFor(paths.length);
+  for (const path of [
+    '/line/other',
+    '/line/other/',
+    '/line/other/webhook',
+    '/line/main//',
+    '/line/main/webhook/',
+    '/line/main/extra?path=/line/main/',
+  ])
+    assert.equal(await f.post([], { path }), 404);
 });
 
 test('redeliveries dedupe and group, room, DM, media, mentions and profiles map to inbound events', async (t) => {
@@ -630,7 +651,7 @@ test('setup hides credentials, validates the token, confirms the bot and prints 
   assert.deepEqual(line.credentialNames?.({ ...entry, ...patch?.entry }), [
     ...writes.keys(),
   ]);
-  assert.match(outputs.join(' '), /\/line\/main\/webhook.*HTTPS.*Use webhook/);
+  assert.match(outputs.join(' '), /\/line\/main\/\..*HTTPS.*Use webhook/);
   assert.ok(!outputs.join(' ').includes(secret));
   assert.ok(!outputs.join(' ').includes(token));
 

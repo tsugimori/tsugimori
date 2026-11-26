@@ -27,6 +27,8 @@ export interface Config {
     recentMessages: number;
     summary?: {
       enabled?: boolean;
+      maxMessages?: number;
+      minIntervalMinutes?: number;
       minMessages?: number;
       model?: string;
       thinking?: string;

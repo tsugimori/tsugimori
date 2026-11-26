@@ -53,12 +53,31 @@ test('preserves per-agent compaction thresholds and rejects invalid counts', () 
 test('defaults and validates conversation summary settings', () => {
   const settings = (summary: object) =>
     parseConfig(JSON.stringify({ context: { summary } })).context.summary;
-  const defaults = { minMessages: 20, thinking: 'low', timeoutMs: 120_000 };
+  const defaults = {
+    maxMessages: 200,
+    minIntervalMinutes: 15,
+    minMessages: 20,
+    thinking: 'low',
+    timeoutMs: 120_000,
+  };
   assert.deepEqual(parseConfig('{}').context.summary, defaults);
   assert.deepEqual(settings({}), defaults);
-  const overrides = { minMessages: 50, thinking: 'medium', timeoutMs: 180_000 };
+  const overrides = {
+    maxMessages: 40,
+    minIntervalMinutes: 5,
+    minMessages: 50,
+    thinking: 'medium',
+    timeoutMs: 180_000,
+  };
   assert.deepEqual(settings(overrides), overrides);
+  assert.equal(settings({ minIntervalMinutes: 0 })?.minIntervalMinutes, 0);
   for (const [name, invalid] of [
+    ['maxMessages', 0],
+    ['maxMessages', 1.5],
+    ['maxMessages', Number.MAX_SAFE_INTEGER + 1],
+    ['minIntervalMinutes', -1],
+    ['minIntervalMinutes', 1.5],
+    ['minIntervalMinutes', 35_792],
     ['minMessages', 0],
     ['minMessages', 1.5],
     ['thinking', ''],

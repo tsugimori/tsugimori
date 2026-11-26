@@ -42,7 +42,7 @@ export async function closeServer(server: Server) {
 }
 
 export function webhookPath(id: string) {
-  return `/line/${encodeURIComponent(id)}/webhook`;
+  return `/line/${encodeURIComponent(id)}/`;
 }
 
 export async function webhook(
@@ -52,7 +52,13 @@ export async function webhook(
   secret: string,
   receive: (events: unknown[]) => void,
 ) {
-  if (request.method !== 'POST' || request.url !== path) {
+  const pathname = request.url?.split('?', 1)[0];
+  if (
+    request.method !== 'POST' ||
+    (pathname !== path &&
+      pathname !== path.slice(0, -1) &&
+      pathname !== `${path}webhook`)
+  ) {
     response.writeHead(404).end();
     return;
   }

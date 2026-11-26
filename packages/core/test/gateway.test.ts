@@ -1850,7 +1850,13 @@ test(
     await f.configure(true, {
       context: {
         recentMessages: 2,
-        summary: { minMessages: 41, thinking: 'medium', timeoutMs: 45_000 },
+        summary: {
+          maxMessages: 30,
+          minIntervalMinutes: 0,
+          minMessages: 41,
+          thinking: 'medium',
+          timeoutMs: 45_000,
+        },
       },
     });
     await until(t, () => reloads() > loaded);
@@ -1862,9 +1868,120 @@ test(
     await turn('At new threshold');
     await until(t, () => f.store.getSummary(chat)?.text === 'Summary 2');
     assert.equal(summaries.length, 2);
-    assert.equal(messages(summaries[1]!).length, 40);
+    assert.equal(messages(summaries[1]!).length, 30);
     assert.equal(summaries[1]?.thinking, 'medium');
     assert.ok(timeout.mock.calls.some(({ arguments: [ms] }) => ms === 45_000));
+  },
+);
+
+test(
+  'summary rechecks once at the end of the interval with the latest queued backlog',
+  { timeout: 5000 },
+  async (t) => {
+    const summaries: AgentRequest[] = [];
+    const prompts: AgentRequest[] = [];
+    const firstSummary = 'x'.repeat(4_000);
+    const f = await fixture(
+      t,
+      async function* (request) {
+        if (request.purpose === 'summary') {
+          summaries.push(request);
+          yield {
+            type: 'text.final',
+            text: summaries.length === 1 ? firstSummary + 'overflow' : 'Second',
+          };
+        } else {
+          prompts.push(request);
+        }
+      },
+      true,
+      { context: { recentMessages: 2 } },
+    );
+    t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: 0 });
+    const group = { chatKind: 'group' as const };
+    const turn = async (id: string) => {
+      await f.platform.emit(inbound(id, id, { ...group, mentionsBot: true }));
+      await f.gateway.idle();
+      await setImmediate();
+    };
+    const messages = (request: AgentRequest) =>
+      request.context.filter(({ source }) => source === 'message');
+
+    for (let i = 0; i < 205; i++)
+      await f.platform.emit(inbound(`History ${i}`, `History ${i}`, group));
+    assert.equal(f.store.beginSummary(chat).updatedAt, null);
+    await turn('First turn');
+    assert.equal(summaries.length, 1);
+    assert.equal(messages(summaries[0]!).length, 200);
+    assert.equal(f.store.getSummary(chat)?.text, firstSummary);
+    assert.equal(f.store.getSummary(chat)?.updatedAt, 0);
+
+    for (let i = 0; i < 54; i++)
+      await f.platform.emit(inbound(`Backlog ${i}`, `Backlog ${i}`, group));
+    await turn('Second turn');
+    assert.equal(summaries.length, 1);
+    assert.equal(messages(prompts.at(-1)!).length, 42);
+    assert.equal(messages(prompts.at(-1)!)[0]?.content, 'Backlog 13');
+
+    const intervalMs = 15 * 60_000;
+    t.mock.timers.tick(intervalMs - 1);
+    await f.platform.emit(inbound('Backlog 54', 'Backlog 54', group));
+    await turn('Third turn');
+    assert.equal(summaries.length, 1);
+
+    const getSummary = t.mock.method(f.store, 'getSummary');
+    t.mock.timers.tick(1);
+    await setImmediate();
+    assert.equal(summaries.length, 2);
+    assert.equal(getSummary.mock.callCount(), 1);
+    assert.match(messages(summaries[1]!).at(-1)?.content ?? '', /Second turn/);
+    assert.equal(f.store.getSummary(chat)?.text, 'Second');
+    assert.equal(f.store.getSummary(chat)?.updatedAt, intervalMs);
+
+    getSummary.mock.resetCalls();
+    t.mock.timers.tick(intervalMs);
+    await setImmediate();
+    assert.equal(getSummary.mock.callCount(), 0);
+    assert.equal(summaries.length, 2);
+  },
+);
+
+test(
+  'summary catches up without waiting while a full batch remains',
+  { timeout: 5000 },
+  async (t) => {
+    const summaries: AgentRequest[] = [];
+    const f = await fixture(
+      t,
+      async function* (request) {
+        if (request.purpose === 'summary') {
+          summaries.push(request);
+          yield { type: 'text.final', text: `Summary ${summaries.length}` };
+        }
+      },
+      true,
+      { context: { recentMessages: 2 } },
+    );
+    t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: 0 });
+    const group = { chatKind: 'group' as const };
+    const messages = (request: AgentRequest) =>
+      request.context.filter(({ source }) => source === 'message');
+
+    for (let i = 0; i < 450; i++)
+      await f.platform.emit(inbound(`History ${i}`, `History ${i}`, group));
+    await f.platform.emit(
+      inbound('Turn', 'Turn', { ...group, mentionsBot: true }),
+    );
+    await f.gateway.idle();
+    await until(t, () => f.store.getSummary(chat)?.text === 'Summary 2');
+    await setImmediate();
+    assert.equal(summaries.length, 2);
+    assert.equal(messages(summaries[0]!).length, 200);
+    assert.equal(messages(summaries[1]!).length, 200);
+    assert.equal(
+      JSON.parse(messages(summaries[1]!)[0]!.content).text,
+      'History 200',
+    );
   },
 );
 

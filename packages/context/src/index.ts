@@ -101,8 +101,7 @@ export class ContextAssembler {
       }
     }
     const messages = this.#store.recentMessages(request, {
-      // Unsummarized backlog stays below the summary threshold; cap it so a
-      // stalled summary cannot pull the whole history into a fresh session.
+      // Cap raw history while older unsummarized messages wait for a summary.
       limit:
         afterSummarySeq === undefined
           ? request.recentMessages
