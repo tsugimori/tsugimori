@@ -14,14 +14,14 @@ import {
   writeCredential,
 } from '@tsugimori/config';
 import { SetupError } from '@tsugimori/plugin-sdk';
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import type { PluginRegistry } from './registry.ts';
 
 import { untilAborted } from './abort.ts';
-import { EnvironmentChecks, failureText } from './checks.ts';
+import { EnvironmentChecks, failureText, listenerConflicts } from './checks.ts';
 import { systemMessages } from './system-messages.ts';
 
 type Category = SetupRun['category'];
@@ -43,7 +43,7 @@ export interface SetupIO {
 export class SetupCancelled extends SetupError {}
 
 export type SetupRequest =
-  | { category: Category; id: string; kind: string; mode: 'add' }
+  | { category: Category; id?: string; kind: string; mode: 'add' }
   | { id: string; mode: 'login' };
 
 const validId = /^[A-Za-z0-9_][A-Za-z0-9_.:-]*$/;
@@ -59,8 +59,22 @@ function entries(config: Config, category: Category) {
   return category === 'agent' ? config.agents : config.platforms;
 }
 
+function suggestedId(config: Config, category: Category, kind: string) {
+  const used = new Set(entries(config, category).map(({ id }) => id));
+  if (category === 'platform') {
+    let id: string;
+    do id = randomBytes(3).toString('hex');
+    while (used.has(id));
+    return id;
+  }
+  if (!used.has(kind)) return kind;
+  let suffix = 2;
+  while (used.has(`${kind}-${suffix}`)) suffix++;
+  return `${kind}-${suffix}`;
+}
+
 function planText(
-  steps: SetupStep[],
+  steps: readonly Pick<SetupStep, 'asks' | 'localized' | 'saves' | 'title'>[],
   start: number,
   locale: Config['locale'],
   disableAgent: boolean,
@@ -110,14 +124,18 @@ export class GuidedSetup {
 
   async run(request: SetupRequest, io: SetupIO) {
     const { store, registry, workspace } = this.#deps;
-    const { id, mode } = request;
-    const config = await loadSettings(workspace, registry);
+    const { mode } = request;
+    let config = await loadSettings(workspace, registry);
     const locale = io.locale ?? config.locale;
     const m = systemMessages(locale).setup;
-    if (!validId.test(id)) throw new SetupError(m.invalidId);
+    let id = request.id;
+    if (id !== undefined && !validId.test(id))
+      throw new SetupError(m.invalidId);
     const category = mode === 'login' ? 'agent' : request.category;
-    const existing = entries(config, category).find((item) => item.id === id);
-    const kind = mode === 'login' ? existing?.kind : request.kind;
+    const kind =
+      mode === 'login'
+        ? config.agents.find((item) => item.id === id)?.kind
+        : request.kind;
     if (!kind) throw new SetupError(m.agentMissing);
     const plugin = registry.forInstance(category, kind);
     const steps = (plugin?.setupSteps ?? []).filter(
@@ -125,6 +143,85 @@ export class GuidedSetup {
     );
     if (!steps.length)
       throw new SetupError(m.noSteps(mode === 'login', category, kind));
+    const completion = mode === 'add' ? plugin?.setupComplete : undefined;
+    const nameQuestion = id === undefined;
+    const nameOffset = nameQuestion ? 1 : 0;
+    const plan = [
+      ...(nameQuestion
+        ? [
+            {
+              title: m.nameTitle,
+              asks: [
+                {
+                  text:
+                    category === 'platform' && kind === 'line'
+                      ? m.lineNameQuestion
+                      : m.nameQuestion,
+                },
+              ],
+            },
+          ]
+        : []),
+      ...steps,
+      ...(completion ? [completion] : []),
+    ];
+    const inputSignal = io.cancelSignal
+      ? AbortSignal.any([io.signal, io.cancelSignal])
+      : io.signal;
+    const showPlan = (
+      signal: AbortSignal,
+      start: number,
+      disableAgent: boolean,
+    ) =>
+      untilAborted(signal, () =>
+        io.show(planText(plan, start, locale, disableAgent, io.secretInput)),
+      );
+    if (id === undefined) {
+      try {
+        await showPlan(inputSignal, 0, false);
+        const suggested = suggestedId(config, category, kind);
+        const progress = m.progress(1, plan.length);
+        let reason: string | undefined;
+        for (let attempt = 0; attempt < 2; attempt++) {
+          const question = m.askName(suggested);
+          const ask = () =>
+            untilAborted(inputSignal, () =>
+              io.prompt(
+                {
+                  text: m.stepMessage(
+                    progress,
+                    reason ? `${reason} ${question}` : question,
+                  ),
+                },
+                progress,
+              ),
+            );
+          const answer = (
+            await (io.measure ? io.measure('instance-name', ask) : ask())
+          ).trim();
+          const candidate =
+            !answer || answer === '-' || answer.toLowerCase() === 'default'
+              ? suggested
+              : answer;
+          config = await loadSettings(workspace, registry);
+          inputSignal.throwIfAborted();
+          reason = !validId.test(candidate)
+            ? m.invalidId
+            : entries(config, category).some((item) => item.id === candidate)
+              ? m.configuredId
+              : undefined;
+          if (!reason) {
+            id = candidate;
+            break;
+          }
+        }
+        if (id === undefined) throw new SetupError(reason ?? m.invalidId);
+      } catch (error) {
+        if (io.cancelSignal?.aborted) throw new SetupCancelled(m.cancelled([]));
+        throw error;
+      }
+    }
+    const existing = entries(config, category).find((item) => item.id === id);
     const key = JSON.stringify([mode, category, id]);
     const previous = store.getSetupRun(key);
     if (previous?.status === 'pending' && previous.draft.entry.kind !== kind)
@@ -188,9 +285,9 @@ export class GuidedSetup {
     heartbeat.unref();
     const snapshot = async () => {
       signal.throwIfAborted();
-      const { env } = await loadConfig(workspace, registry);
+      const { config, env } = await loadConfig(workspace, registry);
       signal.throwIfAborted();
-      const ctx = this.#checks.context(run.draft.entry, env);
+      const ctx = this.#checks.context(run.draft.entry, env, config);
       return {
         ...ctx,
         fetch: (input, init) => {
@@ -220,11 +317,12 @@ export class GuidedSetup {
       );
     try {
       const disableAgent = mode === 'login' && existing?.enabled !== false;
-      await untilAborted(signal, () =>
-        io.show(
-          planText(steps, run.step, locale, disableAgent, io.secretInput),
-        ),
-      );
+      if (!nameQuestion) await showPlan(signal, run.step, disableAgent);
+      if (mode === 'add' && !existing) {
+        const current = await loadSettings(workspace, registry);
+        if (entries(current, category).some((item) => item.id === id))
+          throw new SetupError(m.configuredId);
+      }
       if (mode === 'login') {
         if (disableAgent) {
           await updateSettings(workspace, registry, (config) => {
@@ -242,7 +340,7 @@ export class GuidedSetup {
       }
       for (const step of steps.slice(run.step)) {
         const current = await snapshot();
-        const progress = m.progress(run.step + 1, steps.length);
+        const progress = m.progress(nameOffset + run.step + 1, plan.length);
         const show = (text: string) =>
           untilAborted(signal, () => io.show(m.stepMessage(progress, text)));
         await show(
@@ -334,9 +432,17 @@ export class GuidedSetup {
         const list = entries(config, category);
         const index = list.findIndex((item) => item.id === id);
         if (index < 0 && mode === 'add') list.push(run.draft.entry);
-        else if (index >= 0 && list[index]?.kind === kind)
+        else if (
+          index >= 0 &&
+          list[index]?.kind === kind &&
+          (mode === 'login' || existing)
+        )
           list[index] = run.draft.entry;
         else throw new SetupError(m.changedConfig);
+        if (mode === 'add' && category === 'platform' && kind === 'line') {
+          const conflicts = failureText(listenerConflicts(config), locale);
+          if (conflicts) throw new SetupError(conflicts);
+        }
         if (run.draft.ownerId !== undefined)
           Object.defineProperty(config.owner, id, {
             value: run.draft.ownerId,
@@ -348,8 +454,38 @@ export class GuidedSetup {
       run.status = 'complete';
       checkpoint = structuredClone(run);
       save();
-      return { category, id, enabled: run.draft.entry.enabled !== false };
+      let summary: string | undefined;
+      if (completion) {
+        const progress = m.progress(plan.length, plan.length);
+        const complete = async () =>
+          completion.run({
+            ...(await snapshot()),
+            signal,
+            locale,
+            prompt: ({ secret, text }) =>
+              untilAborted(signal, () =>
+                io.prompt(
+                  { secret, text: m.stepMessage(progress, text) },
+                  progress,
+                ),
+              ),
+          });
+        summary = await (io.measure
+          ? io.measure('setup-complete', complete)
+          : complete());
+      }
+      return {
+        category,
+        id,
+        enabled: run.draft.entry.enabled !== false,
+        summary,
+      };
     } catch (error) {
+      if (run.status === 'complete') {
+        if (io.cancelSignal?.aborted)
+          throw new SetupCancelled(m.completeCancelled(id));
+        throw new SetupError(m.completeFailed(id), { cause: error });
+      }
       if (!io.cancelSignal?.aborted) throw error;
       // A cancelled login stays detached until a later login is confirmed.
       if (mode === 'login') draft.entry.enabled = run.draft.entry.enabled;

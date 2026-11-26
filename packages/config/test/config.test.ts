@@ -50,6 +50,38 @@ test('preserves per-agent compaction thresholds and rejects invalid counts', () 
     assert.throws(() => compactAt(invalid), /\/agents\/0\/compactAt/);
 });
 
+test('validates public webhook base URLs at workspace and LINE instance scope', () => {
+  const workspace = (publicBaseUrl: unknown) =>
+    parseConfig(JSON.stringify({ webhooks: { publicBaseUrl } }));
+  const line = (publicUrl: unknown) =>
+    parseConfig(
+      JSON.stringify({
+        platforms: [{ kind: 'line', id: 'main', enabled: false, publicUrl }],
+      }),
+    );
+  assert.equal(
+    workspace('https://webhooks.example.com').webhooks?.publicBaseUrl,
+    'https://webhooks.example.com',
+  );
+  assert.equal(
+    line('https://webhooks.example.com/prefix/').platforms[0]?.publicUrl,
+    'https://webhooks.example.com/prefix/',
+  );
+  for (const value of [
+    null,
+    'http://example.com',
+    'https:///prefix',
+    'https://example.com:99999',
+    'https://name@example.com',
+    'https://example.com/path?',
+    'https://example.com/path#',
+    'https://%00/path',
+  ]) {
+    assert.throws(() => workspace(value), /\/webhooks\/publicBaseUrl/);
+    assert.throws(() => line(value), /\/platforms\/0\/publicUrl/);
+  }
+});
+
 test('validates and preserves optional per-agent service tiers', () => {
   const tier = (serviceTier: unknown) =>
     parseConfig(

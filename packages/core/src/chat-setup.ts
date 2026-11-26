@@ -299,8 +299,10 @@ export class ChatSetup {
         });
         if (this.#running?.cancel === cancel) this.#running.finished = true;
         if (cancel.signal.aborted) return;
+        const finish = (text: string) =>
+          show([text, result.summary].filter(Boolean).join('\n'));
         if (!result.enabled) {
-          await show(m.disabled(result.id));
+          await finish(m.disabled(result.id));
           return;
         }
         const attached = () =>
@@ -310,7 +312,7 @@ export class ChatSetup {
         const wait = AbortSignal.any([signal, AbortSignal.timeout(15_000)]);
         try {
           while (!attached()) await delay(50, undefined, { signal: wait });
-          await show(m.attached(result.id));
+          await finish(m.attached(result.id));
         } catch (error) {
           if (signal.aborted) throw error;
           const details = failureText(
@@ -319,7 +321,7 @@ export class ChatSetup {
             ),
             locale,
           );
-          await show(m.saved(result.id) + '\n' + (details || m.checkStatus));
+          await finish(m.saved(result.id) + '\n' + (details || m.checkStatus));
         }
       } catch (error) {
         if (error instanceof SetupCancelled) return error;

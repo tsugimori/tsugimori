@@ -31,6 +31,7 @@ export class EnvironmentChecks {
   context(
     entry: PluginInstanceConfig,
     env: WorkspaceConfig['env'],
+    config?: Config,
   ): CheckContext {
     return {
       entry,
@@ -40,6 +41,8 @@ export class EnvironmentChecks {
       arch: this.#deps.arch ?? process.arch,
       fetch: this.#deps.fetch ?? globalThis.fetch,
       runCommand: this.#deps.runCommand ?? runCommand,
+      configuredPlatforms: config?.platforms,
+      webhooks: config?.webhooks,
     };
   }
 
@@ -180,7 +183,7 @@ export class EnvironmentChecks {
           items.push(
             ...(await this.plugin(
               registry.forInstance(category, entry.kind),
-              this.context(entry, snapshot.env),
+              this.context(entry, snapshot.env, snapshot.config),
               `${category}/${entry.id}`,
               category,
             )),
@@ -191,29 +194,32 @@ export class EnvironmentChecks {
   }
 }
 
-function listenerConflicts(config: Config): CheckReport[] {
-  const listeners = new Map<string, string[]>();
-  function add(name: string, value: unknown) {
+export function listenerConflicts(config: Config): CheckReport[] {
+  const listeners = new Map<string, { name: string; service: string }[]>();
+  function add(name: string, value: unknown, service = name) {
     if (typeof value !== 'string') return;
     const split = value.lastIndexOf(':');
     const port = Number(value.slice(split + 1));
     if (port < 1 || port > 65535) return;
     const address = `${value.slice(0, split)}:${port}`;
-    const names = listeners.get(address) ?? [];
-    names.push(name);
-    listeners.set(address, names);
+    const entries = listeners.get(address) ?? [];
+    entries.push({ name, service });
+    listeners.set(address, entries);
   }
 
   if (config.web?.enabled !== false) add('web.listen', config.web?.listen);
   add('preview.named.listen', config.preview?.named?.listen);
   for (const entry of config.platforms) {
     if (entry.kind === 'line' && entry.enabled !== false)
-      add(`LINE ${entry.id} listen`, entry.listen);
+      add(`LINE ${entry.id} listen`, entry.listen ?? '127.0.0.1:8789', 'line');
   }
 
   return [...listeners]
-    .filter(([, names]) => names.length > 1)
-    .map(([address, names]) => {
+    .filter(
+      ([, entries]) => new Set(entries.map(({ service }) => service)).size > 1,
+    )
+    .map(([address, entries]) => {
+      const names = entries.map(({ name }) => name);
       const detail = `${names.join('、')} 皆設定為 ${address}。請在 tsugimori.json 中為每個監聽服務設定不同的位址。`;
       return {
         target: 'core',

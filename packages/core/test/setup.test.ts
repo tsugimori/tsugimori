@@ -131,6 +131,74 @@ async function until<T>(find: () => T | undefined) {
   }
 }
 
+test('guided add suggests available platform names, retries once, and honors explicit IDs', async (t) => {
+  const workspace = await mkdtemp(join(tmpdir(), 'tsugimori-names-'));
+  t.after(() => rm(workspace, { recursive: true, force: true }));
+  await writeFile(join(workspace, 'tsugimori.json'), '{}');
+  const store = new SqliteStore(':memory:');
+  t.after(() => store.close());
+  const registry = new PluginRegistry([
+    {
+      name: 'named',
+      adapters: { demo: () => assert.fail('Unexpected adapter start') },
+      agents: { demo: () => assert.fail('Unexpected agent start') },
+      setupSteps: [
+        { id: 'configure', title: 'Configure plugin', asks: [], run() {} },
+      ],
+    },
+  ]);
+  const setup = new GuidedSetup({ workspace, store, registry });
+  const shown: string[] = [];
+  const prompts: string[] = [];
+  const run = (
+    category: 'agent' | 'platform',
+    answers: string[],
+    id?: string,
+  ) => {
+    shown.length = prompts.length = 0;
+    return setup.run(
+      { mode: 'add', category, kind: 'demo', id },
+      {
+        signal: AbortSignal.timeout(2000),
+        show: async (text) => {
+          shown.push(text);
+        },
+        prompt: async ({ secret, text }) => {
+          assert.equal(secret, undefined);
+          prompts.push(text);
+          const answer = answers.shift();
+          assert.notEqual(answer, undefined);
+          return answer!;
+        },
+      },
+    );
+  };
+  const first = (await run('platform', ['default'])).id;
+  assert.match(first, /^[0-9a-f]{6}$/);
+  assert.match(shown[0]!, /^Setup plan\n1\. Name the instance/);
+  assert.match(prompts[0]!, new RegExp(`use ${first}`));
+  const second = (await run('platform', [first, '-'])).id;
+  assert.match(second, /^[0-9a-f]{6}$/);
+  assert.notEqual(second, first);
+  assert.match(prompts[1]!, new RegExp(`already configured.*use ${second}`));
+  await assert.rejects(
+    run('platform', ['bad name', 'still bad']),
+    /valid plugin instance ID/,
+  );
+  assert.equal(prompts.length, 2);
+  assert.equal((await run('platform', [], 'fixed')).id, 'fixed');
+  assert.match(shown[0]!, /^Setup plan\n1\. Configure plugin/);
+  assert.deepEqual(prompts, []);
+  assert.equal((await run('agent', ['-'])).id, 'demo');
+  assert.match(prompts[0]!, /use demo\./);
+  assert.equal((await run('agent', ['default'])).id, 'demo-2');
+  assert.match(prompts[0]!, /use demo-2\./);
+  assert.deepEqual(
+    (await loadSettings(workspace, registry)).platforms.map(({ id }) => id),
+    [first, second, 'fixed'],
+  );
+});
+
 test('guided chat setup uses the original topic for progress and consumes secrets only in owner DM', async (t) => {
   const platform = fixturePlatform();
   const credential = '123456789:fake_token_long_enough_for_filtering';
@@ -200,9 +268,32 @@ test('guided chat setup uses the original topic for progress and consumes secret
     platform.sent.filter(({ text }) => text.includes('Enter token.')).length,
     0,
   );
-  await platform.receive('owner-add', '/add platform new --id attached', group);
+  await platform.receive('owner-add', '/add platform new', group);
+  const name = await until(() =>
+    platform.sent.find(({ text }) =>
+      text.startsWith('(1/3) Enter the instance name'),
+    ),
+  );
+  assert.match(
+    platform.sent.find(({ text }) => text.startsWith('Setup plan'))?.text ?? '',
+    /^Setup plan\n1\. Name the instance · Instance name/,
+  );
+  assert.match(name.text, /use [0-9a-f]{6}/);
+  await platform.receive('invalid-name', 'invalid name', {
+    ...group,
+    replyTo: name.messageId,
+  });
+  const retry = await until(() =>
+    platform.sent.find(({ text }) =>
+      text.startsWith('(1/3) Use a valid plugin instance ID.'),
+    ),
+  );
+  await platform.receive('custom-name', 'attached', {
+    ...group,
+    replyTo: retry.messageId,
+  });
   const secret = await until(() =>
-    platform.sent.find(({ text }) => text.startsWith('(1/2) Enter token.')),
+    platform.sent.find(({ text }) => text.startsWith('(2/3) Enter token.')),
   );
   assert.equal(secret.chatId, ownerId);
   assert.equal(secret.threadId, undefined);
@@ -224,7 +315,7 @@ test('guided chat setup uses the original topic for progress and consumes secret
     raw: { credential },
   });
   const owner = await until(() =>
-    platform.sent.find(({ text }) => text.startsWith('(2/2) Enter owner ID.')),
+    platform.sent.find(({ text }) => text.startsWith('(3/3) Enter owner ID.')),
   );
   assert.equal(owner.chatId, group.chatId);
   assert.equal(owner.threadId, group.threadId);
@@ -317,7 +408,7 @@ test('only the owner can cancel setup in the origin or pending secret DM, and th
     platform.sent.at(-1)?.text ?? '',
     /^\/cancel · Cancel guided setup$/m,
   );
-  await platform.receive('add1', '/add platform trial', group);
+  await platform.receive('add1', '/add platform trial --id trial', group);
   const dmPrompt = (start: number) =>
     until(() =>
       platform.sent
@@ -368,7 +459,7 @@ test('only the owner can cancel setup in the origin or pending secret DM, and th
     assert.ok(platform.removed.includes(id));
   }
 
-  await platform.receive('add2', '/add platform trial', group);
+  await platform.receive('add2', '/add platform trial --id trial', group);
   const second = await dmPrompt(afterCancel);
   await platform.receive('answer2', credential, { replyTo: second.messageId });
   const confirm = await until(() =>
@@ -401,7 +492,7 @@ test('only the owner can cancel setup in the origin or pending secret DM, and th
     undefined,
   );
   assert.equal(platform.sent.length, afterSecondCancel);
-  await platform.receive('add3', '/add platform trial', group);
+  await platform.receive('add3', '/add platform trial --id trial', group);
   await dmPrompt(afterSecondCancel);
   assert.equal(store.getSetupRun(key)?.step, 0);
 });

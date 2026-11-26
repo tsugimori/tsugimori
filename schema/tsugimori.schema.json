@@ -96,6 +96,9 @@
                   "pattern": "^(127\\.0\\.0\\.1|\\[::1\\]):([0-9]{1,5})$",
                   "default": "127.0.0.1:8789"
                 },
+                "publicUrl": {
+                  "$ref": "#/definitions/webhookBaseUrl"
+                },
                 "replyTokenTtlMs": {
                   "type": "integer",
                   "minimum": 1,
@@ -339,6 +342,15 @@
         }
       }
     },
+    "webhooks": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "publicBaseUrl": {
+          "$ref": "#/definitions/webhookBaseUrl"
+        }
+      }
+    },
     "preview": {
       "type": "object",
       "additionalProperties": false,
@@ -405,6 +417,10 @@
     "id": {
       "type": "string",
       "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.:-]*$"
+    },
+    "webhookBaseUrl": {
+      "type": "string",
+      "pattern": "^[Hh][Tt][Tt][Pp][Ss]://[^/\\s\\\\?#@]+(?:/[^\\s\\\\?#]*)?$"
     }
   }
 }

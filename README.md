@@ -83,7 +83,7 @@ Ask the agent to create or manage a schedule in the conversation where it belong
 
 ## Guided setup
 
-Run `/add <agent|platform> <kind> [--id <id>]` or `/login <agentId>` as an owner. In a terminal, use `corepack pnpm exec tsugimori add <agent|platform> <kind> [--id <id>] [--dir <dir>]` (also available as `tsugimori setup <agent|platform> <kind> ...`) or `corepack pnpm exec tsugimori setup login <agentId> [--dir <dir>]`. An omitted instance ID defaults to its kind.
+Run `/add <agent|platform> <kind> [--id <id>]` or `/login <agentId>` as an owner. In a terminal, use `corepack pnpm exec tsugimori add <agent|platform> <kind> [--id <id>] [--dir <dir>]` (also available as `tsugimori setup <agent|platform> <kind> ...`) or `corepack pnpm exec tsugimori setup login <agentId> [--dir <dir>]`. Without `--id`, setup first asks for an instance name. Reply `default` or `-` to accept the suggestion: a random six-character hex ID for platforms, and the plugin kind for agents (`<kind>-2` and up when taken).
 
 The wizard begins with a plan showing the steps, what each asks for, and when it saves credentials and configuration. Follow numbered progress in the originating conversation and reply directly to each prompt. Secret prompts go to the owner's DM and identify the origin. The gateway excludes secret replies from message history and attempts deletion where supported. Enter secrets in an interactive terminal to hide input there.
 
@@ -107,7 +107,7 @@ See the [JSON Schema](schema/tsugimori.schema.json) and an [example workspace](e
 | `web`                 | Omit to disable, or add a section to enable the loopback admin UI by default at `127.0.0.1:8787`. Direct local access requires explicit opt-in. [Web configuration](plugins/web/README.md#configuration)   |
 | `preview`             | Omit to disable, or use `{}` to enable Quick previews with a 60-minute TTL cap. A named router defaults to `127.0.0.1:8788`. [Cloudflare configuration](plugins/tunnel-cloudflare/README.md#configuration) |
 
-The gateway watches `tsugimori.json` and `.env` and can attach or detach platforms and agents without restart. The database path and admin web server configuration take effect at startup. Assign distinct loopback addresses to enabled LINE listeners, the admin web listener, and the named preview router. `doctor` reports duplicate configured addresses, and the gateway rejects a configuration with such a conflict.
+The gateway watches `tsugimori.json` and `.env` and can attach or detach platforms and agents without restart. The database path and admin web server configuration take effect at startup. LINE instances can share one listener address. Assign the admin web listener and the named preview router addresses distinct from each other and from LINE. `doctor` reports such conflicts, and the gateway rejects a configuration that has one. `webhooks.publicBaseUrl` sets the public HTTPS base that setup and `doctor` use to show full webhook URLs.
 
 ## Plugins
 
@@ -124,7 +124,7 @@ The gateway watches `tsugimori.json` and `.env` and can attach or detach platfor
 ## Operations
 
 - **Service**. Run `corepack pnpm exec tsugimori start /absolute/path/to/workspace` in the foreground from the repository, for example under systemd with the repository as `WorkingDirectory`. Use a service user with access to the workspace and Node.js on its PATH. SIGINT or SIGTERM stops the gateway and flushes traces.
-- **Health checks**. `corepack pnpm exec tsugimori doctor [dir] [--json]` checks Node.js, the database path, Git, configured listener conflicts, and enabled plugin capabilities. It exits with status 1 on failure. Stop the gateway before probing its LINE bind addresses with `doctor`. Startup logs failed checks and disables affected capabilities where it can. Startup failure notices go to an owner DM when a free-push channel is available.
+- **Health checks**. `corepack pnpm exec tsugimori doctor [dir] [--json]` checks Node.js, the database path, Git, configured listener conflicts, and enabled plugin capabilities. It exits with status 1 on failure. Startup logs failed checks and disables affected capabilities where it can. Startup failure notices go to an owner DM when a free-push channel is available.
 - **Logs**. Capture stderr for structured gateway events, and use `/status` or the admin UI for persisted task traces and chat state.
 - **Backups**. For a file copy, stop the service first and back up the workspace, including `data/tsugimori.db` (or your configured path) and any SQLite sidecar files still present. Protect the backup as it can contain chat history, `.env`, and agent login homes.
 - **Upgrades**. Stop the service and back up the workspace, update the checkout, run `corepack pnpm install`, then run `doctor` and restart. The gateway applies SQLite migrations when it opens the database. `corepack pnpm exec tsugimori setup [dir] [--yes] [--upgrade]` prints commands for missing system packages and runs them with `--yes`. Setup also installs managed Codex releases and records their pins. Use `--upgrade` to update those pins.

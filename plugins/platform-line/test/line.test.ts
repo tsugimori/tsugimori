@@ -37,11 +37,13 @@ const bot = {
 interface ApiCall {
   body?: {
     chatId?: string;
+    endpoint?: string;
     messages?: LineText[];
     replyToken?: string;
     to?: string;
   };
   headers: Headers;
+  method?: string;
   path: string;
 }
 
@@ -49,6 +51,7 @@ function fakeApi(
   override?: (
     call: ApiCall,
   ) => Response | undefined | Promise<Response | undefined>,
+  expectedToken = token,
 ) {
   const calls: ApiCall[] = [];
   let id = 0;
@@ -56,9 +59,9 @@ function fakeApi(
     const { hostname, pathname: path } = new URL(String(url));
     assert.equal(hostname, 'api.line.me');
     const headers = new Headers(init?.headers);
-    assert.equal(headers.get('Authorization'), `Bearer ${token}`);
+    assert.equal(headers.get('Authorization'), `Bearer ${expectedToken}`);
     const body = init?.body ? JSON.parse(String(init.body)) : undefined;
-    const call = { path, headers, body };
+    const call = { path, headers, body, method: init?.method };
     calls.push(call);
     const result = await override?.(call);
     if (result) return result;
@@ -538,6 +541,83 @@ test('the default LINE webhook listens on IPv4 loopback port 8789', () => {
   assert.deepEqual(listenAddress(), { host: '127.0.0.1', port: 8789 });
 });
 
+test('LINE instances share a listener and keep routes, credentials, and event state separate across reloads', async (t) => {
+  const { port, server } = await loopback();
+  await closeServer(server);
+  const host = '127.0.0.1';
+  const address = `${host}:${port}`;
+  const otherSecret = 'test-second-secret';
+  const otherToken = 'test-second-access-token';
+  const firstApi = fakeApi();
+  const otherApi = fakeApi(undefined, otherToken);
+  const first = new LineAdapter(firstApi, 'main', {
+    secret,
+    token,
+    listen: address,
+  });
+  const other = new LineAdapter(otherApi, 'other:bot', {
+    secret: otherSecret,
+    token: otherToken,
+    listen: address,
+  });
+  t.after(async () => {
+    await Promise.all([first.stop(), other.stop()]);
+    await closeServer(server);
+  });
+  const firstEvents: string[] = [];
+  const otherEvents: string[] = [];
+  const context = (events: string[]): AdapterContext => ({
+    async emit(event) {
+      assert.equal(event.type, 'message');
+      events.push(event.messageId);
+    },
+  });
+  await Promise.all([
+    first.start(context(firstEvents)),
+    other.start(context(otherEvents)),
+  ]);
+  const post = async (path: string, key: string, id: string) => {
+    const body = JSON.stringify({ events: [message(id)] });
+    const signature = createHmac('sha256', key).update(body).digest('base64');
+    const response = await fetch(`http://${address}${path}`, {
+      method: 'POST',
+      body,
+      headers: { 'x-line-signature': signature },
+    });
+    await response.arrayBuffer();
+    return response.status;
+  };
+  assert.equal(await post('/line/other%3Abot/webhook', secret, 'initial'), 401);
+  assert.equal(await post('/line/main/', otherSecret, 'initial'), 401);
+  assert.equal(await post('/line/main/', secret, 'initial'), 200);
+  assert.equal(
+    await post('/line/other%3Abot?query=1', otherSecret, 'initial'),
+    200,
+  );
+  await waitFor(() => firstEvents.length === 1 && otherEvents.length === 1);
+  await Promise.all(
+    [first, other].map((adapter) =>
+      adapter.send({ chatId: userId, text: 'reply', replyTo: 'initial' }),
+    ),
+  );
+  assert.equal(firstApi.calls.at(-1)?.body?.replyToken, 'token-initial');
+  assert.equal(otherApi.calls.at(-1)?.body?.replyToken, 'token-initial');
+
+  await first.stop();
+  assert.equal(await post('/line/main/', secret, 'while-stopped'), 404);
+  assert.equal(
+    await post('/line/other%3Abot/', otherSecret, 'while-stopped'),
+    200,
+  );
+  await first.start(context(firstEvents));
+  assert.equal(await post('/line/main/', secret, 'after-reload'), 200);
+  await waitFor(() => firstEvents.length === 2 && otherEvents.length === 2);
+  assert.deepEqual(firstEvents, ['initial', 'after-reload']);
+  assert.deepEqual(otherEvents, ['initial', 'while-stopped']);
+  await Promise.all([first.stop(), other.stop()]);
+  await listen(server, { host, port });
+});
+
 test('startup rejects public and busy addresses, honors cancellation, and releases its port on stop', async (t) => {
   const { port, server } = await loopback();
   t.after(() => closeServer(server));
@@ -624,7 +704,11 @@ test('setup hides credentials, validates the token, confirms the bot and prints 
     },
   };
   const setup = line.setupSteps?.[0];
+  const publicUrl = line.setupSteps?.[1];
+  const completion = line.setupComplete;
   assert.ok(setup);
+  assert.ok(publicUrl);
+  assert.ok(completion);
   assert.deepEqual(line.credentialNames?.(entry), [
     'LINE_CHANNEL_SECRET',
     'LINE_CHANNEL_ACCESS_TOKEN',
@@ -652,7 +736,24 @@ test('setup hides credentials, validates the token, confirms the bot and prints 
   assert.deepEqual(line.credentialNames?.({ ...entry, ...patch?.entry }), [
     ...writes.keys(),
   ]);
-  assert.match(outputs.join(' '), /\/line\/main\/\..*HTTPS.*Use webhook/);
+  const savedEntry = { ...entry, ...patch?.entry };
+  const urlAnswers = ['http://webhooks.example.com', 'skip'];
+  await publicUrl.run({
+    ...context,
+    entry: savedEntry,
+    async prompt(options) {
+      assert.equal(options.secret, undefined);
+      prompts.push(options);
+      return urlAnswers.shift()!;
+    },
+  });
+  assert.match(prompts[3]!.text, /public HTTPS base URL/);
+  assert.match(prompts[4]!.text, /valid HTTPS base URL/);
+  assert.equal(patch?.entry?.publicUrl, undefined);
+  const summary = await completion.run({ ...context, entry: savedEntry });
+  assert.match(summary, /\/line\/main\/\..*HTTPS[\s\S]*Use webhook/);
+  assert.ok(!summary.includes(secret));
+  assert.ok(!summary.includes(token));
   assert.ok(!outputs.join(' ').includes(secret));
   assert.ok(!outputs.join(' ').includes(token));
 
@@ -670,5 +771,131 @@ test('setup hides credentials, validates the token, confirms the bot and prints 
     assert.equal(open?.find(({ id }) => id === 'line-listen')?.status, 'ok');
   } finally {
     await closeServer(server);
+  }
+
+  const running = createServer((request, response) => {
+    response
+      .writeHead(
+        request.url === '/line/main/' && request.method === 'POST' ? 401 : 404,
+      )
+      .end();
+  });
+  await new Promise<void>((resolve) => running.listen(0, '127.0.0.1', resolve));
+  try {
+    const { port: busy } = running.address() as { port: number };
+    const config = { ...entry, ...patch?.entry, listen: `127.0.0.1:${busy}` };
+    const served = await line.checks?.({
+      ...context,
+      entry: config,
+      configuredPlatforms: [config],
+    });
+    const item = served?.find(({ id }) => id === 'line-listen');
+    assert.equal(item?.status, 'ok');
+    assert.match(item?.detail ?? '', /running gateway/);
+    const other = { ...config, id: 'other' };
+    const unserved = await line.checks?.({
+      ...context,
+      entry: other,
+      configuredPlatforms: [other],
+    });
+    assert.equal(
+      unserved?.find(({ id }) => id === 'line-listen')?.status,
+      'warn',
+    );
+  } finally {
+    await closeServer(running);
+  }
+
+  const base = 'https://webhooks.example.com/teams/';
+  await publicUrl.run({
+    ...context,
+    entry: savedEntry,
+    prompt: async () => base,
+  });
+  assert.equal(patch?.entry?.publicUrl, base);
+  await publicUrl.run({
+    ...context,
+    entry: savedEntry,
+    webhooks: { publicBaseUrl: base },
+    prompt: async () => assert.fail('The workspace URL already applies'),
+  });
+});
+
+test('LINE completion confirms an endpoint change before setting and testing it', async () => {
+  const endpoint = 'https://webhooks.example.com/teams/line/main/';
+  const endpointPath = '/v2/bot/channel/webhook/endpoint';
+  const testPath = '/v2/bot/channel/webhook/test';
+  const completion = line.setupComplete;
+  assert.ok(completion);
+  for (const scenario of [
+    {
+      current: endpoint,
+      answer: undefined,
+      methods: ['GET'],
+      summary: /matches/,
+    },
+    {
+      current: 'https://old.example.com/',
+      answer: 'no',
+      methods: ['GET'],
+      summary: /differs/,
+    },
+    {
+      current: undefined,
+      answer: 'yes',
+      methods: ['GET', 'PUT', 'POST'],
+      testSuccess: true,
+      summary: /test passed/,
+    },
+    {
+      current: undefined,
+      answer: 'yes',
+      methods: ['GET', 'PUT', 'POST'],
+      testSuccess: false,
+      summary: /test did not pass/,
+    },
+  ]) {
+    const api = fakeApi(({ body, method, path }) => {
+      if (method === 'GET') {
+        assert.equal(path, endpointPath);
+        return scenario.current
+          ? Response.json({ endpoint: scenario.current, active: true })
+          : Response.json({}, { status: 404 });
+      }
+      assert.deepEqual(body, { endpoint });
+      if (method === 'PUT') {
+        assert.equal(path, endpointPath);
+        return Response.json({});
+      }
+      assert.equal(path, testPath);
+      return Response.json({ success: scenario.testSuccess });
+    });
+    let asked = 0;
+    const summary = await completion.run({
+      arch: process.arch,
+      platform: process.platform,
+      workspace: '/unused',
+      entry: { id: 'main', kind: 'line' },
+      webhooks: { publicBaseUrl: 'https://webhooks.example.com/teams/' },
+      fetch: api.fetch,
+      signal: AbortSignal.timeout(2000),
+      runCommand: async () => assert.fail('Unexpected command'),
+      credential: () => token,
+      async prompt({ secret, text }) {
+        assert.equal(secret, undefined);
+        assert.ok(text.includes(endpoint));
+        assert.match(text, /Type yes to confirm/);
+        assert.ok(scenario.answer);
+        asked++;
+        return scenario.answer;
+      },
+    });
+    assert.equal(asked, scenario.answer === undefined ? 0 : 1);
+    assert.match(summary, scenario.summary);
+    assert.equal(summary.split('\n')[0], `Webhook URL: ${endpoint}`);
+    assert.deepEqual(
+      api.calls.map(({ method }) => method),
+      scenario.methods,
+    );
   }
 });

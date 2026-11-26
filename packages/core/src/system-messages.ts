@@ -7,7 +7,8 @@ const messages = {
       success: 'Owner paired.',
       invalid: 'Pairing code is invalid or expired.',
     },
-    addUsage: 'Usage: /add <agent|platform> <kind> [--id <id>]',
+    addUsage:
+      'Usage: /add <agent|platform> <kind> [--id <id>]. Omit --id to choose a name during setup.',
     loginUsage: 'Usage: /login <agentId>',
     allowlisted: 'Chat allowlisted.',
     removedFromAllowlist: 'Chat removed from the allowlist.',
@@ -53,6 +54,17 @@ const messages = {
     delayed: (due: string) => `[Delayed schedule, originally due ${due}]`,
     setup: {
       plan: 'Setup plan',
+      nameTitle: 'Name the instance',
+      nameQuestion:
+        'Instance name (used in paths and credential names where applicable)',
+      lineNameQuestion:
+        'Instance name (used in the LINE webhook path and credential variable suffixes)',
+      askName: (suggested: string) =>
+        `Enter the instance name, or reply default or - to use ${suggested}.`,
+      completeCancelled: (id: string) =>
+        `Setup for ${id} is saved. The optional final step was cancelled.`,
+      completeFailed: (id: string) =>
+        `Setup for ${id} is saved. The optional final step could not complete.`,
       automatic: 'Runs automatically',
       unspecified: 'Prompt details are not declared',
       private: ' (DM)',
@@ -126,7 +138,8 @@ const messages = {
   'zh-TW': {
     environment: '環境檢查有問題：',
     pairing: { success: '已完成主人配對。', invalid: '配對碼無效或已過期。' },
-    addUsage: '用法：/add <agent|platform> <kind> [--id <id>]',
+    addUsage:
+      '用法：/add <agent|platform> <kind> [--id <id>]。省略 --id 可在設定時選擇名稱。',
     loginUsage: '用法：/login <agentId>',
     allowlisted: '已將此聊天室加入允許清單。',
     removedFromAllowlist: '已將此聊天室移出允許清單。',
@@ -166,6 +179,15 @@ const messages = {
     delayed: (due: string) => `［排程延遲，原定時間 ${due}］`,
     setup: {
       plan: '設定流程',
+      nameTitle: '命名實例',
+      nameQuestion: '實例名稱（用於相關路徑和憑證名稱）',
+      lineNameQuestion: '實例名稱（用於 LINE Webhook 路徑和憑證環境變數後綴）',
+      askName: (suggested: string) =>
+        `請輸入實例名稱，或回覆 default 或 - 使用 ${suggested}。`,
+      completeCancelled: (id: string) =>
+        `${id} 的設定已儲存，已取消最後的選用步驟。`,
+      completeFailed: (id: string) =>
+        `${id} 的設定已儲存，無法完成最後的選用步驟。`,
       automatic: '自動執行',
       unspecified: '未提供提示說明',
       private: '（私訊）',

@@ -50,6 +50,8 @@ export interface LineText {
   type: 'text';
 }
 
+const webhookEndpoint = '/v2/bot/channel/webhook/endpoint';
+
 export class LineApi {
   readonly #fetch: typeof globalThis.fetch;
   readonly #token: string;
@@ -67,6 +69,37 @@ export class LineApi {
     if (!id || !username || !displayName)
       throw new Error('LINE bot info returned an invalid identity');
     return { id, username, displayName };
+  }
+
+  async webhookEndpoint(signal: AbortSignal) {
+    try {
+      const body = record(await this.#request(webhookEndpoint, signal));
+      const endpoint = nonempty(body?.endpoint);
+      if (!endpoint || typeof body?.active !== 'boolean')
+        throw new Error('LINE returned invalid webhook endpoint information');
+      return { endpoint, active: body.active };
+    } catch (error) {
+      if (!(error instanceof LineApiError) || error.status !== 404) throw error;
+    }
+  }
+
+  setWebhookEndpoint(endpoint: string, signal: AbortSignal) {
+    return this.#request(
+      webhookEndpoint,
+      signal,
+      { endpoint },
+      undefined,
+      'PUT',
+    );
+  }
+
+  async testWebhookEndpoint(endpoint: string, signal: AbortSignal) {
+    const body = record(
+      await this.#request('/v2/bot/channel/webhook/test', signal, { endpoint }),
+    );
+    if (typeof body?.success !== 'boolean')
+      throw new Error('LINE returned an invalid webhook test result');
+    return body.success;
   }
 
   async profile(path: string, signal: AbortSignal) {
@@ -123,6 +156,7 @@ export class LineApi {
     signal: AbortSignal,
     body?: object,
     retryKey?: string,
+    method = body ? 'POST' : 'GET',
   ): Promise<unknown> {
     signal.throwIfAborted();
     const headers = new Headers({ Authorization: `Bearer ${this.#token}` });
@@ -133,7 +167,7 @@ export class LineApi {
       response = await this.#fetch(new URL(path, 'https://api.line.me'), {
         body: body && JSON.stringify(body),
         headers,
-        method: body ? 'POST' : 'GET',
+        method,
         redirect: 'error',
         signal,
       });

@@ -1,10 +1,21 @@
 import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 
 import { createHmac, timingSafeEqual } from 'node:crypto';
+import { createServer } from 'node:http';
 
 export const defaultListen = '127.0.0.1:8789';
 export const listenPattern = '^(127\\.0\\.0\\.1|\\[::1\\]):([0-9]{1,5})$';
 const bodyLimit = 1024 * 1024;
+type Route = (request: IncomingMessage, response: ServerResponse) => void;
+
+interface Listener {
+  closing?: Promise<void>;
+  ready: Promise<void>;
+  routes: Map<string, Route>;
+  server: Server;
+}
+
+const listeners = new Map<string, Listener>();
 
 export function listenAddress(value: unknown = defaultListen) {
   const match =
@@ -17,6 +28,14 @@ export function listenAddress(value: unknown = defaultListen) {
     host: match[1] === '[::1]' ? '::1' : '127.0.0.1',
     port: Number(match[2]),
   };
+}
+
+function addressKey({ host, port }: ReturnType<typeof listenAddress>) {
+  return `${host}:${port}`;
+}
+
+export function hasLineListener(address: ReturnType<typeof listenAddress>) {
+  return listeners.get(addressKey(address))?.server.listening === true;
 }
 
 export async function listen(
@@ -45,23 +64,61 @@ export function webhookPath(id: string) {
   return `/line/${encodeURIComponent(id)}/`;
 }
 
+export async function registerWebhook(
+  address: ReturnType<typeof listenAddress>,
+  id: string,
+  route: Route,
+  signal: AbortSignal,
+) {
+  const key = addressKey(address);
+  let listener = listeners.get(key);
+  while (listener?.closing) {
+    signal.throwIfAborted();
+    await listener.closing;
+    listener = listeners.get(key);
+  }
+  signal.throwIfAborted();
+  if (!listener) {
+    const routes = new Map<string, Route>();
+    const server = createServer((request, response) => {
+      const pathname = request.url?.split('?', 1)[0];
+      const match =
+        pathname && /^\/line\/([^/]+)(?:\/(?:webhook)?)?$/.exec(pathname);
+      const handler =
+        request.method === 'POST' && match && routes.get(`/line/${match[1]}/`);
+      if (handler) handler(request, response);
+      else response.writeHead(404).end();
+    });
+    const ready = listen(server, address).catch((error: unknown) => {
+      listeners.delete(key);
+      throw error;
+    });
+    listener = { ready, routes, server };
+    listeners.set(key, listener);
+  }
+  const path = webhookPath(id);
+  const { ready, routes, server } = listener;
+  if (routes.has(path))
+    throw new Error('LINE webhook path is already registered');
+  routes.set(path, route);
+  await ready;
+  return async () => {
+    routes.delete(path);
+    if (routes.size === 0) {
+      listener.closing = closeServer(server).finally(() =>
+        listeners.delete(key),
+      );
+      await listener.closing;
+    }
+  };
+}
+
 export async function webhook(
   request: IncomingMessage,
   response: ServerResponse,
-  path: string,
   secret: string,
   receive: (events: unknown[]) => void,
 ) {
-  const pathname = request.url?.split('?', 1)[0];
-  if (
-    request.method !== 'POST' ||
-    (pathname !== path &&
-      pathname !== path.slice(0, -1) &&
-      pathname !== `${path}webhook`)
-  ) {
-    response.writeHead(404).end();
-    return;
-  }
   if (Number(request.headers['content-length']) > bodyLimit) {
     response.writeHead(413, { Connection: 'close' }).end();
     return;

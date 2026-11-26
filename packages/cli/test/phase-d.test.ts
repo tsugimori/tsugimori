@@ -2,7 +2,7 @@ import type { SetupDependencies } from '@tsugimori/core';
 
 import claude from '@tsugimori/agent-claude-sdk';
 import codex from '@tsugimori/agent-codex';
-import { loadSettings } from '@tsugimori/config';
+import { loadSettings, writeCredential } from '@tsugimori/config';
 import { GuidedSetup, PluginRegistry } from '@tsugimori/core';
 import line from '@tsugimori/platform-line';
 import telegram from '@tsugimori/platform-telegram';
@@ -49,11 +49,13 @@ test('guided setup sends localized plans before any prompts', async (t) => {
       plan: [
         '設定流程',
         '1. 驗證 LINE 頻道憑證 · 頻道密鑰（私訊） / 長效存取權杖（私訊） / 確認機器人名稱（yes/no）',
+        '2. 選擇公開的 Webhook 網址 · 公開的 HTTPS 基底網址（尚未設定時詢問，可略過）',
+        '3. 儲存設定後檢查 LINE 的 Webhook 網址 · 已知網址且設定不同時，確認是否設定並測試 Webhook（yes/no）',
         '儲存時機：第 1 步在你確認機器人名稱後將頻道密鑰與存取權杖寫入 .env；所有步驟及檢查通過後儲存工作區設定。',
         '隨時可以傳 /cancel 取消',
       ],
-      header: '（1/1）驗證 LINE 頻道憑證',
-      prompt: '（1/1） · 第 1 題，共 3 題：請輸入 LINE 頻道密鑰。',
+      header: '（1/3）驗證 LINE 頻道憑證',
+      prompt: '（1/3） · 第 1 題，共 3 題：請輸入 LINE 頻道密鑰。',
     },
     {
       category: 'agent',
@@ -228,7 +230,7 @@ test('doctor reads only enabled checks, reports repairs and leaves the workspace
 
 test('startup and doctor report configured listener conflicts and their addresses', async (t) => {
   const config = {
-    web: { listen: '127.0.0.1:8788' },
+    web: { listen: '127.0.0.1:8789' },
     preview: {
       named: {
         zoneId: '1'.repeat(32),
@@ -263,21 +265,18 @@ test('startup and doctor report configured listener conflicts and their addresse
       id: string;
       status: string;
     }[];
-  const named = /127\.0\.0\.1:8788.*web\.listen.*preview\.named\.listen/;
-  const line = /127\.0\.0\.1:8789.*line-main.*line-duplicate/;
+  const collision = /127\.0\.0\.1:8789.*web\.listen.*line-main.*line-duplicate/;
 
   assert.equal(await main(['doctor', workspace, '--json'], registry, deps), 1);
   const conflicts = reports().filter(({ id }) => id === 'listener-conflict');
   assert.deepEqual(
     conflicts.map(({ status }) => status),
-    ['fail', 'fail'],
+    ['fail'],
   );
-  assert.match(conflicts[0]!.detail, named);
-  assert.match(conflicts[1]!.detail, line);
+  assert.match(conflicts[0]!.detail, collision);
   await assert.rejects(main(['start', workspace], registry, deps), (error) => {
     assert.ok(error instanceof Error);
-    assert.match(error.message, named);
-    assert.match(error.message, line);
+    assert.match(error.message, collision);
     return true;
   });
 
@@ -288,13 +287,93 @@ test('startup and doctor report configured listener conflicts and their addresse
       web: { ...config.web, enabled: false },
       platforms: [
         config.platforms[0],
-        { ...config.platforms[1], enabled: false },
+        config.platforms[1],
         { id: 'line-ipv6', kind: 'line', listen: '[::1]:8789' },
       ],
     }),
   );
   assert.equal(await main(['doctor', workspace, '--json'], registry, deps), 0);
   assert.ok(reports().every(({ status }) => status === 'ok'));
+  await writeFile(
+    join(workspace, 'tsugimori.json'),
+    JSON.stringify({ ...config, web: { listen: '127.0.0.1:8788' } }),
+  );
+  assert.equal(await main(['doctor', workspace, '--json'], registry, deps), 1);
+  assert.match(
+    reports().find(({ id }) => id === 'listener-conflict')!.detail,
+    /127\.0\.0\.1:8788.*web\.listen.*preview\.named\.listen/,
+  );
+  await writeFile(
+    join(workspace, 'tsugimori.json'),
+    JSON.stringify({
+      ...config,
+      web: { enabled: false },
+      preview: { named: { ...config.preview.named, listen: '127.0.0.1:8789' } },
+    }),
+  );
+  assert.equal(await main(['doctor', workspace, '--json'], registry, deps), 1);
+  assert.match(
+    reports().find(({ id }) => id === 'listener-conflict')!.detail,
+    /127\.0\.0\.1:8789.*preview\.named\.listen.*line-main.*line-duplicate/,
+  );
+});
+
+test('doctor prints LINE webhook URLs, resolving instance overrides before the workspace default', async (t) => {
+  const platforms = [
+    {
+      id: 'main',
+      kind: 'line',
+      listen: '127.0.0.1:0',
+      secretEnv: 'TEST_LINE_SECRET',
+      tokenEnv: 'TEST_LINE_TOKEN',
+    },
+    {
+      id: 'team',
+      kind: 'line',
+      listen: '127.0.0.1:0',
+      secretEnv: 'TEST_LINE_SECRET',
+      tokenEnv: 'TEST_LINE_TOKEN',
+      publicUrl: 'https://team.example.com/hooks/',
+    },
+  ];
+  const workspace = await fixture(t, {
+    platforms,
+    webhooks: { publicBaseUrl: 'https://default.example.com/' },
+  });
+  await writeCredential(workspace, 'TEST_LINE_SECRET', 'fake-channel-secret');
+  await writeCredential(workspace, 'TEST_LINE_TOKEN', 'fake-channel-token');
+  const registry = new PluginRegistry([line]);
+  const deps: SetupDependencies = {
+    runCommand: async () => ok,
+    fetch: async (url) => {
+      assert.equal(String(url), 'https://api.line.me/v2/bot/info');
+      return Response.json({
+        userId: 'U' + '1'.repeat(32),
+        basicId: '@test',
+        displayName: 'Test Bot',
+      });
+    },
+  };
+  const logs = t.mock.method(console, 'log', () => {});
+  assert.equal(await main(['doctor', workspace], registry, deps), 0);
+  const output = () => String(logs.mock.calls.at(-1)?.arguments[0]);
+  assert.match(
+    output(),
+    /platform\/main.*https:\/\/default\.example\.com\/line\/main\//,
+  );
+  assert.match(
+    output(),
+    /platform\/team.*https:\/\/team\.example\.com\/hooks\/line\/team\//,
+  );
+  await writeFile(
+    join(workspace, 'tsugimori.json'),
+    JSON.stringify({ platforms }),
+  );
+  assert.equal(await main(['doctor', workspace], registry, deps), 0);
+  assert.match(
+    output(),
+    /\[WARN\] platform\/main.*Webhook path: \/line\/main\/\..*Set publicUrl or webhooks\.publicBaseUrl/,
+  );
 });
 
 test('setup prints package installs, verifies Codex archives and bumps pins only on upgrade', async (t) => {

@@ -1253,7 +1253,7 @@ export class Gateway {
           mode: 'add',
           category: match[1] === 'agent' ? 'agent' : 'platform',
           kind: match[2],
-          id: match[3] ?? match[2],
+          id: match[3],
         });
         break;
       }

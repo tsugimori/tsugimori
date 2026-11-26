@@ -1,7 +1,10 @@
 import type { Config } from '@tsugimori/config';
 
 const descriptions = {
-  add: { en: 'Add an agent or platform', 'zh-TW': '新增代理或平台' },
+  add: {
+    en: 'Add an agent or platform ([--id <id>])',
+    'zh-TW': '新增代理或平台（[--id <id>]）',
+  },
   agent: { en: 'Switch this chat’s agent', 'zh-TW': '切換這個對話的代理' },
   allow: {
     en: 'Allow members to use the bot here',

@@ -3,6 +3,7 @@ import type {
   PlatformInstanceConfig,
 } from '@tsugimori/plugin-sdk';
 
+import { parseWebhookBaseUrl } from '@tsugimori/plugin-sdk';
 import { Ajv } from 'ajv';
 import { readFileSync, watch as watchDirectory } from 'node:fs';
 import { readFile } from 'node:fs/promises';
@@ -70,6 +71,7 @@ export interface Config {
     ownerEmail?: string;
     ownerSub?: string;
   };
+  webhooks?: { publicBaseUrl?: string };
 }
 
 export interface PluginKinds {
@@ -117,7 +119,19 @@ export function parseConfig(
   }
   checkEntries(value.platforms, kinds.platformKinds, 'platform');
   checkEntries(value.agents, kinds.agentKinds, 'agent');
+  validateWebhookUrl(value.webhooks?.publicBaseUrl, '/webhooks/publicBaseUrl');
+  for (const [index, entry] of value.platforms.entries()) {
+    if (entry.kind === 'line')
+      validateWebhookUrl(entry.publicUrl, `/platforms/${index}/publicUrl`);
+  }
   return value;
+}
+
+function validateWebhookUrl(value: unknown, path: string) {
+  if (value !== undefined && !parseWebhookBaseUrl(value))
+    throw new ConfigError(
+      `Invalid tsugimori.json: ${path} must be an HTTPS base URL`,
+    );
 }
 
 function checkEntries(

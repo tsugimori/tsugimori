@@ -1,19 +1,26 @@
 export type { MarkdownEntity } from './markdown.ts';
 export { renderMarkdown } from './markdown.ts';
 
-import type { CheckContext, CheckItem, SetupStep } from './setup.ts';
+import type {
+  CheckContext,
+  CheckItem,
+  SetupCompletion,
+  SetupStep,
+} from './setup.ts';
 
 export type {
   CheckContext,
   CheckItem,
   CommandOptions,
   CommandRunner,
+  SetupCompletion,
   SetupContext,
   SetupDependencies,
   SetupPatch,
   SetupStep,
 } from './setup.ts';
 export { agentHome, credentialKey, SetupError } from './setup.ts';
+export { parseWebhookBaseUrl, webhookBaseUrlPattern } from './webhooks.ts';
 export {
   containsMention,
   textMentionMatches,
@@ -613,6 +620,7 @@ export interface PluginDefinition {
     options: { signal?: AbortSignal; upgrade: boolean },
   ): Promise<string | undefined>;
   name: string;
+  setupComplete?: SetupCompletion;
   setupSteps?: readonly SetupStep[];
   tools?: readonly ToolDefinition[];
 }

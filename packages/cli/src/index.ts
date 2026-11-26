@@ -105,7 +105,10 @@ export async function main(
             mode: 'add',
             category,
             kind,
-            id: typeof parsed.values.id === 'string' ? parsed.values.id : kind,
+            id:
+              typeof parsed.values.id === 'string'
+                ? parsed.values.id
+                : undefined,
           }
         : undefined;
     if (!request) throw new UsageError(usage);
@@ -121,7 +124,12 @@ export async function main(
       const setup = new GuidedSetup({ ...deps, registry, store, workspace });
       const result = await setup.run(request, io);
       console.log(
-        `Saved ${result.id}. A running gateway will attach it after reloading the workspace.`,
+        [
+          `Saved ${result.id}. A running gateway will attach it after reloading the workspace.`,
+          result.summary,
+        ]
+          .filter(Boolean)
+          .join('\n'),
       );
     } catch (error) {
       if (!(error instanceof SetupCancelled)) throw error;

@@ -1,6 +1,7 @@
 import { join, resolve } from 'node:path';
 
 import type {
+  PlatformInstanceConfig,
   PluginFactoryContext,
   PluginInstanceConfig,
   RunResult,
@@ -42,12 +43,14 @@ export interface SetupDependencies {
 
 export interface CheckContext extends PluginFactoryContext {
   arch: string;
+  configuredPlatforms?: readonly Readonly<PlatformInstanceConfig>[];
   entry: Readonly<PluginInstanceConfig>;
   fetch: typeof globalThis.fetch;
   platform: NodeJS.Platform;
   runCommand: CommandRunner;
   /** Startup checks can leave network probes to the adapter's start method. */
   startup?: boolean;
+  webhooks?: Readonly<{ publicBaseUrl?: string }>;
 }
 
 export interface CheckItem {
@@ -99,6 +102,16 @@ export interface SetupStep {
   runOnLogin?: boolean;
   saves?: SetupText;
   title: string;
+}
+
+export interface SetupCompletion extends Pick<
+  SetupStep,
+  'asks' | 'localized' | 'title'
+> {
+  /** Runs after the workspace configuration is saved and returns a setup summary. */
+  run(
+    ctx: CheckContext & Pick<SetupContext, 'locale' | 'prompt' | 'signal'>,
+  ): string | Promise<string>;
 }
 
 export class SetupError extends Error {}

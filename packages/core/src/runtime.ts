@@ -267,7 +267,7 @@ export class Runtime {
       const items = await measure(target, () =>
         checks.plugin(
           registry.forInstance(category, entry.kind),
-          { ...checks.context(entry, env), startup: true },
+          { ...checks.context(entry, env, config), startup: true },
           target,
           category,
         ),

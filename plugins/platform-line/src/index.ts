@@ -5,14 +5,13 @@ import type {
   PlatformAdapter,
   SendPart,
 } from '@tsugimori/plugin-sdk';
-import type { Server } from 'node:http';
+import type { IncomingMessage, ServerResponse } from 'node:http';
 
 import {
   definePlugin,
   PlatformStartError,
   SendFailure,
 } from '@tsugimori/plugin-sdk';
-import { createServer } from 'node:http';
 
 import type { LineText } from './api.ts';
 
@@ -21,6 +20,7 @@ import { messageParts } from './message-text.ts';
 import {
   defaultReplyTokenTtlMs,
   lineChecks,
+  lineCompletion,
   lineConfigSchema,
   lineCredentials,
   lineIdentityFailure,
@@ -29,13 +29,7 @@ import {
   validToken,
 } from './setup.ts';
 import { mapEvent } from './updates.ts';
-import {
-  closeServer,
-  listen,
-  listenAddress,
-  webhook,
-  webhookPath,
-} from './webhook.ts';
+import { listenAddress, registerWebhook, webhook } from './webhook.ts';
 
 const messagesPerRequest = 5;
 const profileTtlMs = 5 * 60_000;
@@ -82,9 +76,8 @@ interface LineOptions {
 
 interface Listener {
   controller: AbortController;
-  server: Server;
   signal: AbortSignal;
-  start: Promise<void>;
+  start: ReturnType<typeof registerWebhook>;
   stop?: Promise<void>;
 }
 
@@ -144,9 +137,12 @@ export class LineAdapter implements PlatformAdapter {
     const signal = ctx.signal
       ? AbortSignal.any([ctx.signal, controller.signal])
       : controller.signal;
-    const path = webhookPath(this.id);
-    const server = createServer((request, response) => {
-      void webhook(request, response, path, this.#options.secret, (events) => {
+    const route = (request: IncomingMessage, response: ServerResponse) => {
+      if (signal.aborted) {
+        response.writeHead(404).end();
+        return;
+      }
+      void webhook(request, response, this.#options.secret, (events) => {
         try {
           this.#receive(events, ctx, signal);
         } catch {
@@ -158,22 +154,25 @@ export class LineAdapter implements PlatformAdapter {
         if (!response.headersSent) response.writeHead(500).end();
         else response.destroy();
       });
-    });
+    };
     this.#listener = {
       controller,
-      server,
       signal,
-      start: this.#start(server, signal),
+      start: this.#start(route, signal),
     };
     try {
       await this.#listener.start;
+      signal.throwIfAborted();
     } catch (error) {
       await this.stop();
       throw error;
     }
   }
 
-  async #start(server: Server, signal: AbortSignal) {
+  async #start(
+    route: Parameters<typeof registerWebhook>[2],
+    signal: AbortSignal,
+  ) {
     signal.throwIfAborted();
     const address = listenAddress(this.#options.listen);
     try {
@@ -196,12 +195,12 @@ export class LineAdapter implements PlatformAdapter {
     }
     signal.throwIfAborted();
     try {
-      await listen(server, address);
+      return await registerWebhook(address, this.id, route, signal);
     } catch (error) {
+      signal.throwIfAborted();
       const failure = lineListenFailure(error);
       throw new PlatformStartError(failure.detail, { failure });
     }
-    signal.throwIfAborted();
   }
 
   stop() {
@@ -213,8 +212,8 @@ export class LineAdapter implements PlatformAdapter {
   async #stop(listener: Listener) {
     listener.controller.abort();
     try {
-      await listener.start.catch(() => undefined); // start() reports its failure.
-      await closeServer(listener.server);
+      const release = await listener.start.catch(() => undefined); // start() reports its failure.
+      await release?.();
     } finally {
       this.#botIdentity = undefined;
       this.#seen.clear();
@@ -375,6 +374,7 @@ export class LineAdapter implements PlatformAdapter {
 export default definePlugin({
   name: 'platform-line',
   checks: lineChecks,
+  setupComplete: lineCompletion,
   configSchema: lineConfigSchema,
   credentialNames: lineCredentials,
   setupSteps: lineSetup,
