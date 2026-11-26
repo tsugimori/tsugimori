@@ -74,7 +74,11 @@ test(
       requests.push({ method, ...body });
       if (body.scope.type === 'default' && failDefault) {
         failDefault = false;
-        return Response.json({ ok: false, error_code: 400 }, { status: 400 });
+        return Response.json({
+          ok: false,
+          error_code: 400,
+          description: `Bad Request: command menu rejected at ${String(input)} for 1:fake`,
+        });
       }
       return ok(true);
     };
@@ -176,7 +180,12 @@ test(
         ],
       },
     ]);
-    assert.ok(logs.some(({ event }) => event === 'platform.commands_failed'));
+    const failure = logs.find(
+      ({ event }) => event === 'platform.commands_failed',
+    );
+    assert.equal(failure?.code, 400);
+    assert.match(failure?.error ?? '', /Bad Request: command menu rejected/);
+    assert.doesNotMatch(failure?.error ?? '', /1:fake|https?:\/\//);
 
     const code = new Auth({ store }).createPairingCode(adapterId);
     await deliver(knownGroup, owner, [`/pair ${code}`], 17);
@@ -298,13 +307,275 @@ test(
       clear(memberScope(newGroup.id, member)),
     ]);
     await gateway.stop();
-    assert.ok(
-      spans.some(
-        ({ name, status, attrs }) =>
-          name === 'platform.commands' &&
-          status === 'error' &&
-          attrs.scope === 'default',
+    const failedSpan = spans.find(
+      ({ name, status, attrs }) =>
+        name === 'platform.commands' &&
+        status === 'error' &&
+        attrs.scope === 'default',
+    );
+    assert.equal(failedSpan?.attrs.error, failure?.error);
+    assert.equal(failedSpan?.attrs.code, 400);
+  },
+);
+
+test(
+  'Telegram menus follow group migrations and resume unavailable scopes after a fresh message',
+  { timeout: 8_000 },
+  async (t) => {
+    const workspace = await mkdtemp(
+      join(tmpdir(), 'tsugimori-command-recovery-'),
+    );
+    const dbPath = join(workspace, 'store.db');
+    let store = new SqliteStore(dbPath);
+    const adapterId = 'telegram:test';
+    const bot = { id: 42, username: 'ExampleBot' };
+    const owner = 79;
+    const apiSource = -301;
+    const updateToSource = -302;
+    const updateFromSource = -303;
+    const supergroup = (id: number) => -1_000_000_000_000 + id;
+    const kicked = -401;
+    const missing = -402;
+    const notMember = -403;
+    const rejected = new Map([
+      [
+        kicked,
+        {
+          code: 403,
+          description: 'Forbidden: bot was kicked from the group chat',
+        },
+      ],
+      [missing, { code: 400, description: 'Bad Request: chat not found' }],
+      [
+        notMember,
+        {
+          code: 400,
+          description: 'Bad Request: user is not a member of the chat',
+        },
+      ],
+    ]);
+    const ref = (chatId: number) => ({ adapterId, chatId: String(chatId) });
+    const route = { agentId: 'selected', model: 'chosen' };
+    const recordGroup = (id: number, kind: 'group' | 'supergroup') => {
+      const chat = ref(id);
+      store.recordInbound(
+        { ...chat, kind, title: 'Earlier group' },
+        { adapterId, userId: String(owner), display: null },
+        {
+          ...chat,
+          direction: 'inbound',
+          messageId: '100',
+          raw: null,
+          replyTo: null,
+          text: 'Earlier message',
+          threadId: null,
+          userId: String(owner),
+        },
+      );
+    };
+    for (const id of [apiSource, updateToSource, updateFromSource]) {
+      recordGroup(id, 'group');
+      store.setAllowlisted(ref(id), true);
+      store.setChatRoute(ref(id), route);
+      store.setWorkspaceSettings(ref(id), { thinking: 'high' });
+    }
+    const existingDestination = ref(supergroup(updateFromSource));
+    recordGroup(supergroup(updateFromSource), 'supergroup');
+    store.setAllowlisted(existingDestination, false);
+    store.setChatRoute(existingDestination, { model: 'destination-model' });
+    for (const id of rejected.keys()) recordGroup(id, 'group');
+
+    const requests: number[] = [];
+    const updates: unknown[] = [];
+    const logs: Parameters<Logger>[0][] = [];
+    const ok = (result: unknown) => Response.json({ ok: true, result });
+    const fetch: typeof globalThis.fetch = async (input, init) => {
+      const method = new URL(String(input)).pathname.split('/').at(-1);
+      if (method === 'getMe') return ok(bot);
+      if (method === 'getUpdates') {
+        await delay(10, undefined, { signal: init?.signal ?? undefined });
+        return ok(updates.splice(0));
+      }
+      assert.ok(method === 'setMyCommands' || method === 'deleteMyCommands');
+      assert.ok(typeof init?.body === 'string');
+      const { scope } = JSON.parse(init.body);
+      if (scope.type !== 'chat_member') return ok(true);
+      const id = Number(scope.chat_id);
+      requests.push(id);
+      if (id === apiSource)
+        return Response.json(
+          {
+            ok: false,
+            error_code: 400,
+            description:
+              'Bad Request: group chat was upgraded to a supergroup chat',
+            parameters: { migrate_to_chat_id: supergroup(id) },
+          },
+          { status: 400 },
+        );
+      const error = rejected.get(id);
+      return error
+        ? Response.json(
+            {
+              ok: false,
+              error_code: error.code,
+              description: error.description,
+            },
+            { status: error.code },
+          )
+        : ok(true);
+    };
+    const registry = new PluginRegistry([
+      {
+        name: 'test-telegram',
+        adapters: {
+          telegram: ({ id }) => new TelegramAdapter({ fetch }, id, '1:fake'),
+        },
+      },
+    ]);
+    const createGateway = () =>
+      new Gateway({
+        log: (entry) => logs.push(entry),
+        registry,
+        store,
+        workspace,
+      });
+    let gateway = createGateway();
+    t.after(async () => {
+      try {
+        await gateway.stop();
+      } finally {
+        store.close();
+        await rm(workspace, { recursive: true, force: true });
+      }
+    });
+    const until = async (condition: () => boolean) => {
+      while (!condition()) await delay(10, undefined, { signal: t.signal });
+    };
+    const configure = (locale: 'en' | 'zh-TW') =>
+      writeFile(
+        join(workspace, 'tsugimori.json'),
+        JSON.stringify({
+          locale,
+          owner: { [adapterId]: String(owner) },
+          platforms: [
+            { id: adapterId, kind: 'telegram', tokenEnv: 'TEST_TOKEN' },
+          ],
+        }),
+      );
+    let updateId = 0;
+    const deliver = async (
+      id: number,
+      type: 'group' | 'supergroup',
+      fields: object = {},
+      edited = false,
+    ) => {
+      ++updateId;
+      updates.push({
+        update_id: updateId,
+        [edited ? 'edited_message' : 'message']: {
+          chat: { id, type, title: 'Upgraded group' },
+          from: { id: owner },
+          message_id: updateId,
+          text: '',
+          ...fields,
+        },
+      });
+      await until(
+        () =>
+          store.getCursor(adapterId, String(bot.id))?.offset === updateId + 1,
+      );
+      await gateway.idle();
+    };
+    const assertMigrated = (
+      id: number,
+      allowlisted = true,
+      model = route.model,
+    ) => {
+      const destination = ref(supergroup(id));
+      assert.equal(
+        store.getChat(ref(id))?.migratedToChatId,
+        destination.chatId,
+      );
+      const chat = store.getChat(destination);
+      assert.equal(chat?.kind, 'supergroup');
+      assert.equal(chat.allowlisted, allowlisted);
+      assert.equal(chat.agentId, route.agentId);
+      assert.equal(chat.model, model);
+      assert.deepEqual(store.getWorkspaceSettings(destination), {
+        thinking: 'high',
+      });
+    };
+
+    await configure('en');
+    await gateway.start();
+    await gateway.idle();
+    assert.deepEqual(
+      requests.splice(0).sort(),
+      [
+        apiSource,
+        updateToSource,
+        updateFromSource,
+        supergroup(apiSource),
+        supergroup(updateFromSource),
+        kicked,
+        missing,
+        notMember,
+      ].sort(),
+      JSON.stringify(
+        logs.filter(({ event }) => event === 'platform.commands_failed'),
       ),
     );
+    assertMigrated(apiSource);
+    assert.ok(
+      logs.some(
+        (entry) =>
+          entry.event === 'platform.commands_failed' &&
+          entry.chatId === String(apiSource) &&
+          entry.migratedToChatId === String(supergroup(apiSource)) &&
+          entry.code === 400,
+      ),
+    );
+
+    await deliver(updateToSource, 'group', {
+      migrate_to_chat_id: supergroup(updateToSource),
+    });
+    assert.deepEqual(requests.splice(0), [supergroup(updateToSource)]);
+    assertMigrated(updateToSource);
+    assert.equal(store.getMessage(ref(updateToSource), '1')?.text, '');
+    await deliver(supergroup(updateFromSource), 'supergroup', {
+      from: undefined,
+      migrate_from_chat_id: updateFromSource,
+    });
+    assertMigrated(updateFromSource, false, 'destination-model');
+    store.setAllowlisted(ref(supergroup(updateToSource)), false);
+    await deliver(supergroup(updateToSource), 'supergroup', {
+      migrate_from_chat_id: updateToSource,
+    });
+    assertMigrated(updateToSource, false);
+    await deliver(apiSource, 'group', { text: 'Queued before migration' });
+    await deliver(kicked, 'group', { message_id: 100 }, true);
+    assert.deepEqual(requests.splice(0), []);
+
+    await configure('zh-TW');
+    await until(() => logs.some(({ event }) => event === 'config.reloaded'));
+    await gateway.idle();
+    const expected = [apiSource, updateToSource, updateFromSource]
+      .map(supergroup)
+      .sort();
+    assert.deepEqual(requests.splice(0).sort(), expected);
+
+    await gateway.stop();
+    store.close();
+    store = new SqliteStore(dbPath);
+    gateway = createGateway();
+    await gateway.start();
+    await gateway.idle();
+    assert.deepEqual(requests.splice(0).sort(), expected);
+    for (const id of [kicked, missing, notMember]) {
+      rejected.delete(id);
+      await deliver(id, 'group', { text: 'Back in the group' });
+      assert.deepEqual(requests.splice(0), [id]);
+    }
   },
 );

@@ -4,6 +4,7 @@ import type {
   OutboundMessage,
   PlatformAdapter,
   PlatformCommand,
+  PlatformCommandErrorDetails,
   PlatformCommandScope,
   SendPart,
   TextEntity,
@@ -29,6 +30,12 @@ import {
 import { mapUpdate } from './updates.ts';
 
 const cursorLifetimeMs = 6 * 24 * 60 * 60 * 1_000;
+const unavailableScopeReasons = [
+  /\b(?:chat|user|member) not found\b/i,
+  /\b(?:not (?:a )?member|USER_NOT_PARTICIPANT)\b/i,
+  /\bbot was (?:kicked|removed|blocked)\b/i,
+  /\b(?:group chat was deleted|user is deactivated|bot can't initiate conversation)\b/i,
+];
 
 export { splitText };
 
@@ -246,6 +253,22 @@ export class TelegramAdapter implements PlatformAdapter {
       AbortSignal.any([this.#signal(), AbortSignal.timeout(5_000)]),
     );
     if (result !== true) throw new Error('Telegram did not update commands');
+  }
+
+  describeCommandError(
+    error: unknown,
+  ): PlatformCommandErrorDetails | undefined {
+    if (!(error instanceof BotApiError)) return;
+    const { code, description, parameters } = error;
+    return {
+      code,
+      migratedToChatId: parameters.migrateToChatId,
+      retryAfterMs: parameters.retryAfterMs,
+      scopeUnavailable:
+        (code === 400 || code === 403) &&
+        description !== undefined &&
+        unavailableScopeReasons.some((reason) => reason.test(description)),
+    };
   }
 
   async deleteMessage(

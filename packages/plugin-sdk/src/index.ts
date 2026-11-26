@@ -57,7 +57,17 @@ export interface InboundMessage extends InboundBase {
 
 export type ApprovalDecision = 'approve' | 'deny';
 
+export interface ChatMigration {
+  chatId: string;
+  /** The platform service message, when available for chat history. */
+  message?: InboundMessage;
+  newChatId: string;
+  title?: string;
+  type: 'chat-migrated';
+}
+
 export type PlatformInboundEvent =
+  | ChatMigration
   | InboundMessage
   | (InboundBase & { messageId: string; type: 'delete' })
   | (InboundBase & {
@@ -181,6 +191,13 @@ export type PlatformCommandScope =
   | { type: 'private-chat'; userId: string }
   | { chatId: string; type: 'chat-member'; userId: string };
 
+export interface PlatformCommandErrorDetails {
+  code?: number;
+  migratedToChatId?: string;
+  retryAfterMs?: number;
+  scopeUnavailable?: boolean;
+}
+
 export interface PlatformAdapter {
   /** The bot's native identity. The username excludes the @ prefix. */
   readonly botIdentity?: { id?: string; username: string };
@@ -188,6 +205,10 @@ export interface PlatformAdapter {
   deleteMessage?(
     message: Pick<InboundMessage, 'chatId' | 'messageId'>,
   ): Promise<void>;
+  /** Classify command registration errors for the gateway. */
+  describeCommandError?(
+    error: unknown,
+  ): PlatformCommandErrorDetails | undefined;
   id: string;
   kind: string;
   respondToApproval?(feedback: ApprovalFeedback): Promise<void>;

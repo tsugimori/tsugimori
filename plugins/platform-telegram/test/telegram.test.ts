@@ -116,7 +116,11 @@ test(
     });
     assert.equal(polls[1]?.offset, 14);
     assert.deepEqual(
-      events.map((event) => [event.type, event.chatId, event.threadId]),
+      events.map((event) => [
+        event.type,
+        event.chatId,
+        event.type === 'chat-migrated' ? undefined : event.threadId,
+      ]),
       [
         ['message', '-1001', '17'],
         ['message', '-1001', '17'],

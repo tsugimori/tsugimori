@@ -4,5 +4,8 @@ const tokenPattern = /\bbot\d+:[\w-]+/g;
 export function describeError(error: unknown) {
   const text =
     error instanceof Error ? `${error.name}: ${error.message}` : String(error);
-  return text.replace(tokenPattern, 'bot<redacted>').slice(0, 500);
+  return text
+    .replace(/https?:\/\/api\.telegram\.org\/[^\s<>"']*/gi, '<redacted URL>')
+    .replace(tokenPattern, 'bot<redacted>')
+    .slice(0, 500);
 }

@@ -8,13 +8,18 @@ import { untilAborted } from './abort.ts';
 export type Logger = (entry: {
   adapterId?: string;
   attempt?: number;
+  chatId?: string;
   check?: string;
+  code?: number;
   error?: string;
   event: string;
   level: 'error' | 'info' | 'warn';
+  migratedToChatId?: string;
   nextDelayMs?: number | null;
   reason?: string;
+  retryAfterMs?: number;
   scheduleId?: string;
+  scope?: string;
   target?: string;
   taskId?: string;
 }) => void;

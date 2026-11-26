@@ -12,20 +12,35 @@ export function nativeId(value: unknown): string | undefined {
 
 export class BotApiError extends Error {
   readonly code: number | undefined;
-  readonly invalidEntities: boolean;
-  readonly retryAfter?: number;
+  readonly description?: string;
+  readonly parameters: {
+    migrateToChatId?: string;
+    retryAfterMs?: number;
+  };
+
   constructor(
     method: string,
     code: number | undefined,
-    retryAfter?: number,
-    invalidEntities = false,
+    description?: string,
+    parameters: BotApiError['parameters'] = {},
   ) {
     super(
-      `Telegram ${method} failed${code === undefined ? '' : ` (HTTP ${code})`}`,
+      `Telegram ${method} failed${code === undefined ? '' : ` (${code})`}${description ? `: ${description}` : ''}`,
     );
     this.code = code;
-    this.invalidEntities = invalidEntities;
-    this.retryAfter = retryAfter;
+    this.description = description;
+    this.parameters = parameters;
+  }
+
+  get invalidEntities() {
+    return (
+      this.code === 400 &&
+      /\b(?:can't|cannot) parse entities\b/iu.test(this.description ?? '')
+    );
+  }
+
+  get retryAfter() {
+    return this.parameters.retryAfterMs;
   }
 
   get unknownDelivery() {
@@ -39,12 +54,14 @@ export class BotApiError extends Error {
 
 export class BotApi {
   readonly #fetch: typeof fetch;
+  readonly #token: string;
   readonly #url: string;
 
   constructor(fetch: typeof globalThis.fetch, token: string) {
     if (!/^\d+:[\w-]+$/.test(token))
       throw new Error('Invalid Telegram bot token format');
     this.#fetch = fetch;
+    this.#token = token;
     this.#url = `https://api.telegram.org/bot${token}/`;
   }
 
@@ -74,22 +91,29 @@ export class BotApi {
     if (response.ok && payload?.ok === true && 'result' in payload)
       return payload.result;
 
-    const code = !response.ok
-      ? response.status
-      : payload?.ok === false && typeof payload.error_code === 'number'
+    const code =
+      payload?.ok === false &&
+      typeof payload.error_code === 'number' &&
+      Number.isSafeInteger(payload.error_code)
         ? payload.error_code
+        : response.ok
+          ? undefined
+          : response.status;
+    const description =
+      typeof payload?.description === 'string'
+        ? payload.description
+            .replace(/https?:\/\/[^\s<>"']+/gi, '<redacted URL>')
+            .replaceAll(this.#token, '<redacted token>')
         : undefined;
-    const after = record(payload?.parameters)?.retry_after;
-    throw new BotApiError(
-      method,
-      code,
-      typeof after === 'number' && Number.isFinite(after) && after >= 0
-        ? after * 1_000
-        : undefined,
-      code === 400 &&
-        typeof payload?.description === 'string' &&
-        /\b(?:can't|cannot) parse entities\b/iu.test(payload.description),
-    );
+    const parameters = record(payload?.parameters);
+    const after = parameters?.retry_after;
+    throw new BotApiError(method, code, description, {
+      migrateToChatId: nativeId(parameters?.migrate_to_chat_id),
+      retryAfterMs:
+        typeof after === 'number' && Number.isFinite(after) && after >= 0
+          ? after * 1_000
+          : undefined,
+    });
   }
 
   async call(

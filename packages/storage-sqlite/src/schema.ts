@@ -40,12 +40,30 @@ export const chats = sqliteTable(
     allowlisted: integer('allowlisted', { mode: 'boolean' })
       .notNull()
       .default(false),
+    allowlistConfigured: integer('allowlist_configured', { mode: 'boolean' })
+      .notNull()
+      .default(false),
     agentId: text('agent_id'),
+    migratedToChatId: text('migrated_to_chat_id'),
     model: text('model'),
     sessionAgentId: text('session_agent_id'),
     sessionModel: text('session_model'),
   },
   (table) => [primaryKey({ columns: [table.adapterId, table.chatId] })],
+);
+
+export const unavailableCommandScopes = sqliteTable(
+  'unavailable_command_scopes',
+  {
+    ...chatScope(),
+    botId: text('bot_id').notNull(),
+    scope: text('scope').notNull(),
+  },
+  (table) => [
+    primaryKey({
+      columns: [table.adapterId, table.chatId, table.botId, table.scope],
+    }),
+  ],
 );
 
 export const users = sqliteTable(

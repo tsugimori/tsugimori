@@ -14,8 +14,13 @@ export interface ChatRecord extends ChatRef {
   agentId: string | null;
   allowlisted: boolean;
   kind: 'dm' | 'group' | 'supergroup';
+  migratedToChatId: string | null;
   model: string | null;
   title: string | null;
+}
+
+export interface CommandScopeChat extends ChatRef {
+  botId: string;
 }
 
 export interface UserRecord extends PrincipalRef {
@@ -227,6 +232,7 @@ export interface Store {
   claimSetupRun(run: SetupRun, now: number): SetupRun | undefined;
   clearAgentSessions(agentId: string): void;
   clearSession(ref: ChatRef): void;
+  clearUnavailableCommandScopes(ref: CommandScopeChat): void;
   close(): void;
   closePreview(
     id: string,
@@ -298,8 +304,13 @@ export interface Store {
   listPendingApprovals(ref: ChatRef): ApprovalRecord[];
   listPreviews(adapterId?: string): StoredPreview[];
   listSchedules(ref: ChatRef): ScheduleRecord[];
+  listUnavailableCommandScopes(
+    ref: Omit<CommandScopeChat, 'chatId'>,
+  ): { chatId: string; scope: string }[];
+  markCommandScopeUnavailable(ref: CommandScopeChat, scope: string): void;
   markDeleted(ref: ChatRef, messageId: string): void;
   markSetupSecret(ref: ChatRef, messageId: string): void;
+  migrateChat(ref: ChatRef, newChatId: string, title?: string): boolean;
   openPreview(preview: StoredPreview): void;
   recentMessages(
     ref: ChatRef,

@@ -1,15 +1,18 @@
 import type {
+  ChatMigration,
+  InboundMessage,
   PlatformAdapter,
   PlatformCommand,
   PlatformCommandScope,
 } from '@tsugimori/plugin-sdk';
-import type { Store } from '@tsugimori/storage';
+import type { Store, TraceSpan } from '@tsugimori/storage';
 import type { Tracer } from '@tsugimori/trace';
 
 import type { Logger } from './hooks.ts';
 import type { Runtime } from './runtime.ts';
 
 import { chatCommands } from './chat-commands.ts';
+import { describeError } from './errors.ts';
 
 interface Dependencies {
   log: Logger;
@@ -24,6 +27,7 @@ interface MenuState {
   groups: Set<string>;
   pending: Promise<void>;
   scoped: Map<string, Extract<PlatformCommandScope, { userId: string }>>;
+  unavailable: Map<string, string[]>;
 }
 
 export class CommandMenus {
@@ -49,9 +53,8 @@ export class CommandMenus {
       trace.span('platform.commands.load_groups', {}, () => {
         for (const chat of store.listChats()) {
           const state = menus.get(chat.adapterId);
-          if (!state || chat.kind === 'dm') continue;
-          const address = store.deliveryAddress(chat);
-          if (address) state.groups.add(address.chatId);
+          if (!state || chat.kind === 'dm' || chat.migratedToChatId) continue;
+          state.groups.add(store.deliveryAddress(chat)?.chatId ?? chat.chatId);
         }
       });
     } catch {
@@ -103,27 +106,46 @@ export class CommandMenus {
     });
   }
 
-  observeGroup(adapter: PlatformAdapter, chatId: string) {
+  observeChat(
+    adapter: PlatformAdapter,
+    {
+      chatId,
+      chatKind,
+      edited,
+    }: Pick<InboundMessage, 'chatId' | 'chatKind' | 'edited'>,
+  ) {
     if (
       !adapter.setCommands ||
       this.#deps.runtime.getAdapter(adapter.id) !== adapter
     )
       return;
+    const { store } = this.#deps;
+    const ref = { adapterId: adapter.id, chatId };
     const state = this.#menu(adapter);
-    if (state.groups.has(chatId)) return;
-    state.groups.add(chatId);
-    this.#queue(adapter.id, state, async () => {
-      const { owner, runtime } = this.#deps;
-      const userId = owner(adapter.id);
-      if (!userId) return;
-      const commands = chatCommands(runtime.config.locale);
-      await this.#set(
-        adapter,
-        state,
-        { chatId, type: 'chat-member', userId },
-        commands.owner,
-      );
-    });
+    const discovered = chatKind !== 'dm' && !state.groups.has(chatId);
+    if (discovered && store.getChat(ref)?.migratedToChatId) return;
+    const recovered = !edited && state.unavailable.has(chatId);
+    if (recovered) {
+      store.clearUnavailableCommandScopes({
+        ...ref,
+        botId: adapter.botIdentity?.id ?? '',
+      });
+      state.unavailable.delete(chatId);
+    }
+    if (discovered) state.groups.add(chatId);
+    if (recovered || discovered) this.sync(adapter);
+  }
+
+  migrateChat(
+    adapter: PlatformAdapter,
+    {
+      chatId,
+      newChatId,
+      title,
+    }: Pick<ChatMigration, 'chatId' | 'newChatId' | 'title'>,
+  ) {
+    if (this.#recordMigration(adapter, chatId, newChatId, title))
+      this.sync(adapter);
   }
 
   async idle() {
@@ -141,11 +163,24 @@ export class CommandMenus {
       : adapter;
     const previous = this.#menus.get(key);
     if (previous) return previous;
+    const unavailable = new Map<string, string[]>();
+    for (const {
+      chatId,
+      scope,
+    } of this.#deps.store.listUnavailableCommandScopes({
+      adapterId: id,
+      botId: botIdentity?.id ?? '',
+    })) {
+      const scopes = unavailable.get(chatId) ?? [];
+      scopes.push(scope);
+      unavailable.set(chatId, scopes);
+    }
     const state: MenuState = {
       applied: new Map(),
       groups: new Set(),
       pending: Promise.resolve(),
       scoped: new Map(),
+      unavailable,
     };
     this.#menus.set(key, state);
     return state;
@@ -153,12 +188,42 @@ export class CommandMenus {
 
   #queue(adapterId: string, state: MenuState, run: () => Promise<void>) {
     const { log, trace } = this.#deps;
-    const attrs = { adapterId };
-    state.pending = state.pending
-      .then(() => trace.span('platform.commands.reconcile', attrs, run))
-      .catch(() => {
+    state.pending = state.pending.then(async () => {
+      const attrs: TraceSpan['attrs'] = { adapterId };
+      const end = trace.begin('platform.commands.reconcile', attrs);
+      try {
+        await run();
+        end();
+      } catch (error) {
+        attrs.error = describeError(error);
+        end('error');
         log({ level: 'error', event: 'platform.commands_failed', ...attrs });
-      });
+      }
+    });
+  }
+
+  #recordMigration(
+    adapter: PlatformAdapter,
+    chatId: string,
+    newChatId: string,
+    title?: string,
+  ) {
+    const { store, trace } = this.#deps;
+    const attrs = { adapterId: adapter.id, chatId, newChatId };
+    const recorded = trace.span('platform.commands.migrate_chat', attrs, () =>
+      store.migrateChat({ adapterId: adapter.id, chatId }, newChatId, title),
+    );
+    if (recorded && adapter.setCommands) {
+      const state = this.#menu(adapter);
+      state.groups.delete(chatId);
+      state.groups.add(newChatId);
+      for (const [key, scope] of state.scoped) {
+        if (scope.type !== 'chat-member' || scope.chatId !== chatId) continue;
+        state.scoped.delete(key);
+        state.applied.delete(key);
+      }
+    }
+    return recorded;
   }
 
   async #set(
@@ -167,7 +232,7 @@ export class CommandMenus {
     scope: PlatformCommandScope,
     commands: readonly PlatformCommand[],
   ) {
-    const { log, runtime, trace } = this.#deps;
+    const { log, runtime, store, trace } = this.#deps;
     const setCommands = adapter.setCommands;
     if (
       this.#stopping ||
@@ -178,17 +243,47 @@ export class CommandMenus {
     const key = JSON.stringify(scope);
     const value = JSON.stringify(commands);
     if (state.applied.get(key) === value) return true;
+    const ref =
+      'userId' in scope
+        ? {
+            adapterId: adapter.id,
+            botId: adapter.botIdentity?.id ?? '',
+            chatId: scope.type === 'chat-member' ? scope.chatId : scope.userId,
+          }
+        : undefined;
+    if (ref && state.unavailable.get(ref.chatId)?.includes(key)) return false;
     if ('userId' in scope && commands.length) state.scoped.set(key, scope);
-    const attrs = { adapterId: adapter.id, scope: scope.type };
+    const attrs: TraceSpan['attrs'] = {
+      adapterId: adapter.id,
+      scope: scope.type,
+    };
+    if (ref) attrs.chatId = ref.chatId;
+    const end = trace.begin('platform.commands', attrs);
     try {
-      await trace.span('platform.commands', attrs, () =>
-        setCommands.call(adapter, commands, scope),
-      );
+      await setCommands.call(adapter, commands, scope);
+      end();
       state.applied.set(key, value);
       return true;
-    } catch {
+    } catch (error) {
       state.applied.delete(key);
+      const details = adapter.describeCommandError?.(error);
+      attrs.error = describeError(error);
+      if (details?.code !== undefined) attrs.code = details.code;
+      if (details?.migratedToChatId)
+        attrs.migratedToChatId = details.migratedToChatId;
+      if (details?.retryAfterMs !== undefined)
+        attrs.retryAfterMs = details.retryAfterMs;
+      end('error');
       log({ level: 'error', event: 'platform.commands_failed', ...attrs });
+      if (scope.type === 'chat-member' && details?.migratedToChatId) {
+        this.#recordMigration(adapter, scope.chatId, details.migratedToChatId);
+      } else if (ref && details?.scopeUnavailable) {
+        store.markCommandScopeUnavailable(ref, key);
+        state.unavailable.set(ref.chatId, [
+          ...(state.unavailable.get(ref.chatId) ?? []),
+          key,
+        ]);
+      }
       return false;
     }
   }

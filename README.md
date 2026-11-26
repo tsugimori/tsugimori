@@ -40,6 +40,8 @@ The gateway retries temporary platform startup failures with exponential backoff
 
 Telegram’s `/` menu shows `/pair` in private chats before the bot has an owner. Once an owner is configured or paired, owner commands appear in the owner’s private chat and for that owner in groups the bot has seen. Menu descriptions follow the workspace locale. In groups, you can use `/cmd@botusername` with optional arguments, for example `/compact@ExampleBot`. The bot matches the command and its username case-insensitively and ignores commands addressed to other bots.
 
+When Telegram reports a group upgrade, tsugimori carries the group's allowlist and agent settings to the supergroup and registers its menu there. If Telegram reports that a chat or member is unavailable, menu registration for that scope resumes when the bot receives a new message from that chat.
+
 Set the workspace `locale` to `zh-TW` for Traditional Chinese approval prompts and owner notices, including startup environment checks. The default is `en`. Telegram reminders and approval prompts use each recipient’s latest known `@username` when available, falling back to a native mention on the display name.
 
 ### Codex

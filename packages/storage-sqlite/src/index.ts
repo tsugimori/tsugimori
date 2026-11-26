@@ -9,6 +9,7 @@ import type {
   ApprovalRecord,
   ChatRecord,
   ChatSummary,
+  CommandScopeChat,
   GrantQuery,
   InboundRecord,
   NewMessage,
@@ -62,6 +63,7 @@ import {
   setupSecrets,
   tasks,
   traceSpans,
+  unavailableCommandScopes,
   users,
   workspaceSettings,
 } from './schema.ts';
@@ -94,6 +96,7 @@ function chatScope(
     | typeof grants
     | typeof schedules
     | typeof tasks
+    | typeof unavailableCommandScopes
     | typeof workspaceSettings,
   ref: ChatRef,
 ) {
@@ -224,6 +227,115 @@ export class SqliteStore implements Store {
 
   getChat(ref: ChatRef): ChatRecord | undefined {
     return this.#db.select().from(chats).where(chatScope(chats, ref)).get();
+  }
+
+  migrateChat(ref: ChatRef, newChatId: string, title?: string) {
+    if (ref.chatId === newChatId) return false;
+    return this.#db.transaction(
+      (tx) => {
+        const previous = tx
+          .select()
+          .from(chats)
+          .where(chatScope(chats, ref))
+          .get();
+        const next = { adapterId: ref.adapterId, chatId: newChatId };
+        const current = tx
+          .select()
+          .from(chats)
+          .where(chatScope(chats, next))
+          .get();
+        if (previous?.migratedToChatId || current?.migratedToChatId)
+          return false;
+        const route = {
+          agentId: current?.agentId ?? previous?.agentId ?? null,
+          model: current?.model ?? previous?.model ?? null,
+        };
+        const destination = {
+          ...route,
+          kind: 'supergroup' as const,
+          title: current?.title ?? title ?? previous?.title ?? null,
+          allowlisted:
+            current?.allowlistConfigured || current?.allowlisted
+              ? current.allowlisted
+              : (previous?.allowlisted ?? false),
+          allowlistConfigured:
+            current?.allowlistConfigured ||
+            (previous?.allowlistConfigured ?? false),
+        };
+        tx.insert(chats)
+          .values({ ...next, ...destination })
+          .onConflictDoUpdate({
+            target: [chats.adapterId, chats.chatId],
+            set: destination,
+          })
+          .run();
+        tx.insert(chats)
+          .values({ ...ref, kind: 'group', title, migratedToChatId: newChatId })
+          .onConflictDoUpdate({
+            target: [chats.adapterId, chats.chatId],
+            set: { migratedToChatId: newChatId },
+          })
+          .run();
+        const settings = (chat: ChatRef) =>
+          tx
+            .select()
+            .from(workspaceSettings)
+            .where(chatScope(workspaceSettings, chat))
+            .get()?.settings;
+        const previousSettings = settings(ref);
+        if (previousSettings) {
+          const merged = { ...previousSettings, ...settings(next) };
+          tx.insert(workspaceSettings)
+            .values({ ...next, settings: merged })
+            .onConflictDoUpdate({
+              target: [workspaceSettings.adapterId, workspaceSettings.chatId],
+              set: { settings: merged },
+            })
+            .run();
+        }
+        return true;
+      },
+      { behavior: 'immediate' },
+    );
+  }
+
+  listUnavailableCommandScopes({
+    adapterId,
+    botId,
+  }: Omit<CommandScopeChat, 'chatId'>) {
+    return this.#db
+      .select({
+        chatId: unavailableCommandScopes.chatId,
+        scope: unavailableCommandScopes.scope,
+      })
+      .from(unavailableCommandScopes)
+      .where(
+        and(
+          eq(unavailableCommandScopes.adapterId, adapterId),
+          eq(unavailableCommandScopes.botId, botId),
+        ),
+      )
+      .all();
+  }
+
+  markCommandScopeUnavailable(ref: CommandScopeChat, scope: string) {
+    this.#db
+      .insert(unavailableCommandScopes)
+      .values({ ...ref, scope })
+      .onConflictDoNothing()
+      .run();
+  }
+
+  clearUnavailableCommandScopes(ref: CommandScopeChat) {
+    this.#db
+      .delete(unavailableCommandScopes)
+      .where(
+        and(
+          chatScope(unavailableCommandScopes, ref),
+          eq(unavailableCommandScopes.botId, ref.botId),
+        ),
+      )
+      .run();
   }
 
   getUser({ adapterId, userId }: PrincipalRef) {
@@ -581,7 +693,7 @@ export class SqliteStore implements Store {
   setAllowlisted(ref: ChatRef, allowlisted: boolean) {
     this.#db
       .update(chats)
-      .set({ allowlisted })
+      .set({ allowlisted, allowlistConfigured: true })
       .where(chatScope(chats, ref))
       .run();
   }

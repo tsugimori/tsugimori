@@ -536,8 +536,12 @@ export class Gateway {
     return work;
   }
 
-  async #process(adapter: PlatformAdapter, event: PlatformInboundEvent) {
+  async #process(adapter: PlatformAdapter, inbound: PlatformInboundEvent) {
     const { store } = this.#deps;
+    if (inbound.type === 'chat-migrated')
+      this.#commandMenus.migrateChat(adapter, inbound);
+    const event = inbound.type === 'chat-migrated' ? inbound.message : inbound;
+    if (!event) return;
     const chat: ChatRef = {
       adapterId: adapter.id,
       chatId: conversationId(event),
@@ -589,12 +593,13 @@ export class Gateway {
     const parsed = parseCommand(event.text, adapter.botIdentity?.username);
     const command = parsed === 'other-bot' ? undefined : parsed;
     if (
-      await this.#chatSetup.receive(
+      inbound.type !== 'chat-migrated' &&
+      (await this.#chatSetup.receive(
         adapter,
         chat,
         event,
         parsed === 'other-bot' ? parsed : parsed?.name,
-      )
+      ))
     ) {
       store.recordUser(user);
       return;
@@ -627,9 +632,9 @@ export class Gateway {
         event.edited,
       ),
     );
-    if (stored && event.chatKind !== 'dm')
-      this.#commandMenus.observeGroup(adapter, event.chatId);
-    if (!stored || event.edited) return;
+    if (!stored || inbound.type === 'chat-migrated') return;
+    this.#commandMenus.observeChat(adapter, event);
+    if (event.edited) return;
     const message = privateCommand
       ? { ...event, raw: undefined, text: stored.text }
       : event;

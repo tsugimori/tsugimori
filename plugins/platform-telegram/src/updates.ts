@@ -97,9 +97,35 @@ export function mapUpdate(
   const message = edited ?? record(update.message);
   if (!message) return;
   const room = address(message);
+  if (!room) return;
+  const fromChatId = nativeId(message.migrate_from_chat_id);
+  const toChatId = nativeId(message.migrate_to_chat_id);
+  const migration =
+    room.chatKind === 'group' && toChatId !== undefined
+      ? { chatId: room.chatId, newChatId: toChatId }
+      : room.chatKind === 'supergroup' && fromChatId !== undefined
+        ? { chatId: fromChatId, newChatId: room.chatId }
+        : undefined;
+  const inbound = mapMessage(message, room, bot, edited !== undefined);
+  return migration
+    ? {
+        ...migration,
+        type: 'chat-migrated',
+        title: room.chatTitle,
+        message: inbound,
+      }
+    : inbound;
+}
+
+function mapMessage(
+  message: Record<string, unknown>,
+  room: NonNullable<ReturnType<typeof address>>,
+  bot: BotIdentity,
+  edited: boolean,
+): InboundMessage | undefined {
   const sender = record(message.from);
   const userId = nativeId(sender?.id);
-  if (!room || userId === undefined) return;
+  if (userId === undefined) return;
   const text =
     typeof message.text === 'string'
       ? message.text
@@ -116,7 +142,7 @@ export function mapUpdate(
   return {
     ...room,
     type: 'message',
-    edited: edited !== undefined,
+    edited,
     userId,
     userDisplay: userDisplay || undefined,
     userUsername: typeof sender?.username === 'string' ? sender.username : null,
