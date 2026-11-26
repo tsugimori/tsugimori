@@ -440,6 +440,7 @@ async function startGateway(
           team: config.accessTeam,
           ownerEmail: config.ownerEmail,
           ownerSub: config.ownerSub,
+          viewerServiceTokens: config.viewerServiceTokens,
         }
       : undefined;
   const admin =

@@ -11,12 +11,17 @@ export interface AccessIdentity {
   ownerEmail?: string;
   ownerSub?: string;
   team: string;
+  /** Access service token client IDs granted read-only viewer access. */
+  viewerServiceTokens?: readonly string[];
 }
+
+/** `owner` matches the configured owner; `viewer` is a listed service token. */
+export type AccessRole = 'owner' | 'viewer';
 
 export type VerifyAccess = (
   jwt: string | undefined,
   identity: AccessIdentity,
-) => Promise<boolean>;
+) => Promise<AccessRole | false>;
 
 export type ToolCallStatus = 'ok' | 'error' | 'denied' | 'pending-approval';
 

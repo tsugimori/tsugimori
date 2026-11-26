@@ -61,7 +61,7 @@ test('Access JWTs require a valid key, audience, expiry, and owner identity', as
       sign('RSA-SHA256', Buffer.from(data), key).toString('base64url')
     );
   }
-  assert.equal(await verify(token(), identity), true);
+  assert.equal(await verify(token(), identity), 'owner');
   assert.equal(await verify(token({ aud: ['other'] }), identity), false);
   assert.equal(
     await verify(token({ email: 'other@example.test' }), identity),
@@ -81,9 +81,40 @@ test('Access JWTs require a valid key, audience, expiry, and owner identity', as
   };
   assert.equal(
     await verify(token({}, 'second', second.privateKey), identity),
-    true,
+    'owner',
   );
   assert.equal(requests, 2);
+
+  // Service token JWTs carry the client ID in common_name and no email.
+  const service = (claims: Record<string, unknown> = {}) =>
+    token(
+      {
+        email: undefined,
+        sub: '',
+        type: 'app',
+        common_name: 'viewer.access',
+        ...claims,
+      },
+      'second',
+      second.privateKey,
+    );
+  const viewers = { ...identity, viewerServiceTokens: ['viewer.access'] };
+  assert.equal(await verify(service(), identity), false);
+  assert.equal(await verify(service(), viewers), 'viewer');
+  assert.equal(
+    await verify(service({ common_name: 'other.access' }), viewers),
+    false,
+  );
+  assert.equal(
+    await verify(service({ email: 'other@example.test' }), viewers),
+    false,
+  );
+  assert.equal(await verify(service({ sub: 'someone' }), viewers), false);
+  assert.equal(await verify(service({ aud: ['other'] }), viewers), false);
+  assert.equal(
+    await verify(token({}, 'second', second.privateKey), viewers),
+    'owner',
+  );
 });
 
 const payload = '<script>alert(1)</script> "><img src=x onerror=alert(1)>';
@@ -195,7 +226,8 @@ async function fixture() {
       reader,
       uiDirectory: directory,
       pingMs: 25,
-      verify: async (jwt) => jwt === 'trusted',
+      verify: async (jwt) =>
+        jwt === 'trusted' ? 'owner' : jwt === 'viewer' ? 'viewer' : false,
     },
     {
       listen: '127.0.0.1:0',
@@ -251,6 +283,12 @@ test('gates HTML, assets, API and SSE and serves only manifest assets', async (t
       await denied.text();
     }
   }
+  // Read-only viewers (listed Access service tokens) can load the console.
+  const viewer = await fetch(f.url + '/api/workspace', {
+    headers: { 'Cf-Access-Jwt-Assertion': 'viewer' },
+  });
+  assert.equal(viewer.status, 200);
+  await viewer.text();
   for (const route of [
     '/',
     '/agents',

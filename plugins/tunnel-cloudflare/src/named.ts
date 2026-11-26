@@ -95,7 +95,7 @@ export class NamedTunnel implements TunnelProvider {
         const jwt = request.headers['cf-access-jwt-assertion'];
         if (
           typeof jwt !== 'string' ||
-          !(await this.#deps.verify(jwt, this.#config.access))
+          (await this.#deps.verify(jwt, this.#config.access)) !== 'owner'
         ) {
           send(response, 403, 'Access denied');
           return;

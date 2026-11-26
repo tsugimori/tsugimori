@@ -681,6 +681,7 @@ export function definePlugin(plugin: PluginDefinition): PluginDefinition {
 
 export type {
   AccessIdentity,
+  AccessRole,
   AdminAgent,
   AdminApprovals,
   AdminChat,

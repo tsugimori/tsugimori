@@ -81,6 +81,7 @@ export interface Config {
     ownerEmail?: string;
     ownerSub?: string;
     toolDetails?: { enabled?: boolean; maxChars?: number };
+    viewerServiceTokens?: string[];
   };
   webhooks?: WebhookConfig;
 }

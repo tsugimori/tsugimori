@@ -133,7 +133,11 @@ test('Named Tunnel reconciles owned CNAMEs, routes authenticated hosts and close
   const named = new NamedTunnel(
     {
       verify: async (jwt, identity) =>
-        jwt === 'signed' && identity.aud === 'preview',
+        jwt === 'signed' && identity.aud === 'preview'
+          ? 'owner'
+          : jwt === 'viewer'
+            ? 'viewer'
+            : false,
       fetch: async (input, init) => {
         const url = new URL(String(input));
         assert.equal(url.hostname, 'api.cloudflare.com');
@@ -209,6 +213,8 @@ test('Named Tunnel reconciles owned CNAMEs, routes authenticated hosts and close
   });
   const port = await named.start();
   assert.equal((await hit(port, host)).status, 403);
+  // Viewer service tokens are for the admin console only.
+  assert.equal((await hit(port, host, 'viewer')).status, 403);
   assert.equal((await hit(port, 'admin.example.test', 'signed')).status, 404);
   const response = await hit(port, host, 'signed');
   assert.equal(response.status, 200);

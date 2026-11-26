@@ -368,6 +368,15 @@
         "allowLocalWithoutAccess": {
           "type": "boolean",
           "default": false
+        },
+        "viewerServiceTokens": {
+          "type": "array",
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._-]{1,128}$"
+          }
         }
       }
     },

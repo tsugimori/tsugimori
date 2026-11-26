@@ -1,4 +1,4 @@
-import type { VerifyAccess } from '@tsugimori/plugin-sdk';
+import type { AccessRole, VerifyAccess } from '@tsugimori/plugin-sdk';
 import type { KeyObject } from 'node:crypto';
 
 import { createPublicKey, verify } from 'node:crypto';
@@ -123,20 +123,34 @@ export function createAccessVerifier({
         (claims.nbf !== undefined &&
           (typeof claims.nbf !== 'number' ||
             !Number.isSafeInteger(claims.nbf) ||
-            claims.nbf > current())) ||
-        (identity.ownerEmail &&
-          (typeof claims.email !== 'string' ||
-            claims.email.toLowerCase() !==
-              identity.ownerEmail.toLowerCase())) ||
-        (identity.ownerSub && claims.sub !== identity.ownerSub)
+            claims.nbf > current()))
       )
         return false;
+      let role: AccessRole;
+      if (
+        (!identity.ownerEmail ||
+          (typeof claims.email === 'string' &&
+            claims.email.toLowerCase() ===
+              identity.ownerEmail.toLowerCase())) &&
+        (!identity.ownerSub || claims.sub === identity.ownerSub)
+      )
+        role = 'owner';
+      // Access issues service token JWTs with the client ID in common_name
+      // and no user identity.
+      else if (
+        typeof claims.common_name === 'string' &&
+        claims.email === undefined &&
+        (claims.sub === undefined || claims.sub === '') &&
+        identity.viewerServiceTokens?.includes(claims.common_name)
+      )
+        role = 'viewer';
+      else return false;
       const key = await keyFor(issuer, headers.kid);
-      return (
-        !!key &&
+      return key &&
         claims.exp > current() &&
         verify('RSA-SHA256', Buffer.from(`${header}.${body}`), key, sig)
-      );
+        ? role
+        : false;
     } catch {
       // Malformed tokens and unavailable verification keys both fail closed.
       return false;
