@@ -8,7 +8,9 @@ import type {
   ExecScope,
   InboundMessage,
   PlatformAdapter,
+  ScheduleApproval,
   ScheduleApprovalRequest,
+  TextRange,
   ToolContext,
   ToolDefinition,
 } from '@tsugimori/plugin-sdk';
@@ -16,7 +18,7 @@ import type { Store, TaskRecord } from '@tsugimori/storage';
 import type { Tracer } from '@tsugimori/trace';
 
 import { approvalCallbackId } from '@tsugimori/auth';
-import { containsMention } from '@tsugimori/scheduler';
+import { containsMention, scheduleReplyStyle } from '@tsugimori/scheduler';
 import { randomUUID } from 'node:crypto';
 
 import type { HookRunner, Logger } from './hooks.ts';
@@ -63,6 +65,8 @@ type Work = {
   workdir?: string;
 };
 
+type ApprovalAnswer = { approved: boolean; decidedBy: string };
+
 function chatKey({ adapterId, chatId }: ChatRef) {
   return JSON.stringify([adapterId, chatId]);
 }
@@ -72,9 +76,10 @@ export class Tasks {
   readonly #queues = new Map<string, Promise<void>>();
   readonly #running = new Map<string, Work>();
   readonly #work = new Set<Work>();
+  readonly #scheduleApprovalWork = new Set<{ work: Work }>();
   readonly #approvals = new Map<
     string,
-    (result?: { approved: boolean; decidedBy: string }) => void
+    { pre?: TextRange; resolve(result?: ApprovalAnswer): void }
   >();
 
   constructor(deps: TaskDependencies) {
@@ -152,7 +157,7 @@ export class Tasks {
 
   cancelSource(chat: ChatRef, messageId: string) {
     const key = chatKey(chat);
-    for (const work of this.#work) {
+    for (const work of this.#withPendingApprovals()) {
       if (chatKey(work.chat) === key && work.messageIds.has(messageId)) {
         work.abort.abort();
       }
@@ -161,7 +166,7 @@ export class Tasks {
 
   async interrupt(adapters: ReadonlySet<string>, agents: ReadonlySet<string>) {
     const active: Promise<void>[] = [];
-    for (const work of this.#work) {
+    for (const work of this.#withPendingApprovals()) {
       if (
         adapters.has(work.chat.adapterId) ||
         (work.route && agents.has(work.route.agentId))
@@ -174,15 +179,22 @@ export class Tasks {
     for (const id of agents) this.#deps.store.clearAgentSessions(id);
   }
 
+  #withPendingApprovals() {
+    return new Set([
+      ...this.#work,
+      ...[...this.#scheduleApprovalWork].map(({ work }) => work),
+    ]);
+  }
+
   invalidateSession(chat: ChatRef) {
     const running = this.#running.get(chatKey(chat));
     if (running) running.sessionValid = false;
   }
 
-  resolveApproval(
-    result: { approved: boolean; decidedBy: string; id: string } | undefined,
-  ) {
-    if (result) this.#approvals.get(result.id)?.(result);
+  resolveApproval(result: ApprovalAnswer & { id: string }) {
+    const approval = this.#approvals.get(result.id);
+    approval?.resolve(result);
+    return approval?.pre;
   }
 
   async #execute(work: Work) {
@@ -347,7 +359,6 @@ export class Tasks {
         }
       }
       work.acceptsSupplements = false;
-      store.cancelApprovals(id, Date.now());
     }
   }
 
@@ -394,6 +405,12 @@ export class Tasks {
         afterSeq: session?.throughSeq,
         skipSeq: session?.seenAfter,
       });
+      if (definitions.some(({ name }) => name === 'schedule.create'))
+        blocks.unshift({
+          source: 'system',
+          trust: 'trusted',
+          content: scheduleReplyStyle,
+        });
       if (input.scheduled && !input.scheduled.allowTextMentions)
         blocks.push({
           source: 'system',
@@ -435,16 +452,10 @@ export class Tasks {
           task: {
             ...task,
             signal: passSignal,
-            approveSchedule: (schedule) =>
-              this.#requestApproval(
-                work,
-                {
-                  action: 'schedule.' + schedule.operation,
-                  resource: { type: 'project', id: schedule.id },
-                },
-                AbortSignal.any([passSignal, AbortSignal.timeout(120_000)]),
-                schedule,
-              ),
+            approveSchedule: (schedule, cancel) => {
+              passSignal.throwIfAborted();
+              return this.#approveSchedule(work, schedule, cancel);
+            },
           },
           requestApproval,
         },
@@ -509,19 +520,68 @@ export class Tasks {
     work: Work,
     request: ApprovalRequest,
     signal: AbortSignal,
-    schedule?: ScheduleApprovalRequest,
   ) {
+    const approval = await this.#openApproval(work, request, signal);
+    return (
+      approval &&
+      ('approvedBy' in approval ? approval.approvedBy : await approval.decision)
+    );
+  }
+
+  async #approveSchedule(
+    work: Work,
+    schedule: ScheduleApprovalRequest,
+    cancel: AbortSignal,
+  ) {
+    const signal = AbortSignal.any([
+      work.abort.signal,
+      cancel,
+      AbortSignal.timeout(120_000),
+    ]);
+    const request: ApprovalRequest = {
+      action: 'schedule.' + schedule.operation,
+      resource: {
+        type: 'project',
+        id: schedule.operation === 'create' ? schedule.scope : schedule.id,
+      },
+    };
+    if (schedule.operation === 'update')
+      return this.#openApproval(work, request, signal, schedule);
+    const origin = { work };
+    this.#scheduleApprovalWork.add(origin);
+    try {
+      const approval = await this.#openApproval(
+        work,
+        request,
+        signal,
+        schedule,
+      );
+      if (approval && 'decision' in approval) {
+        return {
+          decision: approval.decision.finally(() =>
+            this.#scheduleApprovalWork.delete(origin),
+          ),
+        };
+      }
+      this.#scheduleApprovalWork.delete(origin);
+      return approval;
+    } catch (error) {
+      this.#scheduleApprovalWork.delete(origin);
+      throw error;
+    }
+  }
+
+  async #openApproval(
+    work: Work,
+    request: ApprovalRequest,
+    signal: AbortSignal,
+    schedule?: ScheduleApprovalRequest,
+  ): Promise<ScheduleApproval | undefined> {
     const { auth, store, trace, outbound, runtime } = this.#deps;
     const { adapter, chat, input, id } = work;
     return trace.span('approval.request', { ...chat, taskId: id }, async () => {
       signal.throwIfAborted();
       const owner = auth.owner(chat.adapterId);
-      if (
-        !schedule &&
-        owner &&
-        auth.hasGrant(chat, input.message.userId, request)
-      )
-        return owner;
       if (!owner && !schedule?.approverId) return;
       const approvalChat = schedule
         ? {
@@ -529,37 +589,71 @@ export class Tasks {
             chatId: conversationId(schedule.address),
           }
         : chat;
+      const onceOnly = schedule?.operation === 'update';
+      if (!onceOnly) {
+        const requester = input.message.userId;
+        for (const approver of new Set([schedule?.approverId, owner])) {
+          if (
+            approver &&
+            auth.hasGrant(approvalChat, requester, request, approver)
+          )
+            return { approvedBy: approver };
+        }
+      }
       const approval = auth.createApproval(
         approvalChat,
         id,
         input.message.userId,
         request,
-        { approverId: schedule?.approverId, onceOnly: !!schedule },
+        { approverId: schedule?.approverId, onceOnly },
       );
-      const answer = Promise.withResolvers<
-        { approved: boolean; decidedBy: string } | undefined
-      >();
-      this.#approvals.set(approval.id, answer.resolve);
-      const cancel = () => answer.resolve(undefined);
+      const answer = Promise.withResolvers<ApprovalAnswer | undefined>();
+      let cleaned = false;
+      const cleanup = () => {
+        if (cleaned) return;
+        cleaned = true;
+        signal.removeEventListener('abort', cancel);
+        this.#approvals.delete(approval.id);
+        store.cancelApproval(approval.id, Date.now());
+      };
+      const cancel = () => {
+        cleanup();
+        answer.resolve(undefined);
+      };
       signal.addEventListener('abort', cancel, { once: true });
       try {
         const { locale } = runtime.config;
         const { buttons } = approvalMessages(locale);
-        const text = approvalPrompt({ chat, locale, request, schedule, store });
+        const useButtons = adapter.capabilities.inlineButtons === true;
+        const { text, pre } = approvalPrompt({
+          chat,
+          locale,
+          request,
+          schedule,
+          store,
+          useButtons,
+          requester:
+            input.message.userDisplay ??
+            store.getUserDisplay({ ...chat, userId: input.message.userId }),
+        });
+        const pending = { resolve: answer.resolve, pre };
+        this.#approvals.set(approval.id, pending);
         await outbound.send(
           adapter,
           {
             ...(schedule
               ? { ...schedule.address, text }
               : reply(input.message, text)),
+            approval: true,
             parseTextMentions: false,
-            buttons: adapter.capabilities.inlineButtons
+            entities: pre ? [{ ...pre, type: 'pre' }] : undefined,
+            buttons: useButtons
               ? [
                   {
                     id: approvalCallbackId(approval.id, 'once'),
                     label: buttons.once,
                   },
-                  ...(schedule
+                  ...(onceOnly
                     ? []
                     : [
                         {
@@ -576,18 +670,38 @@ export class Tasks {
           },
           {
             signal,
-            onReceipt: (messageId) =>
-              store.linkApproval(approval.id, messageId),
+            onReceipt: ({ messageId, parts }) => {
+              if (pre && parts) {
+                let start = 0;
+                for (const part of parts) {
+                  const end = start + part.text.length;
+                  if (part.messageId === messageId) {
+                    const from = Math.max(start, pre.offset);
+                    const to = Math.min(end, pre.offset + pre.length);
+                    pending.pre =
+                      to > from
+                        ? { offset: from - start, length: to - from }
+                        : undefined;
+                    break;
+                  }
+                  start = end;
+                }
+              }
+              store.linkApproval(approval.id, messageId);
+            },
           },
         );
-        const result = await answer.promise;
-        return result?.approved && !signal.aborted
-          ? result.decidedBy
-          : undefined;
-      } finally {
-        signal.removeEventListener('abort', cancel);
-        this.#approvals.delete(approval.id);
-        store.cancelApproval(approval.id, Date.now());
+        return {
+          decision: answer.promise.then((result) => {
+            cleanup();
+            return result?.approved && !signal.aborted
+              ? result.decidedBy
+              : undefined;
+          }),
+        };
+      } catch (error) {
+        cleanup();
+        throw error;
       }
     });
   }

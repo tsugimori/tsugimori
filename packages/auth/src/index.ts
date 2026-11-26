@@ -217,8 +217,12 @@ export class Auth {
     if (changed) return { id: approval.id, approved, decision };
   }
 
-  hasGrant(chat: ChatRef, requester: string, request: ApprovalRequest) {
-    const grantedBy = this.owner(chat.adapterId);
+  hasGrant(
+    chat: ChatRef,
+    requester: string,
+    request: ApprovalRequest,
+    grantedBy = this.owner(chat.adapterId),
+  ) {
     if (grantedBy === undefined) return false;
     return this.#store.consumeGrant(
       { ...chat, grantedBy, requester, ...request },

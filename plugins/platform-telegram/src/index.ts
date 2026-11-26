@@ -186,6 +186,7 @@ export class TelegramAdapter implements PlatformAdapter {
     } catch (error) {
       throw new SendFailure({ parts, deliveryUnknown: false }, error);
     }
+    const controls = message.approval ? messages.length - 1 : 0;
     try {
       for (const [index, { text, entities }] of messages.entries()) {
         const sent = record(
@@ -202,7 +203,7 @@ export class TelegramAdapter implements PlatformAdapter {
                   }
                 : undefined,
               reply_markup:
-                index === 0 && message.buttons?.length
+                index === controls && message.buttons?.length
                   ? {
                       inline_keyboard: [
                         message.buttons.map((button) => ({
@@ -230,7 +231,7 @@ export class TelegramAdapter implements PlatformAdapter {
         error,
       );
     }
-    return { messageId: parts[0]!.messageId, parts };
+    return { messageId: parts[controls]!.messageId, parts };
   }
 
   typing(
@@ -275,6 +276,7 @@ export class TelegramAdapter implements PlatformAdapter {
     decisionText,
     messageId,
     notice,
+    pre,
     prompt,
     queryId,
   }: ApprovalFeedback) {
@@ -294,12 +296,17 @@ export class TelegramAdapter implements PlatformAdapter {
               .slice(0, maxMessage - suffix.length)
               .replace(/[\uD800-\uDBFF]$/u, '')
           : '';
+        const length = pre && Math.min(display.length - pre.offset, pre.length);
         await this.#api.call(
           'editMessageText',
           {
             chat_id: chatId,
             message_id: Number(messageId),
             text: display ? display + suffix : notice,
+            entities:
+              pre && length && length > 0
+                ? [{ type: 'pre', offset: pre.offset, length }]
+                : undefined,
             reply_markup: { inline_keyboard: [] },
           },
           signal,

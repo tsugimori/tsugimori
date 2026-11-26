@@ -6,6 +6,7 @@ import type {
   PreviewCloseReason,
   PrincipalRef,
   ResourceRef,
+  TextRange,
 } from '@tsugimori/plugin-sdk';
 
 export interface ChatRecord extends ChatRef {
@@ -128,8 +129,14 @@ export type ScheduleTrigger =
   | { at: number; kind: 'interval'; minutes: number; until?: number };
 
 export type ScheduleAction =
-  | { kind: 'message'; text: string }
+  | { kind: 'message'; mentions?: ReminderMention[]; text: string }
   | { kind: 'agent'; model?: string; prompt: string };
+
+export interface ReminderMention {
+  displayName?: string;
+  ranges: TextRange[];
+  userId: string;
+}
 
 export interface ScheduleAddress {
   chatId: string;

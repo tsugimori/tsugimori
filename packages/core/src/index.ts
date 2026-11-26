@@ -23,7 +23,11 @@ import {
 } from '@tsugimori/config';
 import { ContextAssembler } from '@tsugimori/context';
 import { SendFailure } from '@tsugimori/plugin-sdk';
-import { Scheduler } from '@tsugimori/scheduler';
+import {
+  prepareReminder,
+  reminderEntities,
+  Scheduler,
+} from '@tsugimori/scheduler';
 import { Tracer } from '@tsugimori/trace';
 
 import type { Logger } from './hooks.ts';
@@ -190,7 +194,8 @@ export class Gateway {
     });
     this.#scheduler = new Scheduler({
       store,
-      approve: async (task, request) => task.approveSchedule?.(request),
+      approve: async (task, request, signal) =>
+        task.approveSchedule?.(request, signal),
       canSchedule: (chat, userId) =>
         this.#auth.isOwner({ ...chat, userId }) ||
         this.#auth.isAllowlisted(chat),
@@ -219,6 +224,7 @@ export class Gateway {
       owner: (id) => this.#auth.owner(id),
       settings: () => ({
         ...this.#runtime.config.scheduler,
+        locale: this.#runtime.config.locale,
         timezone: this.#runtime.config.timezone,
       }),
     });
@@ -407,6 +413,7 @@ ${failures}`,
         messageId: event.messageId,
         queryId: event.queryId,
         decision: result?.decision,
+        pre: result?.pre,
       });
       return;
     }
@@ -463,6 +470,7 @@ ${failures}`,
           chatId: event.chatId,
           messageId: event.replyTo,
           decision: result.decision,
+          pre: result.pre,
         });
         return;
       }
@@ -506,18 +514,19 @@ ${failures}`,
     const attrs = { ...chat, scheduleId: id, dueAt: run.dueAt };
     return this.#trace.span('schedule.fire', attrs, async () => {
       await this.#hooks.emit('schedule.fired', { scheduleId: id });
-      const delayNote = delayed
-        ? `[Delayed schedule, originally due ${new Date(run.dueAt).toISOString()}]\n\n`
-        : '';
-      const target: Omit<OutboundMessage, 'text'> = {
-        ...schedule.target,
-        mentions: schedule.mentions,
-      };
       if (action.kind === 'message') {
+        const reminder =
+          action.mentions === undefined
+            ? prepareReminder(action.text, schedule.mentions, (userId) =>
+                store.getUserDisplay({ adapterId, userId }),
+              )
+            : { mentions: action.mentions, text: action.text };
         try {
           await this.#outbound.send(adapter, {
-            ...target,
-            text: delayNote + action.text,
+            ...schedule.target,
+            text: reminder.text,
+            entities: reminderEntities(reminder.mentions),
+            parseTextMentions: false,
           });
           return 'sent';
         } catch (error) {
@@ -531,6 +540,13 @@ ${failures}`,
             : 'delivery-unknown';
         }
       }
+      const delayNote = delayed
+        ? `[Delayed schedule, originally due ${new Date(run.dueAt).toISOString()}]\n\n`
+        : '';
+      const target: Omit<OutboundMessage, 'text'> = {
+        ...schedule.target,
+        mentions: schedule.mentions,
+      };
       const event: ScheduledInboundEvent = {
         type: 'schedule',
         scheduleId: id,
@@ -590,8 +606,13 @@ ${failures}`,
       () => this.#auth.resolveApproval(input),
     );
     if (result)
-      this.#tasks.resolveApproval({ ...result, decidedBy: input.userId });
-    return result;
+      return {
+        ...result,
+        pre: this.#tasks.resolveApproval({
+          ...result,
+          decidedBy: input.userId,
+        }),
+      };
   }
 
   async #approvalFeedback(

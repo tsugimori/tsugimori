@@ -136,3 +136,133 @@ test('one-time group delivery checks native IDs, user links, and usernames indep
   );
   assert.equal(store.listSchedules(chat).length, 1);
 });
+
+test('schedule summaries and short references use the current chat, locale, and permissions', async (t) => {
+  const store = new SqliteStore(':memory:');
+  t.after(() => store.close());
+  const chat = { adapterId: 'fake', chatId: 'room' };
+  const principal = { adapterId: 'fake', userId: '10' };
+  const now = Date.parse('2026-11-26T07:42:00+08:00');
+  store.recordInbound(
+    { ...chat, kind: 'group', title: 'Development' },
+    { ...principal, display: 'Sender' },
+    {
+      ...chat,
+      direction: 'inbound',
+      messageId: 'request',
+      raw: null,
+      replyTo: null,
+      text: 'Schedule this',
+      threadId: null,
+      userId: principal.userId,
+    },
+  );
+  let locale: 'en' | 'zh-TW' = 'zh-TW';
+  const answer = Promise.withResolvers<string | undefined>();
+  let waitForDecision = false;
+  const scheduler = new Scheduler({
+    attachedAdapters: () => ['fake'],
+    approve: async () =>
+      waitForDecision ? { decision: answer.promise } : { approvedBy: '20' },
+    canSchedule: () => true,
+    deliver: async () => 'sent',
+    logError: (event) => assert.fail(event),
+    model: () => 'test',
+    now: () => now,
+    owner: () => '10',
+    settings: () => ({ locale, timezone: 'Asia/Taipei' }),
+    store,
+  });
+  const tools = new Map(scheduler.tools().map((tool) => [tool.name, tool]));
+  const task = { chat, principal, taskId: 'task', signal: t.signal };
+  const run = (name: string, args: unknown, context = task) =>
+    tools.get('schedule.' + name)!.run(args, context);
+  const result = (await run('create', {
+    action: { kind: 'message', text: '[月光](tg://user?id=20)，記得喝水' },
+    trigger: { kind: 'once', at: now + 2 * minute },
+  })) as { ok: boolean; ref: string; status: string; summary: string };
+  const [schedule] = store.listSchedules(chat);
+  assert.ok(schedule);
+  assert.deepEqual(result, {
+    ok: true,
+    summary: '2 分鐘後（07:44）在 Development 提醒 月光：記得喝水',
+    status: 'scheduled',
+    ref: schedule.id.slice(0, 6),
+  });
+  assert.deepEqual(await run('list', {}), {
+    ok: true,
+    summary: `#${result.ref} 今天 07:44 月光 記得喝水`,
+  });
+  await assert.rejects(
+    run(
+      'pause',
+      { id: result.ref },
+      { ...task, principal: { ...principal, userId: '20' } },
+    ),
+    /unavailable/,
+  );
+  await assert.rejects(
+    run(
+      'pause',
+      { id: result.ref },
+      { ...task, chat: { ...chat, chatId: 'room_8' } },
+    ),
+    /unavailable/,
+  );
+  const other = {
+    ...schedule,
+    id: result.ref + 'ab-0000-4000-8000-000000000000',
+  };
+  assert.equal(store.createSchedule({ ...other, chatId: 'room_8' }, 20), true);
+  assert.match(
+    (
+      (await run('pause', {
+        id: '#' + result.ref.toUpperCase(),
+      })) as typeof result
+    ).summary,
+    /^已暫停：/,
+  );
+  assert.equal(store.getSchedule(schedule.id)?.status, 'paused');
+  assert.equal(store.getSchedule(other.id)?.status, 'active');
+  locale = 'en';
+  assert.deepEqual(await run('pause', { id: result.ref, paused: false }), {
+    ...result,
+    summary: 'In 2 min (07:44) in Development, remind 月光: 記得喝水',
+  });
+  assert.equal(
+    store.createSchedule(
+      { ...other, id: result.ref + 'cd-0000-4000-8000-000000000000' },
+      20,
+    ),
+    true,
+  );
+  await assert.rejects(run('cancel', { id: result.ref }), /ambiguous/);
+  assert.equal(store.getSchedule(schedule.id)?.status, 'active');
+  assert.equal(
+    ((await run('cancel', { id: schedule.id })) as typeof result).status,
+    'cancelled',
+  );
+  assert.equal(store.getSchedule(schedule.id)?.status, 'cancelled');
+
+  waitForDecision = true;
+  const pending = (await run('create', {
+    action: { kind: 'message', text: '[月光](tg://user?id=20)，休息一下' },
+    trigger: { kind: 'once', at: now + 3 * minute },
+  })) as typeof result;
+  assert.equal(pending.status, 'pending_approval');
+  const listed = (await run('list', {})) as { summary: string };
+  assert.ok(
+    listed.summary.includes(
+      `#${pending.ref} Today 07:45 月光 休息一下 (Awaiting approval)`,
+    ),
+  );
+  assert.equal(
+    ((await run('cancel', { id: pending.ref })) as typeof result).status,
+    'cancelled',
+  );
+  answer.resolve('20');
+  await answer.promise;
+  assert.ok(
+    store.listSchedules(chat).every(({ id }) => !id.startsWith(pending.ref)),
+  );
+});

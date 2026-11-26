@@ -4,27 +4,31 @@ import type {
   ApprovalRequest,
   ChatRef,
   ScheduleApprovalRequest,
+  TextRange,
 } from '@tsugimori/plugin-sdk';
 import type { Store } from '@tsugimori/storage';
 
-import { userMentionLinks } from '@tsugimori/plugin-sdk';
+import {
+  scheduleCadence,
+  scheduleChatName,
+  scheduleTime,
+} from '@tsugimori/scheduler';
 
 const catalogs = {
   en: {
-    buttons: { once: 'Allow once', always: 'Always', deny: 'Deny' },
+    buttons: { once: 'Allow once', always: 'Always allow', deny: 'Deny' },
     decisions: {
-      once: 'Allowed once.',
-      always: 'Always allowed.',
-      deny: 'Denied.',
+      once: '✅ Allowed once',
+      always: '✅ Always allowed',
+      deny: '❌ Denied',
     },
     unavailable: 'Approval is unavailable.',
-    decision: 'Decision',
     reply: 'Reply directly to this message with “yes”, “always”, or “no”.',
     replyOnce: 'Reply directly to this message with “yes” or “no”.',
     title: 'Approval requested',
-    create: { message: 'Schedule a message', agent: 'Schedule an agent task' },
+    create: { message: 'Schedule a reminder', agent: 'Schedule an agent task' },
     update: {
-      message: 'Update a scheduled message',
+      message: 'Update a reminder',
       agent: 'Update a scheduled agent task',
     },
     actions: {
@@ -33,78 +37,75 @@ const catalogs = {
       'codex.permissions': 'Change Codex permissions',
       'workspace.configure': 'Change chat workspace settings',
     },
-    chat: 'Chat',
-    mentions: 'Mentions',
+    chat: 'Location',
+    recipient: 'Recipient',
+    requester: 'Requested by',
     when: 'When',
-    firstRun: 'First run',
-    repeat: 'Repeat',
     until: 'Until',
-    message: 'Message',
-    agent: 'Agent instructions',
+    content: 'Content',
     model: 'Model',
     path: 'Path',
     globalScope: 'Scope: Global',
-    none: 'None',
-    unnamedChat: 'Unnamed chat',
-    privateChat: 'Private chat',
+    everyone: 'Everyone',
     unknownUser: 'Unknown user',
     reference: 'Ref',
+    reason: 'Reason',
     reasons: {
       agent: 'The agent requested owner approval.',
       crossChat: 'This agent task reads one chat and delivers to another.',
-      delivery: 'The destination or mentions require delivery approval.',
+      delivery: 'Delivery to this destination requires approval.',
+      mentions: 'This will mention specific people.',
       frequency:
         'The schedule can run faster than the configured minimum interval.',
       model: 'The selected model requires owner approval.',
     },
     agentReason: 'Agent’s reason',
-    every: (interval: string) => 'Every ' + interval,
+    separator: ': ',
+    names: ', ',
   },
   'zh-TW': {
     buttons: { once: '允許一次', always: '一律允許', deny: '拒絕' },
     decisions: {
-      once: '已允許一次。',
-      always: '已設為一律允許。',
-      deny: '已拒絕。',
+      once: '✅ 已允許一次',
+      always: '✅ 已設為一律允許',
+      deny: '❌ 已拒絕',
     },
     unavailable: '這項審核已無法處理。',
-    decision: '審核結果',
     reply: '請直接回覆這則訊息，輸入「允許一次」、「一律允許」或「拒絕」。',
     replyOnce: '請直接回覆這則訊息，輸入「允許一次」或「拒絕」。',
-    title: '審核請求',
-    create: { message: '建立排程訊息', agent: '建立排程代理任務' },
-    update: { message: '修改排程訊息', agent: '修改排程代理任務' },
+    title: '需要你同意',
+    create: { message: '排程提醒', agent: '排程代理任務' },
+    update: { message: '修改排程提醒', agent: '修改排程代理任務' },
     actions: {
       'codex.command': '執行 Codex 指令',
       'codex.file_change': '套用 Codex 檔案變更',
       'codex.permissions': '變更 Codex 權限',
       'workspace.configure': '變更聊天室工作區設定',
     },
-    chat: '聊天室',
-    mentions: '提及對象',
+    chat: '位置',
+    recipient: '對象',
+    requester: '發起',
     when: '時間',
-    firstRun: '首次執行',
-    repeat: '重複',
     until: '截止',
-    message: '訊息',
-    agent: '代理任務指示',
+    content: '內容',
     model: '模型',
     path: '路徑',
-    globalScope: '範圍: 全域',
-    none: '無',
-    unnamedChat: '未命名的聊天室',
-    privateChat: '私人對話',
+    globalScope: '範圍：全域',
+    everyone: '大家',
     unknownUser: '未知使用者',
     reference: '識別碼',
+    reason: '原因',
     reasons: {
       agent: '代理程式要求主人審核。',
       crossChat: '這項代理任務會讀取一個聊天室的內容，並傳送到另一個聊天室。',
-      delivery: '傳送目的地或提及對象需要授權。',
+      delivery: '傳送到這個位置需要同意。',
+      mentions: '會提及特定的人',
       frequency: '這項排程的執行間隔可能短於設定的下限。',
       model: '所選模型需要主人授權。',
     },
     agentReason: '代理程式提供的理由',
-    every: (interval: string) => '每 ' + interval,
+    separator: '：',
+    names: '、',
   },
 };
 
@@ -119,48 +120,48 @@ export function approvalDecisionText(
   const messages = approvalMessages(locale);
   if (!decision) return { notice: messages.unavailable };
   const notice = messages.decisions[decision];
-  return { notice, decisionText: field(messages.decision, notice) };
+  return { notice, decisionText: notice };
 }
 
-function field(label: string, value: string) {
-  return label + ': ' + value;
-}
-
-function chatName(
-  store: Store,
-  chat: ChatRef,
-  messages: ReturnType<typeof approvalMessages>,
-  userId?: string,
-) {
-  const record = store.getChat(chat);
-  if (record?.title) return record.title;
-  if (record?.kind !== 'dm') return messages.unnamedChat;
-  const recipient = userId ?? store.deliveryAddress(chat)?.userId;
-  return (
-    (recipient && store.getUserDisplay({ ...chat, userId: recipient })) ||
-    messages.privateChat
-  );
+function withoutPings(text: string) {
+  return text.replace(/@(?=[a-z0-9_])/gi, '＠').replace(/[\r\n]+/g, ' ');
 }
 
 export function approvalPrompt({
   chat,
   locale,
+  now = Date.now(),
   request,
+  requester,
   schedule,
   store,
+  useButtons,
 }: {
   chat: ChatRef;
   locale: Config['locale'];
+  now?: number;
   request: ApprovalRequest;
+  requester?: string;
   schedule?: ScheduleApprovalRequest;
   store: Store;
-}) {
-  const messages = approvalMessages(locale);
+  useButtons: boolean;
+}): { pre?: TextRange; text: string } {
+  const m = approvalMessages(locale);
+  const field = (label: string, value: string) => label + m.separator + value;
+  const withContent = (lines: string[], content?: string) => {
+    const header = lines.join('\n');
+    if (!content) return { text: header };
+    const prefix = header + '\n' + m.content + m.separator.trimEnd() + '\n';
+    return {
+      text: prefix + content,
+      pre: { offset: prefix.length, length: content.length },
+    };
+  };
   if (!schedule) {
     const { action, description, resource } = request;
     const target = resource.type === 'chat' ? resource : chat;
-    const title = Object.hasOwn(messages.actions, action)
-      ? messages.actions[action as keyof typeof messages.actions]
+    const title = Object.hasOwn(m.actions, action)
+      ? m.actions[action as keyof typeof m.actions]
       : action;
     const reference =
       resource.type === 'project'
@@ -168,111 +169,64 @@ export function approvalPrompt({
         : resource.type === 'chat'
           ? target.chatId
           : undefined;
-    return [
-      field(messages.title, title),
-      field(messages.chat, chatName(store, target, messages)),
-      ...(resource.type === 'path'
-        ? [field(messages.path, resource.path)]
-        : []),
-      ...(resource.type === 'global' ? [messages.globalScope] : []),
-      messages.reply,
-      ...(description ? ['', description] : []),
-      ...(reference ? ['', field(messages.reference, reference)] : []),
-    ].join('\n');
-  }
-
-  const { adapterId } = schedule.target;
-  const links = [...userMentionLinks(schedule.content)];
-  const users = new Map(links.map(({ userId, label }) => [userId, label]));
-  for (const id of schedule.mentions) {
-    if (!users.has(id)) users.set(id, messages.unknownUser);
-  }
-  let content = '';
-  let unlinkedText = '';
-  let end = 0;
-  for (const link of links) {
-    const before = schedule.content.slice(end, link.start);
-    content += before + link.label;
-    unlinkedText += before + ' ';
-    end = link.end;
-  }
-  const tail = schedule.content.slice(end);
-  content += tail;
-  unlinkedText += tail;
-  const handles = new Set(
-    [...unlinkedText.matchAll(/@[\p{L}\p{N}_]+/gu)].map(([handle]) => handle),
-  );
-  for (const [userId, label] of users)
-    users.set(userId, store.getUserDisplay({ adapterId, userId }) ?? label);
-  // A preview can be posted in the destination chat. Leave username pings for delivery.
-  const preview = (text: string) => text.replace(/@(?=[\p{L}\p{N}_])/gu, '＠');
-  const recipients = [...users.values(), ...handles].map(preview);
-  const formatter = new Intl.DateTimeFormat(locale, {
-    dateStyle: 'medium',
-    timeStyle: 'medium',
-    hourCycle: 'h23',
-    timeZone: schedule.timezone,
-  });
-  const date = (timestamp: number) =>
-    formatter.format(timestamp) + ' (' + schedule.timezone + ')';
-  const lines = [
-    field(messages.title, messages[schedule.operation][schedule.kind]),
-    field(
-      messages.chat,
-      preview(
-        chatName(store, schedule.target, messages, schedule.targetUserId),
-      ),
-    ),
-    field(
-      messages.mentions,
-      recipients.join(locale === 'zh-TW' ? '、' : ', ') || messages.none,
-    ),
-    field(
-      schedule.repeat ? messages.firstRun : messages.when,
-      date(schedule.dueAt),
-    ),
-  ];
-  if (schedule.repeat) {
-    const repeat = schedule.repeat;
-    lines.push(
-      field(
-        messages.repeat,
-        'cron' in repeat
-          ? 'Cron ' + repeat.cron
-          : messages.every(
-              new Intl.NumberFormat(locale, {
-                style: 'unit',
-                unit: 'minute',
-                unitDisplay: 'long',
-              }).format(repeat.minutes),
-            ),
-      ),
+    return withContent(
+      [
+        field(m.title, title),
+        field(m.chat, withoutPings(scheduleChatName(store, target, locale))),
+        ...(resource.type === 'path'
+          ? [field(m.path, withoutPings(resource.path))]
+          : []),
+        ...(resource.type === 'global' ? [m.globalScope] : []),
+        ...(reference ? [field(m.reference, reference)] : []),
+        ...(useButtons ? [] : [m.reply]),
+      ],
+      description,
     );
   }
+
+  const { recipients, timezone } = schedule;
+  const date = (timestamp: number) =>
+    scheduleTime(timestamp, timezone, locale, now);
+  const names = recipients.map((name) =>
+    name
+      ? withoutPings(name.startsWith('@') ? name : '@' + name)
+      : m.unknownUser,
+  );
+  const lines = [
+    field('🔔 ' + m.title, m[schedule.operation][schedule.kind]),
+    field(m.recipient, names.join(m.names) || m.everyone),
+    field(
+      m.when,
+      date(schedule.dueAt) + scheduleCadence(schedule.repeat, locale),
+    ),
+    field(
+      m.chat,
+      withoutPings(
+        scheduleChatName(store, schedule.target, locale, schedule.targetUserId),
+      ),
+    ),
+    field(m.requester, withoutPings(requester || m.unknownUser)),
+  ];
   if (schedule.until !== undefined)
-    lines.push(field(messages.until, date(schedule.until)));
-  if (schedule.model) lines.push(field(messages.model, schedule.model));
-  for (const reason of schedule.reasons)
-    lines.push('• ' + messages.reasons[reason]);
+    lines.push(field(m.until, date(schedule.until)));
+  if (schedule.model) lines.push(field(m.model, withoutPings(schedule.model)));
+  for (const reason of schedule.reasons) {
+    const mentions =
+      reason === 'delivery' && recipients.length > 0 && !schedule.targetUserId;
+    lines.push(field(m.reason, m.reasons[mentions ? 'mentions' : reason]));
+  }
   if (schedule.agentReason) {
     const reason = schedule.agentReason.replace(
       /\b(?:Telegram\s+)?(?:user\s+)?ID\s*[:：=]?\s*([1-9]\d{0,19})\b/gi,
-      (reference, userId: string) => users.get(userId) ?? reference,
+      (_match, userId: string) =>
+        store.getUserDisplay({
+          adapterId: schedule.target.adapterId,
+          userId,
+        }) || m.unknownUser,
     );
-    lines.push('• ' + field(messages.agentReason, preview(reason)));
+    lines.push(field(m.agentReason, withoutPings(reason)));
   }
-  lines.push(
-    messages.replyOnce,
-    '',
-    messages[schedule.kind] + ':',
-    preview(content),
-    '',
-    field(
-      messages.reference,
-      [schedule.id.slice(0, 8), schedule.target.chatId, ...users.keys()].join(
-        ' · ',
-      ),
-    ),
-  );
-  return lines.join('\n');
+  if (!useButtons)
+    lines.push(schedule.operation === 'update' ? m.replyOnce : m.reply);
+  return withContent(lines, schedule.content);
 }

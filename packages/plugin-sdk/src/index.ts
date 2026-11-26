@@ -71,14 +71,24 @@ export interface ScheduledInboundEvent extends Omit<InboundMessage, 'type'> {
 export type InboundEvent = PlatformInboundEvent | ScheduledInboundEvent;
 
 export interface OutboundMessage {
+  approval?: boolean;
   buttons?: readonly { id: string; label: string }[];
   chatId: string;
+  entities?: readonly TextEntity[];
   mentions?: readonly string[];
   parseTextMentions?: boolean;
   replyTo?: string;
   text: string;
   threadId?: string;
 }
+
+export interface TextRange {
+  length: number;
+  offset: number;
+}
+
+export type TextEntity = TextRange &
+  ({ type: 'pre' } | { type: 'mention'; userId: string });
 
 export interface SendReceipt {
   messageId: string;
@@ -128,6 +138,7 @@ export interface ApprovalFeedback {
   decisionText?: string;
   messageId: string;
   notice: string;
+  pre?: TextRange;
   prompt?: string;
   queryId?: string;
 }
@@ -192,21 +203,26 @@ export interface ScheduleApprovalRequest {
   dueAt: number;
   id: string;
   kind: 'agent' | 'message';
-  mentions: readonly string[];
   model?: string;
   operation: 'create' | 'update';
   reasons: readonly ScheduleApprovalReason[];
+  recipients: readonly string[];
   repeat?: { cron: string } | { minutes: number };
+  scope: string;
   target: ChatRef;
   targetUserId?: string;
   timezone: string;
   until?: number;
 }
 
+export type ScheduleApproval =
+  { approvedBy: string } | { decision: Promise<string | undefined> };
+
 export interface ToolContext {
   approveSchedule?(
     request: ScheduleApprovalRequest,
-  ): Promise<string | undefined>;
+    signal: AbortSignal,
+  ): Promise<ScheduleApproval | undefined>;
   chat: ChatRef;
   principal: PrincipalRef;
   signal: AbortSignal;

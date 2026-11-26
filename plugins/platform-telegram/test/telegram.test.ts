@@ -257,31 +257,102 @@ test(
         '[第二位 😀](tg://user?id=80)!',
       mentions: ['79', '81'],
     });
-    assert.deepEqual(sent, [
-      {
-        chat_id: '-1001',
-        text: first + name + padding,
-        entities: [
-          {
-            type: 'text_link',
-            offset: first.length,
-            length: name.length,
-            url: 'tg://user?id=79',
-          },
-        ],
-      },
-      {
-        chat_id: '-1001',
-        text: '第二位 😀!\n\nuser 81',
-        entities: [
-          { type: 'text_link', offset: 0, length: 6, url: 'tg://user?id=80' },
-          { type: 'text_link', offset: 9, length: 7, url: 'tg://user?id=81' },
-        ],
-      },
-    ]);
+    assert.deepEqual(
+      [...sent],
+      [
+        {
+          chat_id: '-1001',
+          text: first + name + padding,
+          entities: [
+            {
+              type: 'text_link',
+              offset: first.length,
+              length: name.length,
+              url: 'tg://user?id=79',
+            },
+          ],
+        },
+        {
+          chat_id: '-1001',
+          text: '第二位 😀!\n\nuser 81',
+          entities: [
+            { type: 'text_link', offset: 0, length: 6, url: 'tg://user?id=80' },
+            { type: 'text_link', offset: 9, length: 7, url: 'tg://user?id=81' },
+          ],
+        },
+      ],
+    );
     assert.deepEqual(
       receipt.parts?.map(({ text }) => text),
       sent.map(({ text }) => text),
+    );
+    sent.length = 0;
+    const prefix = '提醒😀 ';
+    const reminder = prefix + '月光 👋，記得喝水。\n**原樣送出**';
+    await adapter.send({
+      chatId: '-1001',
+      text: reminder,
+      entities: [
+        { type: 'mention', offset: 5, length: 5, userId: '1234567890123' },
+      ],
+    });
+    const header = '🔔 需要你同意：排程提醒\n內容：\n';
+    await adapter.send({
+      chatId: '-1001',
+      text: header + reminder,
+      entities: [
+        { type: 'pre', offset: header.length, length: reminder.length },
+      ],
+    });
+    assert.deepEqual(
+      [...sent],
+      [
+        {
+          chat_id: '-1001',
+          text: reminder,
+          entities: [
+            {
+              type: 'text_mention',
+              offset: 5,
+              length: 5,
+              user: { id: 1234567890123 },
+            },
+          ],
+        },
+        {
+          chat_id: '-1001',
+          text: header + reminder,
+          entities: [
+            { type: 'pre', offset: header.length, length: reminder.length },
+          ],
+        },
+      ],
+    );
+    sent.length = 0;
+    const long = '🌙'.repeat(2200) + '\n記得喝水';
+    const approval = await adapter.send({
+      approval: true,
+      buttons: [{ id: 'approval:once:example', label: '允許一次' }],
+      chatId: '-1001',
+      entities: [{ type: 'pre', offset: header.length, length: long.length }],
+      text: header + long,
+    });
+    assert.equal(approval.messageId, String(sent.length));
+    assert.ok(sent.length > 1);
+    assert.equal(sent.map(({ text }) => text).join(''), header + long);
+    assert.equal(sent[0]?.reply_markup, undefined);
+    assert.ok(sent.at(-1)?.reply_markup);
+    assert.equal(
+      sent
+        .slice(1)
+        .map(({ text, entities }) => {
+          assert.deepEqual(entities, [
+            { type: 'pre', offset: 0, length: (text as string).length },
+          ]);
+          return text;
+        })
+        .join(''),
+      long,
     );
   },
 );
@@ -325,9 +396,10 @@ test(
       messageId: '50',
       queryId: 'approved',
       decision: 'once',
-      decisionText: '審核結果: 已允許一次。',
-      notice: '已允許一次。',
-      prompt: '審核請求',
+      decisionText: '✅ 已允許一次',
+      notice: '✅ 已允許一次',
+      prompt: '🔔 同意\n你好😀',
+      pre: { offset: 6, length: 4 },
     });
     await delay(30);
     assert.deepEqual(
@@ -349,7 +421,13 @@ test(
       callback_query_id: 'unauthorized',
       text: '這項審核已無法處理。',
     });
-    assert.equal(calls[4]?.[1].text, '審核請求\n\n審核結果: 已允許一次。');
+    assert.deepEqual(calls[4]?.[1], {
+      chat_id: '-1001',
+      message_id: 50,
+      text: '🔔 同意\n你好😀\n\n✅ 已允許一次',
+      entities: [{ type: 'pre', offset: 6, length: 4 }],
+      reply_markup: { inline_keyboard: [] },
+    });
   },
 );
 

@@ -33,7 +33,7 @@ export class Outbound {
     adapter: PlatformAdapter,
     message: OutboundMessage,
     options: {
-      onReceipt?(messageId: string): void;
+      onReceipt?(receipt: SendReceipt): void;
       signal?: AbortSignal;
       taskId?: string;
     } = {},
@@ -78,7 +78,7 @@ export class Outbound {
         throw error;
       }
       record(receipt.parts ?? [{ ...receipt, text: message.text }], taskId);
-      options.onReceipt?.(receipt.messageId);
+      options.onReceipt?.(receipt);
     } catch (error) {
       if (!taskId || (error instanceof SendFailure && !error.deliveryUnknown))
         throw error;
