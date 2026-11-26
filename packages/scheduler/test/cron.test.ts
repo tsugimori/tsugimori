@@ -20,3 +20,18 @@ test('cron finds both folded times and skips nonexistent local times', () => {
   assert.throws(() => new Cron('0 1 2 3', zone), /five fields/);
   assert.throws(() => new Cron('*/0 * * * *', zone), /range/);
 });
+
+test('cron next and latest honor an inclusive start bound', () => {
+  const noon = Date.UTC(2026, 10, 26, 12);
+  const aligned = new Cron('0 * * * *', 'UTC', noon);
+  assert.equal(aligned.next(noon - 1), noon);
+  assert.equal(aligned.latest(noon - 1), undefined);
+  assert.equal(aligned.latest(noon), noon);
+
+  const from = noon + 1;
+  const next = noon + 60 * 60_000;
+  const between = new Cron('0 * * * *', 'UTC', from);
+  assert.equal(between.next(noon - 1), next);
+  assert.equal(between.latest(next - 1), undefined);
+  assert.equal(between.latest(next), next);
+});

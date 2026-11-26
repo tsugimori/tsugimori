@@ -155,7 +155,14 @@ export type InboundRecord = NewMessage & {
 
 export type ScheduleTrigger =
   | { at: number; kind: 'once' }
-  | { expr: string; kind: 'cron'; until?: number }
+  | {
+      expr: string;
+      /** First occurrence selected when the scheduler saved this trigger. */
+      firstDueAt?: number;
+      from?: number;
+      kind: 'cron';
+      until?: number;
+    }
   | { at: number; kind: 'interval'; minutes: number; until?: number };
 
 export type ScheduleAction =
@@ -384,7 +391,10 @@ export interface Store {
   ): {
     count: number;
     failed?: Pick<ScheduleRecord, 'failureReason' | 'id'>;
-    next?: Pick<ScheduleRecord, 'action' | 'id' | 'nextDueAt'>;
+    next?: Pick<
+      ScheduleRecord,
+      'action' | 'id' | 'nextDueAt' | 'timezone' | 'trigger'
+    >;
   };
   setAllowlisted(ref: ChatRef, allowlisted: boolean): void;
   setChatRoute(

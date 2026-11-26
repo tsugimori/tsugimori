@@ -26,14 +26,17 @@ import { Cron, minuteMs } from './cron.ts';
 import {
   emptyScheduleList,
   scheduleRef,
+  scheduleRepeat,
   scheduleReplyStyle,
   scheduleResult,
 } from './messages.ts';
 import { prepareReminder, unlinkedText } from './reminders.ts';
 
 export {
+  recurringScheduleTime,
   scheduleCadence,
   scheduleChatName,
+  scheduleRecordTime,
   scheduleRef,
   scheduleReplyStyle,
   scheduleTime,
@@ -92,7 +95,10 @@ function object(properties: Record<string, unknown>, required: string[]) {
   return { type: 'object', additionalProperties: false, properties, required };
 }
 const at = timestamp;
+const from = timestamp;
 const until = timestamp;
+const triggerGuide =
+  'At, from, and until are Unix milliseconds. For starting at T and repeating every N minutes or hours, use interval with at=T and minutes set to the cadence in minutes. Use cron for calendar patterns such as weekdays or specific hours or days, with from for a delayed start. Never create an agent-action schedule to modify, create, or cancel other schedules later. Express the requested timing in one trigger. ';
 const nativeUserIds = {
   type: 'array',
   maxItems: 20,
@@ -113,7 +119,12 @@ const fields = {
     oneOf: [
       object({ kind: { const: 'once' }, at }, ['kind', 'at']),
       object(
-        { kind: { const: 'cron' }, expr: { ...text, maxLength: 128 }, until },
+        {
+          kind: { const: 'cron' },
+          expr: { ...text, maxLength: 128 },
+          from,
+          until,
+        },
         ['kind', 'expr'],
       ),
       object(
@@ -170,8 +181,8 @@ function occurrence(
   const due =
     trigger.kind === 'cron'
       ? backwards
-        ? new Cron(trigger.expr, timezone).latest(at)
-        : new Cron(trigger.expr, timezone).next(at)
+        ? new Cron(trigger.expr, timezone, trigger.from).latest(at)
+        : new Cron(trigger.expr, timezone, trigger.from).next(at)
       : trigger.at +
         Math.max(
           0,
@@ -241,7 +252,8 @@ export class Scheduler {
       {
         name: 'schedule.create',
         description:
-          'Create a reminder or agent task. Pass recipients in mentions as native platform user IDs (strings). Include the display name in the reminder text or write it as [Name](tg://user?id=ID) to place a mention. at and until are Unix milliseconds. targetChatId is a known chat on this adapter, including its topic suffix if applicable. ' +
+          'Create a reminder or agent task. Pass recipients in mentions as native platform user IDs (strings). Include the display name in the reminder text or write it as [Name](tg://user?id=ID) to place a mention. targetChatId is a known chat on this adapter, including its topic suffix if applicable. ' +
+          triggerGuide +
           scheduleReplyStyle,
         schema: object(fields, ['action', 'trigger']),
         run: (args, task) => this.#save(args as ScheduleInput, task),
@@ -258,6 +270,7 @@ export class Scheduler {
         name: 'schedule.update',
         description:
           'Replace the timing and action of a schedule in this chat using its six-character reference as id. Pass recipients in mentions as native platform user IDs (strings). Edits are checked for delivery and resource approval. ' +
+          triggerGuide +
           scheduleReplyStyle,
         schema: object({ ...fields, id }, ['id', 'action', 'trigger']),
         run: (args, task) => {
@@ -450,6 +463,13 @@ export class Scheduler {
     });
     if (failureReason) throw new Error(failureReason);
     const { action, trigger } = input;
+    if (
+      trigger.kind === 'cron' &&
+      trigger.from !== undefined &&
+      trigger.until !== undefined &&
+      trigger.from >= trigger.until
+    )
+      throw new Error('Cron from must be earlier than until');
     const due = occurrence({ trigger, timezone }, time);
     if (
       due === undefined ||
@@ -495,8 +515,8 @@ export class Scheduler {
       if (
         trigger.kind === 'interval'
           ? trigger.minutes < minInterval
-          : new Cron(trigger.expr, timezone).tooFrequent(
-              due - 1,
+          : new Cron(trigger.expr, timezone, trigger.from).tooFrequent(
+              due,
               minInterval,
               trigger.until,
             )
@@ -521,7 +541,8 @@ export class Scheduler {
         : action.kind === 'agent' && model
           ? { ...action, model }
           : action,
-      trigger,
+      trigger:
+        trigger.kind === 'cron' ? { ...trigger, firstDueAt: due } : trigger,
       timezone,
       mentions,
       deliveryApprovedBy: null,
@@ -562,13 +583,6 @@ export class Scheduler {
             ownerAddress.userId === ownerId
           ? ownerAddress
           : address;
-      const repeat =
-        trigger.kind === 'once'
-          ? undefined
-          : trigger.kind === 'cron'
-            ? { cron: trigger.expr }
-            : { minutes: trigger.minutes };
-      const until = trigger.kind === 'once' ? undefined : trigger.until;
       const agentReason = input.needsApproval ? input.reason : undefined;
       const key = deliveryKey(schedule);
       const sameDelivery =
@@ -611,12 +625,12 @@ export class Scheduler {
         model,
         operation: previous ? 'update' : 'create',
         reasons,
-        repeat,
+        repeat: trigger.kind === 'once' ? undefined : scheduleRepeat(trigger),
         reuseGrant: sameDelivery,
         target: targetScope,
         targetUserId: target.kind === 'dm' ? target.userId : undefined,
         timezone,
-        until,
+        until: trigger.kind === 'once' ? undefined : trigger.until,
       };
       const designated = approverId ?? ownerId;
       const change = {

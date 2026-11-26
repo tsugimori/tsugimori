@@ -10,6 +10,7 @@ import type {
 import type { Store } from '@tsugimori/storage';
 
 import {
+  recurringScheduleTime,
   scheduleCadence,
   scheduleChatName,
   scheduleTime,
@@ -28,8 +29,10 @@ const catalogs = {
       failed: 'The approved action could not be completed.',
       interrupted:
         'The agent turn ended before it could carry out the approved action. Please submit a new request.',
-      scheduleCreated: (ref: string) => `Schedule #${ref} was created.`,
-      scheduleUpdated: (ref: string) => `Schedule #${ref} was updated.`,
+      scheduleCreated: (ref: string, timing?: string) =>
+        `Schedule #${ref} was created.${timing ? ` It runs ${timing}.` : ''}`,
+      scheduleUpdated: (ref: string, timing?: string) =>
+        `Schedule #${ref} was updated.${timing ? ` It runs ${timing}.` : ''}`,
       scheduleDenied: (ref: string) =>
         `Approval for schedule #${ref} was denied.`,
       scheduleExpired: (ref: string) =>
@@ -64,7 +67,6 @@ const catalogs = {
     recipient: 'Recipient',
     requester: 'Requested by',
     when: 'When',
-    until: 'Until',
     content: 'Content',
     model: 'Model',
     path: 'Path',
@@ -103,8 +105,10 @@ const catalogs = {
       completed: '核准的操作已完成。',
       failed: '核准的操作未能完成。',
       interrupted: '代理程式的回合已結束，無法執行核准的操作。請重新提出請求。',
-      scheduleCreated: (ref: string) => `已建立排程 #${ref}。`,
-      scheduleUpdated: (ref: string) => `已更新排程 #${ref}。`,
+      scheduleCreated: (ref: string, timing?: string) =>
+        `已建立排程 #${ref}${timing ? `，${timing}` : ''}。`,
+      scheduleUpdated: (ref: string, timing?: string) =>
+        `已更新排程 #${ref}${timing ? `，${timing}` : ''}。`,
       scheduleDenied: (ref: string) => `排程 #${ref} 的請求已被拒絕。`,
       scheduleExpired: (ref: string) => `排程請求 #${ref} 已逾時，未獲同意。`,
       scheduleFailed: (ref: string) => `排程 #${ref} 已獲核准，但未能儲存。`,
@@ -127,7 +131,6 @@ const catalogs = {
     recipient: '對象',
     requester: '發起',
     when: '時間',
-    until: '截止',
     content: '內容',
     model: '模型',
     path: '路徑',
@@ -235,9 +238,7 @@ export function approvalPrompt({
     );
   }
 
-  const { recipients, timezone } = schedule;
-  const date = (timestamp: number) =>
-    scheduleTime(timestamp, timezone, locale, now);
+  const { dueAt, recipients, repeat, timezone, until } = schedule;
   const title = field('🔔 ' + m.title, m[schedule.operation][schedule.kind]);
   const recipientsPrefix = field(
     schedule.targetUserId ? m.recipient : m.mentions,
@@ -267,7 +268,10 @@ export function approvalPrompt({
     recipientsPrefix + (names || m.noMentions),
     field(
       m.when,
-      date(schedule.dueAt) + scheduleCadence(schedule.repeat, locale),
+      repeat
+        ? recurringScheduleTime({ dueAt, repeat, timezone, until }, locale, now)
+        : scheduleTime(dueAt, timezone, locale, now) +
+            scheduleCadence(undefined, locale),
     ),
     field(
       m.chat,
@@ -277,15 +281,13 @@ export function approvalPrompt({
     ),
     field(m.requester, withoutPings(requester || m.unknownUser)),
   ];
-  if (schedule.until !== undefined)
-    lines.push(field(m.until, date(schedule.until)));
   if (schedule.model) lines.push(field(m.model, withoutPings(schedule.model)));
   const reasons = schedule.reasons
     .filter((reason) => reason !== 'agent')
     .flatMap((reason) => {
       if (reason !== 'delivery' || schedule.targetUserId)
         return [m.reasons[reason]];
-      const reasons = schedule.repeat ? [m.reasons.recurringGroup] : [];
+      const reasons = repeat ? [m.reasons.recurringGroup] : [];
       if (recipients.length) reasons.push(m.reasons.mentions);
       return reasons.length ? reasons : [m.reasons.delivery];
     });

@@ -1,15 +1,22 @@
-import type { ChatRef } from '@tsugimori/plugin-sdk';
-import type { ScheduleRecord, Store } from '@tsugimori/storage';
+import type { ChatRef, ScheduleApprovalRequest } from '@tsugimori/plugin-sdk';
+import type {
+  ScheduleRecord,
+  ScheduleTrigger,
+  Store,
+} from '@tsugimori/storage';
 
+import type { ScheduleLocale } from './cadence.ts';
+
+import { cronCadence, intervalCadence } from './cadence.ts';
 import {
   prepareReminder,
   reminderEntities,
   unlinkedText,
 } from './reminders.ts';
 
-export type ScheduleLocale = 'en' | 'zh-TW';
 export type ScheduleStatus =
   'scheduled' | 'pending_approval' | 'paused' | 'cancelled' | 'done' | 'failed';
+type ScheduleRepeat = NonNullable<ScheduleApprovalRequest['repeat']>;
 
 const messages = {
   en: {
@@ -27,8 +34,9 @@ const messages = {
     today: 'Today',
     tomorrow: 'Tomorrow',
     once: 'once',
-    cron: (expression: string) => 'cron ' + expression,
-    interval: (minutes: number) => `every ${minutes} min`,
+    from: (time: string, cadence: string) => `from ${time}, ${cadence}`,
+    until: (time: string) => `, until ${time}`,
+    next: (time: string) => ` · next due ${time}`,
     relative: (minutes: number, clock: string) =>
       `In ${minutes} min (${clock})`,
     scheduled: (time: string, chat: string, target: string, content: string) =>
@@ -53,8 +61,9 @@ const messages = {
     today: '今天',
     tomorrow: '明天',
     once: '一次',
-    cron: (expression: string) => 'Cron ' + expression,
-    interval: (minutes: number) => `每 ${minutes} 分鐘`,
+    from: (time: string, cadence: string) => `${time} 起，${cadence}`,
+    until: (time: string) => `，到${time} 為止`,
+    next: (time: string) => ` · 下次執行 ${time}`,
     relative: (minutes: number, clock: string) =>
       `${minutes} 分鐘後（${clock}）`,
     scheduled: (time: string, chat: string, target: string, content: string) =>
@@ -124,17 +133,95 @@ export function scheduleTime(
   return `${label} ${clock}`;
 }
 
+function cadence(repeat: ScheduleRepeat, locale: ScheduleLocale) {
+  return 'cron' in repeat
+    ? cronCadence(repeat.cron, locale)
+    : intervalCadence(repeat.minutes, locale);
+}
+
 export function scheduleCadence(
-  repeat: { cron: string } | { minutes: number } | undefined,
+  repeat: ScheduleRepeat | undefined,
   locale: ScheduleLocale,
 ) {
-  const m = messages[locale];
-  const label = !repeat
-    ? m.once
-    : 'cron' in repeat
-      ? m.cron(repeat.cron)
-      : m.interval(repeat.minutes);
+  const label = repeat ? cadence(repeat, locale) : messages[locale].once;
   return locale === 'zh-TW' ? `（${label}）` : ` (${label})`;
+}
+
+export function scheduleRepeat(
+  trigger: Exclude<ScheduleTrigger, { kind: 'once' }>,
+): ScheduleRepeat {
+  return trigger.kind === 'cron'
+    ? { cron: trigger.expr }
+    : { minutes: trigger.minutes };
+}
+
+function dateInSentence(
+  timestamp: number,
+  timezone: string,
+  locale: ScheduleLocale,
+  now: number,
+) {
+  return scheduleTime(timestamp, timezone, locale, now).replace(
+    /^(Today|Tomorrow)\b/,
+    (day) => day.toLowerCase(),
+  );
+}
+
+export function recurringScheduleTime(
+  {
+    dueAt,
+    repeat,
+    timezone,
+    until,
+  }: {
+    dueAt?: number;
+    repeat: ScheduleRepeat;
+    timezone: string;
+    until?: number;
+  },
+  locale: ScheduleLocale,
+  now: number,
+) {
+  const m = messages[locale];
+  const date = (timestamp: number) =>
+    dateInSentence(timestamp, timezone, locale, now);
+  const label = cadence(repeat, locale);
+  return (
+    (dueAt === undefined ? label : m.from(date(dueAt), label)) +
+    (until === undefined ? '' : m.until(date(until)))
+  );
+}
+
+export function scheduleRecordTime(
+  schedule: Pick<ScheduleRecord, 'nextDueAt' | 'timezone' | 'trigger'>,
+  locale: ScheduleLocale,
+  now: number,
+  relative = false,
+) {
+  const { nextDueAt, trigger, timezone } = schedule;
+  if (trigger.kind === 'once')
+    return scheduleTime(
+      nextDueAt ?? trigger.at,
+      timezone,
+      locale,
+      now,
+      relative,
+    );
+  const firstDueAt = trigger.kind === 'cron' ? trigger.firstDueAt : trigger.at;
+  const timing = recurringScheduleTime(
+    {
+      dueAt: firstDueAt,
+      repeat: scheduleRepeat(trigger),
+      timezone,
+      until: trigger.until,
+    },
+    locale,
+    now,
+  );
+  return nextDueAt !== null && nextDueAt !== firstDueAt
+    ? timing +
+        messages[locale].next(dateInSentence(nextDueAt, timezone, locale, now))
+    : timing;
 }
 
 export function scheduleRef(id: string) {
@@ -151,7 +238,7 @@ export function scheduleResult(
 ) {
   const m = messages[locale];
   const ref = scheduleRef(schedule.id);
-  const { action, adapterId, target, trigger } = schedule;
+  const { action, adapterId, target } = schedule;
   const chat = {
     adapterId,
     chatId:
@@ -198,19 +285,11 @@ export function scheduleResult(
         content = compact(remainder.replace(/^[\s:：,，、]+/u, '')) || content;
     }
   }
-  const repeat =
-    trigger.kind === 'interval'
-      ? trigger
-      : trigger.kind === 'cron'
-        ? { cron: trigger.expr }
-        : undefined;
-  const due =
-    schedule.nextDueAt ?? (trigger.kind === 'cron' ? undefined : trigger.at);
+  const listTime = scheduleRecordTime(schedule, locale, now);
   const time =
-    (due === undefined
-      ? ''
-      : scheduleTime(due, schedule.timezone, locale, now, true)) +
-    (repeat ? scheduleCadence(repeat, locale) : '');
+    schedule.trigger.kind === 'once'
+      ? scheduleRecordTime(schedule, locale, now, true)
+      : listTime;
   const description =
     action.kind === 'message'
       ? m.scheduled(time, where, targets, content)
@@ -225,11 +304,6 @@ export function scheduleResult(
   } else if (status !== 'scheduled') {
     summary = m[status] + (locale === 'zh-TW' ? '：' : ': ') + description;
   }
-  const listTime =
-    (due === undefined
-      ? ''
-      : scheduleTime(due, schedule.timezone, locale, now)) +
-    (repeat ? scheduleCadence(repeat, locale) : '');
   const line = [
     `#${ref}`,
     listTime,

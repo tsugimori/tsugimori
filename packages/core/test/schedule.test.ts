@@ -3,6 +3,7 @@ import type { ScheduleRecord } from '@tsugimori/storage';
 import { Auth } from '@tsugimori/auth';
 import { Scheduler } from '@tsugimori/scheduler';
 import { SqliteStore } from '@tsugimori/storage-sqlite';
+import { Ajv } from 'ajv';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
@@ -55,46 +56,167 @@ test('a recurring group approval identifies the delivery and lack of mentions in
   const store = new SqliteStore(':memory:');
   t.after(() => store.close());
   const chat = { adapterId: 'fake', chatId: 'room' };
-  for (const [locale, mentions, reason] of [
-    ['zh-TW', '對象：不提及任何人', '原因：會定時在群組發訊息'],
+  const now = Date.UTC(2026, 10, 26, 11, 45);
+  const dueAt = Date.UTC(2026, 10, 26, 12);
+  const until = Date.UTC(2026, 10, 26, 23);
+  for (const [locale, mentions, reason, interval, cron] of [
+    [
+      'zh-TW',
+      '對象：不提及任何人',
+      '原因：會定時在群組發訊息',
+      '時間：今天 12:00 起，每小時',
+      '時間：今天 12:00 起，每天 12:00–23:00 每小時整點，到今天 23:00 為止',
+    ],
     [
       'en',
       'Mentions: none',
       'Reason: This will send recurring messages to the group.',
+      'When: from today 12:00, hourly',
+      'When: from today 12:00, hourly 12:00–23:00 daily, until today 23:00',
     ],
   ] as const) {
-    const prompt = approvalPrompt({
-      chat,
-      locale,
-      request: {
-        action: 'schedule.create',
-        resource: { type: 'chat', ...chat },
-      },
-      schedule: {
-        address: chat,
-        content: '提醒',
-        deliveryKey: 'delivery',
-        dueAt: 60_000,
-        id: 'schedule',
-        kind: 'message',
-        operation: 'create',
-        reasons: ['delivery'],
-        recipients: [],
-        repeat: { minutes: 30 },
-        reuseGrant: false,
-        target: chat,
-        timezone: 'UTC',
-      },
-      store,
-      useButtons: false,
-    });
-    assert.ok(prompt.text.split('\n').includes(mentions));
-    assert.ok(prompt.text.split('\n').includes(reason));
-    assert.deepEqual(prompt.entities, [
-      { type: 'pre', offset: prompt.text.length - 2, length: 2 },
-    ]);
-    assert.ok(prompt.text.endsWith('\n提醒'));
+    for (const [repeat, expected] of [
+      [{ minutes: 60 }, interval],
+      [{ cron: '0 12-23 * * *' }, cron],
+    ] as const) {
+      const prompt = approvalPrompt({
+        chat,
+        locale,
+        now,
+        request: {
+          action: 'schedule.create',
+          resource: { type: 'chat', ...chat },
+        },
+        schedule: {
+          address: chat,
+          content: '提醒',
+          deliveryKey: 'delivery',
+          dueAt,
+          id: 'schedule',
+          kind: 'message',
+          operation: 'create',
+          reasons: ['delivery'],
+          recipients: [],
+          repeat,
+          reuseGrant: false,
+          target: chat,
+          timezone: 'UTC',
+          until: 'cron' in repeat ? until : undefined,
+        },
+        store,
+        useButtons: false,
+      });
+      const lines = prompt.text.split('\n');
+      assert.ok(lines.includes(mentions));
+      assert.ok(lines.includes(reason));
+      assert.ok(lines.includes(expected), prompt.text);
+      assert.deepEqual(prompt.entities, [
+        { type: 'pre', offset: prompt.text.length - 2, length: 2 },
+      ]);
+      assert.ok(prompt.text.endsWith('\n提醒'));
+    }
   }
+});
+
+test('cron tools accept a delayed start and the scheduler delivers only eligible occurrences', async (t) => {
+  const store = new SqliteStore(':memory:');
+  t.after(() => store.close());
+  const chat = { adapterId: 'fake', chatId: 'owner' };
+  const principal = { adapterId: chat.adapterId, userId: 'owner' };
+  store.recordInbound(
+    { ...chat, kind: 'dm', title: 'Owner' },
+    { ...principal, display: 'Owner' },
+    {
+      ...chat,
+      direction: 'inbound',
+      messageId: 'request',
+      raw: null,
+      replyTo: null,
+      text: 'Schedule this',
+      threadId: null,
+      userId: principal.userId,
+    },
+  );
+  let now = Date.UTC(2026, 10, 26, 10);
+  const noon = Date.UTC(2026, 10, 26, 12);
+  const from = noon + 30 * minute;
+  const firstDueAt = noon + 60 * minute;
+  const until = noon + 120 * minute;
+  const delivered: number[] = [];
+  const scheduler = new Scheduler({
+    attachedAdapters: () => ['fake'],
+    approve: async () => assert.fail('Self-delivery needs no approval'),
+    canSchedule: () => true,
+    deliver: async (_schedule, run) => {
+      delivered.push(run.dueAt);
+      return 'sent';
+    },
+    logError: (event) => assert.fail(event),
+    model: () => 'test',
+    now: () => now,
+    owner: () => principal.userId,
+    settings: () => ({ timezone: 'UTC' }),
+    store,
+  });
+  const task = { chat, principal, taskId: 'task', signal: t.signal };
+  const tools = new Map(scheduler.tools().map((tool) => [tool.name, tool]));
+  const create = tools.get('schedule.create')!;
+  const update = tools.get('schedule.update')!;
+  const list = tools.get('schedule.list')!;
+  const input = {
+    action: { kind: 'message', text: 'Reminder' },
+    trigger: { kind: 'cron', expr: '0 * * * *', from, until },
+  };
+  const ajv = new Ajv();
+  assert.ok(ajv.compile(create.schema)(input));
+  await assert.rejects(
+    create.run({ ...input, trigger: { ...input.trigger, until: from } }, task),
+    /Cron from must be earlier than until/,
+  );
+  const result = await create.run(input, task);
+  const [schedule] = store.listSchedules(chat);
+  assert.ok(schedule);
+  const id = schedule.id.slice(0, 6);
+  assert.deepEqual(result, {
+    ok: true,
+    ref: id,
+    status: 'scheduled',
+    summary:
+      'from today 13:00, hourly at :00, until today 14:00 in Owner, remind Owner: Reminder',
+  });
+  assert.ok(ajv.compile(update.schema)({ ...input, id }));
+  await assert.rejects(
+    update.run(
+      { ...input, id, trigger: { ...input.trigger, from: until + 1 } },
+      task,
+    ),
+    /Cron from must be earlier than until/,
+  );
+  assert.equal(schedule.nextDueAt, firstDueAt);
+  assert.deepEqual(schedule.trigger, { ...input.trigger, firstDueAt });
+
+  scheduler.start();
+  t.after(() => scheduler.stop());
+  for (const time of [noon, from, firstDueAt - 1]) {
+    now = time;
+    scheduler.tick();
+    await scheduler.idle();
+    assert.deepEqual(delivered, []);
+  }
+  now = firstDueAt;
+  scheduler.tick();
+  await scheduler.idle();
+  assert.deepEqual(delivered, [firstDueAt]);
+  assert.equal(store.getSchedule(schedule.id)?.nextDueAt, until);
+  assert.deepEqual(await list.run({}, task), {
+    ok: true,
+    summary: `#${id} from today 13:00, hourly at :00, until today 14:00 · next due today 14:00 Owner Reminder`,
+  });
+  now = until;
+  scheduler.tick();
+  await scheduler.idle();
+  assert.deepEqual(delivered, [firstDueAt, until]);
+  assert.equal(store.getSchedule(schedule.id)?.status, 'done');
 });
 
 test('a restarted scheduler claims only the latest missed fire and preserves its next due time', async (t) => {

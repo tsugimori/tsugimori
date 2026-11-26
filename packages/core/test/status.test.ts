@@ -74,49 +74,45 @@ for (const locale of ['en', 'zh-TW'] as const) {
       endedAt: now - 75_000,
       status: 'ok',
     };
-    const card = statusCard(
-      {
-        runtime: {
-          config: parseConfig(JSON.stringify({ locale })),
-          environmentReports: [failure],
-          attachments: {
-            platforms: [
-              { id: 'telegram:main', state: 'running' },
-              {
-                id: 'telegram:backup',
-                state: 'retrying',
-                attempt: 2,
-                retryAt: now + 30_000,
-              },
-              { id: 'telegram:old', state: 'unavailable', failure },
-            ],
-            agents: [
-              { id: 'codex', state: 'running' },
-              { id: 'claude', state: 'disabled' },
-            ],
-          },
+    const deps: Parameters<typeof statusCard>[0] = {
+      runtime: {
+        config: parseConfig(JSON.stringify({ locale })),
+        environmentReports: [failure],
+        attachments: {
+          platforms: [
+            { id: 'telegram:main', state: 'running' },
+            {
+              id: 'telegram:backup',
+              state: 'retrying',
+              attempt: 2,
+              retryAt: now + 30_000,
+            },
+            { id: 'telegram:old', state: 'unavailable', failure },
+          ],
+          agents: [
+            { id: 'codex', state: 'running' },
+            { id: 'claude', state: 'disabled' },
+          ],
         },
-        startedAt: now - 65_000,
-        sandboxEnabled: true,
-        store,
-        tasks: {
-          status: () => ({
-            agentId: 'codex',
-            model: 'test-model',
-            thinking: 'high',
-            compactAt: 24_000,
-            sessionScope: 'test-session',
-            running: { startedAt: now - 7_000, stage: 'agent' },
-            queued: 1,
-            totalRunning: 2,
-          }),
-        },
-        trace: { latestSessionSpan: () => compacted },
       },
-      chat,
-      target,
-      now,
-    );
+      startedAt: now - 65_000,
+      sandboxEnabled: true,
+      store,
+      tasks: {
+        status: () => ({
+          agentId: 'codex',
+          model: 'test-model',
+          thinking: 'high',
+          compactAt: 24_000,
+          sessionScope: 'test-session',
+          running: { startedAt: now - 7_000, stage: 'agent' },
+          queued: 1,
+          totalRunning: 2,
+        }),
+      },
+      trace: { latestSessionSpan: () => compacted },
+    };
+    const card = statusCard(deps, chat, target, now);
     assert.deepEqual(card.text.split('\n'), snapshots[locale]);
     assert.equal(card.parseTextMentions, false);
     assert.deepEqual(
@@ -125,6 +121,31 @@ for (const locale of ['en', 'zh-TW'] as const) {
         card.text.slice(offset, offset + length),
       ]),
       snapshots[locale].map((line) => ['bold', line.split(' · ')[0]]),
+    );
+
+    const schedule = store.getSchedule('abcdef-next');
+    assert.ok(schedule);
+    const firstDueAt = Date.UTC(2026, 10, 26, 1, 6);
+    assert.ok(
+      store.updateSchedule(
+        {
+          ...schedule,
+          nextDueAt: Date.UTC(2026, 10, 26, 2, 6),
+          timezone: 'UTC',
+          trigger: { kind: 'cron', expr: '6 * * * *', firstDueAt },
+        },
+        schedule,
+        10,
+      ),
+    );
+    const recurring = statusCard(deps, chat, target, now).text;
+    assert.ok(
+      recurring.includes(
+        locale === 'zh-TW'
+          ? '#abcdef · 今天 01:06 起，每小時第 06 分鐘 · 下次執行 今天 02:06'
+          : '#abcdef · from today 01:06, hourly at :06 · next due today 02:06',
+      ),
+      recurring,
     );
   });
 

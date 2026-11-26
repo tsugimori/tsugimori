@@ -2,7 +2,7 @@ export const minuteMs = 60_000;
 const dayMs = 24 * 60 * minuteMs;
 const searchDays = 8 * 366;
 
-function parseField(field: string, min: number, max: number): number[] {
+export function parseField(field: string, min: number, max: number): number[] {
   const values = new Set<number>();
   for (const part of field.split(',')) {
     const match = /^(\*|\d{1,2})(?:-(\d{1,2}))?(?:\/(\d{1,2}))?$/.exec(part);
@@ -38,8 +38,9 @@ export class Cron {
   readonly #weekdays;
   readonly #anyDay;
   readonly #anyWeekday;
+  readonly #from;
 
-  constructor(expression: string, timezone: string) {
+  constructor(expression: string, timezone: string, from = -Infinity) {
     const parts = expression.trim().split(/\s+/);
     if (parts.length !== 5) throw new Error('Cron requires five fields');
     const [minutes, hours, days, months, weekdays] = parts as [
@@ -56,6 +57,7 @@ export class Cron {
     this.#weekdays = parseField(weekdays, 0, 7).map((day) => day % 7);
     this.#anyDay = days.startsWith('*');
     this.#anyWeekday = weekdays.startsWith('*');
+    this.#from = from;
     this.#format = new Intl.DateTimeFormat('en-GB', {
       timeZone: timezone,
       year: 'numeric',
@@ -68,15 +70,19 @@ export class Cron {
   }
 
   next(after: number) {
+    after = Math.max(after, this.#from - 1);
     return this.#find(after, 1, (value) => value > after);
   }
 
   latest(through: number) {
-    return this.#find(through, -1, (value) => value <= through);
+    if (through < this.#from) return undefined;
+    const due = this.#find(through, -1, (value) => value <= through);
+    return due !== undefined && due >= this.#from ? due : undefined;
   }
 
   tooFrequent(from: number, threshold: number, until = Infinity) {
     if (threshold <= 1) return false;
+    from = Math.max(from, this.#from);
     const span = threshold * minuteMs;
     const day = Math.floor(this.#local(from) / dayMs) * dayMs;
     let previous: number | undefined;

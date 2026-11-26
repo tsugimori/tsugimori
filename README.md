@@ -76,7 +76,15 @@ The gateway updates rolling summaries in a background queue as older messages fa
 
 ## Schedules
 
-Agents can create fixed messages or agent tasks using `schedule.create` and manage them with `schedule.list`, `schedule.pause`, `schedule.update`, and `schedule.cancel`. Timing supports Unix-millisecond one-time dates, fixed minute intervals, and five-field cron in the workspace or schedule time zone. Cron handles repeated and skipped local times during daylight saving changes. Schedules stay due while their platform is unavailable. Once it starts, the latest missed occurrence is delivered with a delay note by default. Set the schedule's `missed` option to `skip` to discard missed deliveries.
+Agents can create fixed messages or agent tasks using `schedule.create` and manage them with `schedule.list`, `schedule.pause`, `schedule.update`, and `schedule.cancel`.
+
+- Use `once` with `at` for a single run.
+- Use `interval` with `at` and `minutes` for a fixed cadence beginning at a particular time. For example, use the timestamp for noon as `at` and set `minutes` to `60` to start at noon and run hourly.
+- Use five-field `cron` for calendar patterns such as weekdays at 09:00. To delay the start, set `from` to the earliest eligible time. The first run is the first matching occurrence at or after `from` that is still in the future when the schedule is saved. Cron uses the schedule's time zone, which defaults to the workspace time zone, and handles repeated and skipped local times during daylight saving changes.
+
+Pass `at`, `from`, and optional recurring `until` as Unix milliseconds. If a cron trigger sets both `from` and `until`, `from` must be earlier. An occurrence at `until` is eligible. Use one trigger to express the schedule. An agent task should perform the scheduled work, and schedule management belongs in the requesting conversation.
+
+Approval cards, confirmations, the schedule list, and `/status` show recurring times in words, such as “from today 12:00, hourly”. Schedules stay due while their platform is unavailable. Once it starts, the latest missed occurrence is delivered with a delay note by default. Set the schedule's `missed` option to `skip` to discard missed deliveries.
 
 Schedules are scoped to the conversation they were created in. Self-delivery and untargeted one-time group delivery can proceed immediately. Other delivery and resource-intensive jobs require linked approval. Configure `scheduler.minIntervalMinutes` (default 15), `scheduler.maxActivePerUser` (default 20), and `scheduler.highCostModels` in the workspace.
 

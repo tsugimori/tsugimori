@@ -3,7 +3,7 @@ import type { ScheduleAddress, Store } from '@tsugimori/storage';
 import type { Tracer } from '@tsugimori/trace';
 
 import { defaultCompactAt } from '@tsugimori/plugin-sdk';
-import { scheduleRef } from '@tsugimori/scheduler';
+import { scheduleRecordTime, scheduleRef } from '@tsugimori/scheduler';
 
 import type { AttachmentStatus, Runtime } from './runtime.ts';
 import type { Tasks } from './tasks.ts';
@@ -282,10 +282,19 @@ export function statusCard(
   const schedules = store.scheduleStatus(chat.adapterId, target);
   if (schedules.count || schedules.failed) {
     const { next, failed } = schedules;
-    const details =
-      next?.nextDueAt != null
-        ? `#${scheduleRef(next.id)} · ${m.due} ${date(next.nextDueAt)} · ${shortText(next.action.kind === 'message' ? next.action.text : next.action.prompt, 30)}`
-        : '';
+    let details = '';
+    if (next?.nextDueAt != null) {
+      const time =
+        next.trigger.kind === 'once'
+          ? `${m.due} ${date(next.nextDueAt)}`
+          : scheduleRecordTime(next, locale, now);
+      const { action } = next;
+      const content = shortText(
+        action.kind === 'message' ? action.text : action.prompt,
+        30,
+      );
+      details = `#${scheduleRef(next.id)} · ${time} · ${content}`;
+    }
     line(
       m.schedules,
       m.active(schedules.count),

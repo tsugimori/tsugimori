@@ -885,6 +885,8 @@ export class SqliteStore implements Store {
           id: schedules.id,
           action: schedules.action,
           nextDueAt: schedules.nextDueAt,
+          timezone: schedules.timezone,
+          trigger: schedules.trigger,
         })
         .from(schedules)
         .where(and(filter, isNotNull(schedules.nextDueAt)))

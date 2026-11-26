@@ -33,6 +33,7 @@ import {
   prepareReminder,
   reminderEntities,
   Scheduler,
+  scheduleRecordTime,
 } from '@tsugimori/scheduler';
 import { Tracer } from '@tsugimori/trace';
 
@@ -1039,23 +1040,26 @@ export class Gateway {
     const source = store.getTask(record.taskId);
     if (!source) return;
     if (result.live && (reacted || !source.sourceChatId)) return;
-    const m = approvalMessages(this.#runtime.config.locale).outcomes;
+    const { locale } = this.#runtime.config;
+    const m = approvalMessages(locale).outcomes;
     const continuation = record.continuation;
     let text = approved ? m.interrupted : m.denied;
     if (continuation?.kind === 'schedule') {
       const { schedule, previous } = continuation.change;
       const ref = schedule.id.slice(0, 6);
-      text = !approved
-        ? m.scheduleDenied(ref)
-        : !scheduleApplied
-          ? m.scheduleFailed(ref)
-          : previous
-            ? m.scheduleUpdated(ref)
-            : m.scheduleCreated(ref);
+      if (!approved) text = m.scheduleDenied(ref);
+      else if (!scheduleApplied) text = m.scheduleFailed(ref);
+      else {
+        const timing =
+          schedule.trigger.kind === 'once'
+            ? undefined
+            : scheduleRecordTime(schedule, locale, Date.now());
+        text = previous
+          ? m.scheduleUpdated(ref, timing)
+          : m.scheduleCreated(ref, timing);
+      }
     } else if (result.live) {
-      text =
-        approvalDecisionText(this.#runtime.config.locale, result.decision)
-          .decisionText ?? text;
+      text = approvalDecisionText(locale, result.decision).decisionText ?? text;
     } else if (approved && continuation?.kind === 'tool') {
       text = m.failed;
       try {

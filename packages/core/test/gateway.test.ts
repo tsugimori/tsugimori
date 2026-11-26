@@ -1033,6 +1033,7 @@ for (const mode of ['reload', 'restart'] as const) {
     `a pending schedule stays actionable after gateway ${mode}`,
     { timeout: 5_000 },
     async (t) => {
+      t.mock.method(Date, 'now', () => Date.parse('2026-11-26T11:59:00+08:00'));
       const f = await fixture(
         t,
         async function* (request) {
@@ -1076,6 +1077,11 @@ for (const mode of ['reload', 'restart'] as const) {
       assert.equal(approval.status, 'pending');
       assert.equal(prompt.chatId, 'owner');
       assert.match(prompt.text, /^Mentions: none$/m);
+      assert.ok(
+        prompt.text
+          .split('\n')
+          .includes('When: from today 12:00, every 30 minutes'),
+      );
       assert.match(
         prompt.text,
         /^Reason: This will send recurring messages to the group\.$/m,
@@ -1144,7 +1150,7 @@ for (const mode of ['reload', 'restart'] as const) {
         const outcome = platform.sent.at(-1);
         assert.equal(
           outcome?.text,
-          `Schedule #${schedule.id.slice(0, 6)} was created.`,
+          `Schedule #${schedule.id.slice(0, 6)} was created. It runs from today 12:00, every 30 minutes.`,
         );
         assert.equal(outcome?.chatId, chat.chatId);
         assert.equal(outcome?.threadId, '8');
