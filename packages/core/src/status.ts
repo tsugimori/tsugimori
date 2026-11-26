@@ -20,7 +20,7 @@ const messages = {
     effort: 'Effort',
     fieldSeparator: ' | ',
     default: (value: string) => `${value} (default)`,
-    unset: (agent: string) => `unset (${agent} decides)`,
+    unset: 'default',
     context: 'Context',
     unknown: 'unknown',
     tokens: 'tokens',
@@ -83,7 +83,7 @@ const messages = {
     effort: '推理強度',
     fieldSeparator: '｜',
     default: (value: string) => `${value}（預設）`,
-    unset: (agent: string) => `未指定（由 ${agent} 決定）`,
+    unset: '預設',
     context: '上下文',
     unknown: '未知',
     tokens: 'tokens',
@@ -210,7 +210,6 @@ export function statusCard(
   const { agentId, defaults, thinking } = work;
   if (agentId) {
     const model = work.model === 'default' ? undefined : work.model;
-    const kind = runtime.config.agents.find(({ id }) => id === agentId)?.kind;
     const setting = (
       override: string | undefined,
       fallback: string | undefined,
@@ -218,7 +217,7 @@ export function statusCard(
     ) => {
       if (override) return shortText(override, limit);
       if (fallback) return m.default(shortText(fallback, limit));
-      return m.unset(kind ?? agentId);
+      return m.unset;
     };
     line(
       m.chat,

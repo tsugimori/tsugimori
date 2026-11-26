@@ -196,8 +196,8 @@ for (const locale of ['en', 'zh-TW'] as const) {
     assert.equal(
       chatLine(undefined),
       zh
-        ? '此聊天室 · Agent codex｜模型 未指定（由 codex 決定）｜推理強度 未指定（由 codex 決定）'
-        : 'This chat · Agent codex | Model unset (codex decides) | Effort unset (codex decides)',
+        ? '此聊天室 · Agent codex｜模型 預設｜推理強度 預設'
+        : 'This chat · Agent codex | Model default | Effort default',
     );
     assert.equal(
       chatLine({ model: 'gpt-6.2-sol' }, 'low'),
