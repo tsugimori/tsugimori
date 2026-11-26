@@ -21,7 +21,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import type { LineText } from '../src/api.ts';
 
 import line, { LineAdapter } from '../src/index.ts';
-import { closeServer, listen } from '../src/webhook.ts';
+import { closeServer, listen, listenAddress } from '../src/webhook.ts';
 
 const secret = 'test-secret';
 const token = 'test-access-token';
@@ -513,6 +513,10 @@ test('typing calls the loading endpoint in direct messages only and ignores fail
   assert.equal(loading[0]?.body?.chatId, userId);
 });
 
+test('the default LINE webhook listens on IPv4 loopback port 8789', () => {
+  assert.deepEqual(listenAddress(), { host: '127.0.0.1', port: 8789 });
+});
+
 test('startup rejects public and busy addresses, honors cancellation, and releases its port on stop', async (t) => {
   const { port, server } = await loopback();
   t.after(() => closeServer(server));
@@ -531,7 +535,7 @@ test('startup rejects public and busy addresses, honors cancellation, and releas
   await assert.rejects(
     new LineAdapter(api, 'public', {
       ...options,
-      listen: '0.0.0.0:8788',
+      listen: '0.0.0.0:8789',
     }).start(ctx),
     /loopback|127\.0\.0\.1/,
   );

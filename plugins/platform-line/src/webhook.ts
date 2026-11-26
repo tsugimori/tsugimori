@@ -2,7 +2,7 @@ import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 
 import { createHmac, timingSafeEqual } from 'node:crypto';
 
-export const defaultListen = '127.0.0.1:8788';
+export const defaultListen = '127.0.0.1:8789';
 export const listenPattern = '^(127\\.0\\.0\\.1|\\[::1\\]):([0-9]{1,5})$';
 const bodyLimit = 1024 * 1024;
 

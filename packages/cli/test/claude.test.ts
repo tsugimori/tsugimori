@@ -77,6 +77,7 @@ test(
             });
           } else if (summary) {
             assert.equal(options?.model, summaryModel);
+            assert.equal(options?.effort, 'low');
             assert.deepEqual(options?.tools, []);
             assert.equal(options?.resume, undefined);
             assert.match(String(prompt), /Please remember my preference/);
@@ -163,7 +164,10 @@ test(
         platforms: [{ id: adapterId, kind: 'test' }],
         agents: [{ id: 'claude-sdk', kind: 'claude-sdk', compactAt: 20_000 }],
         defaultAgent: 'claude-sdk',
-        context: { recentMessages: 1, summary: { model: summaryModel } },
+        context: {
+          recentMessages: 1,
+          summary: { minMessages: 1, model: summaryModel },
+        },
         timezone: 'UTC',
         locale: 'zh-TW',
       }),

@@ -50,6 +50,28 @@ test('preserves per-agent compaction thresholds and rejects invalid counts', () 
     assert.throws(() => compactAt(invalid), /\/agents\/0\/compactAt/);
 });
 
+test('defaults and validates conversation summary settings', () => {
+  const settings = (summary: object) =>
+    parseConfig(JSON.stringify({ context: { summary } })).context.summary;
+  const defaults = { minMessages: 20, thinking: 'low', timeoutMs: 120_000 };
+  assert.deepEqual(parseConfig('{}').context.summary, defaults);
+  assert.deepEqual(settings({}), defaults);
+  const overrides = { minMessages: 50, thinking: 'medium', timeoutMs: 180_000 };
+  assert.deepEqual(settings(overrides), overrides);
+  for (const [name, invalid] of [
+    ['minMessages', 0],
+    ['minMessages', 1.5],
+    ['thinking', ''],
+    ['thinking', 1],
+    ['timeoutMs', 0],
+    ['timeoutMs', 2 ** 31],
+  ] as const)
+    assert.throws(
+      () => settings({ [name]: invalid }),
+      new RegExp(`/context/summary/${name}`),
+    );
+});
+
 test('Codex async compaction is a boolean opt-in', () => {
   const options = (value: object) =>
     parseConfig(

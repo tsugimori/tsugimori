@@ -94,7 +94,7 @@
                 "listen": {
                   "type": "string",
                   "pattern": "^(127\\.0\\.0\\.1|\\[::1\\]):([0-9]{1,5})$",
-                  "default": "127.0.0.1:8788"
+                  "default": "127.0.0.1:8789"
                 },
                 "replyTokenTtlMs": {
                   "type": "integer",
@@ -207,13 +207,31 @@
         "summary": {
           "type": "object",
           "additionalProperties": false,
+          "default": {},
           "properties": {
             "enabled": {
               "type": "boolean"
             },
+            "minMessages": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991,
+              "default": 20
+            },
             "model": {
               "type": "string",
               "minLength": 1
+            },
+            "thinking": {
+              "type": "string",
+              "minLength": 1,
+              "default": "low"
+            },
+            "timeoutMs": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 2147483647,
+              "default": 120000
             }
           }
         }

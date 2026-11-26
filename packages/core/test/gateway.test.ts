@@ -1,3 +1,4 @@
+import type { Config } from '@tsugimori/config';
 import type {
   AdapterContext,
   AgentConnector,
@@ -20,7 +21,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test, type TestContext } from 'node:test';
-import { setTimeout as delay } from 'node:timers/promises';
+import { setTimeout as delay, setImmediate } from 'node:timers/promises';
 
 import type { Logger } from '../src/index.ts';
 
@@ -111,7 +112,7 @@ async function fixture(
   enableAgent = true,
   options: {
     compact?: AgentConnector['compact'];
-    context?: { recentMessages: number; summary?: { model: string } };
+    context?: Config['context'];
     describeDefaults?: AgentConnector['describeDefaults'];
     describeQuota?: AgentConnector['describeQuota'];
     describeSession?: AgentConnector['describeSession'];
@@ -200,14 +201,19 @@ async function fixture(
     previews: options.previews,
     log: (entry) => logs.push(entry),
   });
-  const contextSettings = options.context;
+  const { context: contextSettings } = options;
   const locale = options.locale;
   const exec = options.plugins?.some((plugin) => plugin.execBackends?.length)
     ? {}
     : undefined;
   function configure(
     enabled: boolean,
-    options: { compactAt?: number; model?: string; platform?: boolean } = {},
+    options: {
+      compactAt?: number;
+      context?: Config['context'];
+      model?: string;
+      platform?: boolean;
+    } = {},
   ) {
     return writeFile(
       path,
@@ -226,7 +232,7 @@ async function fixture(
             ]
           : [],
         defaultAgent: 'test',
-        context: contextSettings,
+        context: options.context ?? contextSettings,
         exec,
         locale,
       }),
@@ -1736,7 +1742,10 @@ test(
       },
       true,
       {
-        context: { recentMessages: 2, summary: { model: 'economy' } },
+        context: {
+          recentMessages: 2,
+          summary: { minMessages: 3, model: 'economy' },
+        },
         locale: 'zh-TW',
       },
     );
@@ -1777,8 +1786,85 @@ test(
           ({ source }) => source === 'summary' || source === 'message',
         )
         .map(({ content }) => content),
-      ['近期對話摘要', 'Chat reply', 'Follow up'],
+      [
+        '近期對話摘要',
+        'Recent message',
+        'Answer this',
+        'Chat reply',
+        'Follow up',
+      ],
     );
+  },
+);
+
+test(
+  'summary threshold, effort and timeout use defaults and hot reload while each batch stays capped',
+  { timeout: 5000 },
+  async (t) => {
+    const timeout = t.mock.method(AbortSignal, 'timeout');
+    const summaries: AgentRequest[] = [];
+    const prompts: AgentRequest[] = [];
+    const f = await fixture(
+      t,
+      async function* (request) {
+        if (request.purpose === 'summary') {
+          summaries.push(request);
+          yield { type: 'text.final', text: `Summary ${summaries.length}` };
+        } else {
+          prompts.push(request);
+        }
+      },
+      true,
+      { context: { recentMessages: 2 } },
+    );
+    const group = { chatKind: 'group' as const };
+    const history = Array.from({ length: 20 }, (_, i) => `History ${i}`);
+    for (const message of history)
+      await f.platform.emit(inbound(message, message, group));
+    const turn = async (id: string) => {
+      await f.platform.emit(inbound(id, id, { ...group, mentionsBot: true }));
+      await f.gateway.idle();
+      await setImmediate();
+    };
+    const messages = (request: AgentRequest) =>
+      request.context.filter(({ source }) => source === 'message');
+
+    await turn('Below threshold');
+    assert.equal(summaries.length, 0);
+    assert.deepEqual(
+      messages(prompts[0]!).map(({ content }) => content),
+      [...history, 'Below threshold'],
+    );
+
+    await turn('At threshold');
+    await until(t, () => f.store.getSummary(chat)?.text === 'Summary 1');
+    assert.equal(summaries.length, 1);
+    assert.equal(messages(summaries[0]!).length, 20);
+    assert.equal(summaries[0]?.thinking, 'low');
+    assert.ok(timeout.mock.calls.some(({ arguments: [ms] }) => ms === 120_000));
+
+    const reloads = () =>
+      f.logs.filter(({ event }) => event === 'config.reloaded').length;
+    await until(t, () => reloads() > 0);
+    const loaded = reloads();
+    await f.configure(true, {
+      context: {
+        recentMessages: 2,
+        summary: { minMessages: 41, thinking: 'medium', timeoutMs: 45_000 },
+      },
+    });
+    await until(t, () => reloads() > loaded);
+    for (let i = 0; i < 39; i++)
+      await f.platform.emit(inbound(`More ${i}`, `More ${i}`, group));
+    await turn('Below new threshold');
+    assert.equal(summaries.length, 1);
+
+    await turn('At new threshold');
+    await until(t, () => f.store.getSummary(chat)?.text === 'Summary 2');
+    assert.equal(summaries.length, 2);
+    assert.equal(messages(summaries[1]!).length, 40);
+    assert.equal(summaries[1]?.thinking, 'medium');
+    assert.ok(timeout.mock.calls.some(({ arguments: [ms] }) => ms === 45_000));
   },
 );
 

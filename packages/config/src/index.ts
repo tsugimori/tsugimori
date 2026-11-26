@@ -25,7 +25,13 @@ export interface Config {
   agents: (AgentInstanceConfig & { model?: string; thinking?: string })[];
   context: {
     recentMessages: number;
-    summary?: { enabled?: boolean; model?: string };
+    summary?: {
+      enabled?: boolean;
+      minMessages?: number;
+      model?: string;
+      thinking?: string;
+      timeoutMs?: number;
+    };
   };
   defaultAgent?: string;
   exec?: { denyRead?: string[]; kind?: 'local-sandbox' };

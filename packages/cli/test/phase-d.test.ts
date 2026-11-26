@@ -151,6 +151,77 @@ test('doctor reads only enabled checks, reports repairs and leaves the workspace
   assert.deepEqual(await readdir(workspace), ['tsugimori.json']);
 });
 
+test('startup and doctor report configured listener conflicts and their addresses', async (t) => {
+  const config = {
+    web: { listen: '127.0.0.1:8788' },
+    preview: {
+      named: {
+        zoneId: '1'.repeat(32),
+        tunnelId: '11111111-1111-1111-1111-111111111111',
+        domain: 'example.com',
+        accessAud: 'preview-audience',
+      },
+    },
+    platforms: [
+      { id: 'line-main', kind: 'line' },
+      { id: 'line-duplicate', kind: 'line', listen: '127.0.0.1:08789' },
+    ],
+  };
+  const workspace = await fixture(t, config);
+  const registry = new PluginRegistry([
+    {
+      name: 'test-line',
+      adapters: {
+        line() {
+          assert.fail(
+            'Startup should check listener conflicts before attaching adapters',
+          );
+        },
+      },
+    },
+  ]);
+  const deps: SetupDependencies = { runCommand: async () => ok };
+  const logs = t.mock.method(console, 'log', () => {});
+  const reports = () =>
+    JSON.parse(String(logs.mock.calls.at(-1)?.arguments[0])) as {
+      detail: string;
+      id: string;
+      status: string;
+    }[];
+  const named = /127\.0\.0\.1:8788.*web\.listen.*preview\.named\.listen/;
+  const line = /127\.0\.0\.1:8789.*line-main.*line-duplicate/;
+
+  assert.equal(await main(['doctor', workspace, '--json'], registry, deps), 1);
+  const conflicts = reports().filter(({ id }) => id === 'listener-conflict');
+  assert.deepEqual(
+    conflicts.map(({ status }) => status),
+    ['fail', 'fail'],
+  );
+  assert.match(conflicts[0]!.detail, named);
+  assert.match(conflicts[1]!.detail, line);
+  await assert.rejects(main(['start', workspace], registry, deps), (error) => {
+    assert.ok(error instanceof Error);
+    assert.match(error.message, named);
+    assert.match(error.message, line);
+    return true;
+  });
+
+  await writeFile(
+    join(workspace, 'tsugimori.json'),
+    JSON.stringify({
+      ...config,
+      web: { ...config.web, enabled: false },
+      platforms: [
+        config.platforms[0],
+        { ...config.platforms[1], enabled: false },
+        { id: 'line-ipv6', kind: 'line', listen: '[::1]:8789' },
+      ],
+    }),
+  );
+  assert.equal(await main(['doctor', workspace, '--json'], registry, deps), 0);
+  assert.ok(reports().every(({ status }) => status === 'ok'));
+});
+
 test('setup prints package installs, verifies Codex archives and bumps pins only on upgrade', async (t) => {
   const workspace = await fixture(t, {
     exec: {},

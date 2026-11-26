@@ -51,7 +51,7 @@ export class EnvironmentChecks {
       databaseWritable(location),
       commandWorks(ctx, ['git', '--version']),
     ]);
-    return [
+    const checks = [
       {
         id: 'node',
         title: 'Node.js',
@@ -102,6 +102,7 @@ export class EnvironmentChecks {
       status: item.status as CheckItem['status'],
       target: 'core',
     }));
+    return [...checks, ...listenerConflicts(snapshot.config)];
   }
 
   async plugin(
@@ -188,6 +189,43 @@ export class EnvironmentChecks {
     }
     return items;
   }
+}
+
+function listenerConflicts(config: Config): CheckReport[] {
+  const listeners = new Map<string, string[]>();
+  function add(name: string, value: unknown) {
+    if (typeof value !== 'string') return;
+    const split = value.lastIndexOf(':');
+    const port = Number(value.slice(split + 1));
+    if (port < 1 || port > 65535) return;
+    const address = `${value.slice(0, split)}:${port}`;
+    const names = listeners.get(address) ?? [];
+    names.push(name);
+    listeners.set(address, names);
+  }
+
+  if (config.web?.enabled !== false) add('web.listen', config.web?.listen);
+  add('preview.named.listen', config.preview?.named?.listen);
+  for (const entry of config.platforms) {
+    if (entry.kind === 'line' && entry.enabled !== false)
+      add(`LINE ${entry.id} listen`, entry.listen);
+  }
+
+  return [...listeners]
+    .filter(([, names]) => names.length > 1)
+    .map(([address, names]) => {
+      const detail = `${names.join('、')} 皆設定為 ${address}。請在 tsugimori.json 中為每個監聽服務設定不同的位址。`;
+      return {
+        target: 'core',
+        id: 'listener-conflict',
+        title: 'Listener addresses',
+        status: 'fail',
+        detail: `${address} is configured for ${names.join(', ')}. Assign each listener a unique address in tsugimori.json.`,
+        localized: {
+          'zh-TW': { title: '監聽位址', detail, hint: detail },
+        },
+      };
+    });
 }
 
 async function databaseWritable(path: string) {

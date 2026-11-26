@@ -56,7 +56,7 @@ Set the workspace `locale` to `zh-TW` for Traditional Chinese approval prompts a
 
 Create a Messaging API channel, then run `corepack pnpm exec tsugimori add platform line --id main --dir ./ws` or use `/add platform line --id main` from an existing owner chat. Enter the channel secret and long-lived channel access token at the secret prompts, then confirm the bot name. Set the LINE owner ID in `owner` or use the pairing command after the webhook is live.
 
-For manual setup, add a `platforms` entry with `kind: "line"`, a unique `id`, and credentials in `LINE_CHANNEL_SECRET` and `LINE_CHANNEL_ACCESS_TOKEN`. Use `secretEnv` and `tokenEnv` to change the credential names. The `listen` address defaults to `127.0.0.1:8788`. Each additional instance needs its own loopback port.
+For manual setup, add a `platforms` entry with `kind: "line"`, a unique `id`, and credentials in `LINE_CHANNEL_SECRET` and `LINE_CHANNEL_ACCESS_TOKEN`. Use `secretEnv` and `tokenEnv` to change the credential names. The `listen` address defaults to `127.0.0.1:8789`. Startup and `tsugimori doctor` report duplicate addresses among enabled LINE instances, admin web, and named previews.
 
 Use a reverse proxy or a named Cloudflare Tunnel to route a public HTTPS URL to the loopback listener. For instance `main`, route `/line/main/webhook` to that same path on the listener and leave it accessible to LINE without an interactive login. In the LINE Developers Console, set the Webhook URL, verify it, and turn on **Use webhook**. To receive group and room messages, also enable **Allow bot to join group chats**.
 
@@ -86,7 +86,9 @@ Claude starts `/compact` in the background when a completed turn's reported cont
 
 ## Conversation summaries
 
-The gateway updates rolling summaries in a background queue as older messages fall outside `context.recentMessages`. Set `context.summary.model` to a lower-cost model accepted by the conversation's connector, or set `context.summary.enabled` to `false`. Fresh agent sessions receive the stored summary and subsequent messages.
+The gateway updates rolling summaries in the background once `context.summary.minMessages` unsummarized messages fall outside `context.recentMessages`. The threshold defaults to 20, and each run processes up to 40 messages. Fresh agent sessions receive any stored summary and all subsequent raw messages, including messages waiting to be summarized.
+
+Summary runs use `context.summary.thinking` (`low` by default) and `context.summary.timeoutMs` (120,000 ms by default). Set `context.summary.model` to a lower-cost model supported by the connector, or set `context.summary.enabled` to `false`. The gateway reloads summary settings while running.
 
 ## Schedules
 

@@ -27,6 +27,8 @@ interface SummaryDependencies {
   trace: Tracer;
 }
 
+const batchLimit = 40;
+
 export class BackgroundSummaries implements SummaryProvider {
   readonly #deps: SummaryDependencies;
   readonly #pending = new Map<string, SummaryJob>();
@@ -41,16 +43,16 @@ export class BackgroundSummaries implements SummaryProvider {
     if (this.#deps.runtime.config.context.summary?.enabled === false) return;
     const { store } = this.#deps;
     const summary = store.getSummary(store.resolveChat(chat));
-    if (summary?.text) {
-      return {
-        block: {
-          content: summary.text,
-          source: 'summary' as const,
-          trust: 'untrusted' as const,
-        },
-        throughSeq: summary.throughSeq,
-      };
-    }
+    return {
+      block: summary?.text
+        ? {
+            content: summary.text,
+            source: 'summary' as const,
+            trust: 'untrusted' as const,
+          }
+        : undefined,
+      throughSeq: summary?.throughSeq ?? 0,
+    };
   }
 
   enqueue(job: SummaryJob) {
@@ -109,11 +111,22 @@ export class BackgroundSummaries implements SummaryProvider {
     });
     if (recent.length <= recentMessages) return;
     const cutoff = recent[0]!.seq;
-    const current = store.beginSummary(chat);
-    if (current.throughSeq >= cutoff) return;
-    const batch = store.summaryMessages(chat, current.throughSeq, cutoff, 40);
+    const previous = store.getSummary(chat);
+    const afterSeq = previous?.throughSeq ?? 0;
+    if (afterSeq >= cutoff) return;
+    const minMessages = summary?.minMessages ?? 20;
+    const batch = store.summaryMessages(chat, afterSeq, cutoff, batchLimit);
+    if (minMessages > batchLimit) {
+      if (
+        batch.length < batchLimit ||
+        !store.summaryMessages(chat, afterSeq, cutoff, 1, minMessages - 1)
+          .length
+      )
+        return;
+    } else if (batch.length < minMessages) return;
     const last = batch.at(-1);
     if (!last) return;
+    const current = previous ?? store.beginSummary(chat);
     const excerpts = batch.filter(
       ({ direction, text }) => direction !== 'inbound' || text.trim(),
     );
@@ -127,7 +140,7 @@ export class BackgroundSummaries implements SummaryProvider {
         : 'English (en)';
     const signal = AbortSignal.any([
       this.#stop.signal,
-      AbortSignal.timeout(60_000),
+      AbortSignal.timeout(summary?.timeoutMs ?? 120_000),
     ]);
 
     await trace.span('summary.update', { ...chat, taskId }, async () => {
@@ -146,6 +159,7 @@ export class BackgroundSummaries implements SummaryProvider {
           purpose: 'summary',
           sandbox: this.#deps.scope(job.workdir),
           model: summary?.model ?? job.model,
+          thinking: summary?.thinking ?? 'low',
           workdir: job.workdir,
           signal,
           tools: [],

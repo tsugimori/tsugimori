@@ -8,8 +8,10 @@ import { join } from 'node:path';
 export interface SummaryProvider {
   get(
     chat: ChatRef,
-  ): Promise<{ block: ContextBlock; throughSeq: number } | undefined>;
+  ): Promise<{ block?: ContextBlock; throughSeq: number } | undefined>;
 }
+
+const summaryBacklogLimit = 40;
 
 const noSummary: SummaryProvider = {
   get: () => Promise.resolve(undefined),
@@ -94,12 +96,17 @@ export class ContextAssembler {
       blocks.push(...(await this.#loadRules(request)));
       const summary = await this.#summary.get(request);
       if (summary && summary.throughSeq < request.throughSeq) {
-        blocks.push(summary.block);
+        if (summary.block) blocks.push(summary.block);
         afterSummarySeq = summary.throughSeq;
       }
     }
     const messages = this.#store.recentMessages(request, {
-      limit: request.recentMessages,
+      // Unsummarized backlog stays below the summary threshold; cap it so a
+      // stalled summary cannot pull the whole history into a fresh session.
+      limit:
+        afterSummarySeq === undefined
+          ? request.recentMessages
+          : request.recentMessages + summaryBacklogLimit,
       throughSeq: request.throughSeq,
       afterSeq: request.afterSeq,
       afterSummarySeq,

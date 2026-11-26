@@ -371,7 +371,7 @@ export interface Store {
     options: {
       afterSeq?: number;
       afterSummarySeq?: number;
-      limit: number;
+      limit?: number;
       skipSeq?: readonly number[];
       throughSeq: number;
     },
@@ -415,6 +415,7 @@ export interface Store {
     afterSeq: number,
     throughSeq: number,
     limit: number,
+    offset?: number,
   ): MessageRecord[];
   taskTrace(taskId: string): TraceSpan[];
   updateSchedule(

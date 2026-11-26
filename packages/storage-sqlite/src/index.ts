@@ -1286,6 +1286,7 @@ export class SqliteStore implements Store {
     afterSeq: number,
     throughSeq: number,
     limit: number,
+    offset = 0,
   ) {
     return this.#db
       .select()
@@ -1300,6 +1301,7 @@ export class SqliteStore implements Store {
       )
       .orderBy(messages.seq)
       .limit(limit)
+      .offset(offset)
       .all();
   }
 
@@ -1328,7 +1330,11 @@ export class SqliteStore implements Store {
       .from(messages)
       .where(filter)
       .orderBy(desc(messages.seq));
-    return (resumed ? query.all() : query.limit(options.limit).all()).reverse();
+    return (
+      resumed || options.limit === undefined
+        ? query.all()
+        : query.limit(options.limit).all()
+    ).reverse();
   }
 
   getSession(ref: ChatRef, agentId: string, model: string) {

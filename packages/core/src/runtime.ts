@@ -10,7 +10,7 @@ import type {
 import type { Store } from '@tsugimori/storage';
 import type { Tracer } from '@tsugimori/trace';
 
-import { parseConfig } from '@tsugimori/config';
+import { ConfigError, parseConfig } from '@tsugimori/config';
 import { PlatformStartError } from '@tsugimori/plugin-sdk';
 import { resolve } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
@@ -253,10 +253,12 @@ export class Runtime {
     const current = { config, env };
     const reloaded =
       this.#snapshot && !isDeepStrictEqual(current, this.#snapshot);
-    const reports = [
-      ...(await measure('core', () => checks.core(current))),
+    const reports = await measure('core', () => checks.core(current));
+    const conflicts = reports.filter(({ id }) => id === 'listener-conflict');
+    if (conflicts.length) throw new ConfigError(failureText(conflicts));
+    reports.push(
       ...(await measure('features', () => checks.features(current, registry))),
-    ];
+    );
     const check = async (
       category: 'agent' | 'platform',
       entry: PluginInstanceConfig,
