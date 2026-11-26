@@ -1,11 +1,17 @@
-import type { AgentIO, AgentRequest } from '@tsugimori/plugin-sdk';
+import type {
+  AgentIO,
+  AgentRequest,
+  CheckContext,
+} from '@tsugimori/plugin-sdk';
 
+import { nativeCompactionLimit } from '@tsugimori/plugin-sdk';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { test } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 
 import { CodexAgent } from '../src/index.ts';
+import { codexChecks } from '../src/setup.ts';
 
 const fakeServer = String.raw`
 import assert from 'node:assert/strict';
@@ -24,10 +30,19 @@ for await (const line of createInterface({ input: process.stdin })) {
     answer({});
   } else if (method === 'initialized') {
     initialized = true;
+  } else if (method === 'config/read') {
+    answer({ config: {} });
+  } else if (method === 'model/list') {
+    answer({ data: [{ model: 'fake-model', isDefault: true }] });
   } else if (method === 'thread/start' || method === 'thread/resume') {
     assert.ok(initialized);
     assert.equal(params.cwd, '/tmp/work');
-    assert.equal(params.config.model_auto_compact_token_limit, Number(process.env.TEST_CODEX_COMPACT_AT ?? 250000));
+    assert.equal(params.config.model_auto_compact_token_limit, Number(process.env.TEST_CODEX_NATIVE_LIMIT ?? 400000));
+    if (process.env.TEST_CODEX_TIMING) {
+      const expected = JSON.parse(process.env.TEST_CODEX_TIMING);
+      assert.deepEqual(params.config.features, expected.features);
+      assert.equal(params.config.model_post_turn_compact_threshold_percent, expected.postTurn);
+    }
     const scoped = Array.isArray(params.environments);
     if (scoped) {
       assert.deepEqual(params.runtimeWorkspaceRoots, ['/tmp/work']);
@@ -72,7 +87,7 @@ for await (const line of createInterface({ input: process.stdin })) {
       type: 'workspaceWrite', writableRoots: ['/tmp/work'], networkAccess: false,
       excludeTmpdirEnvVar: true, excludeSlashTmp: true,
     });
-    assert.equal(params.model, 'fake-model');
+    assert.equal(params.model, process.env.TEST_CODEX_DEFAULT_MODEL ? undefined : 'fake-model');
     assert.equal(params.effort, 'low');
     const blocks = params.input[0].text.split('\n').map((line) => JSON.parse(line));
     assert.deepEqual(blocks.map(({ source }) => source), thread.resumed ? ['message'] : ['rule', 'message']);
@@ -82,10 +97,18 @@ for await (const line of createInterface({ input: process.stdin })) {
       method, params: { threadId, turnId, ...parameters },
     });
     const item = { type: 'agentMessage', id: 'reply-' + turnId, text: 'pong', phase: 'final_answer' };
+    const compact = (totalTokens) => {
+      const item = { type: 'contextCompaction', id: 'compact-' + turnId };
+      notify('thread/tokenUsage/updated', { tokenUsage: { last: { totalTokens, inputTokens: totalTokens - 100, outputTokens: 100 } } });
+      notify('item/started', { item, startedAtMs: 100 });
+      notify('thread/tokenUsage/updated', { tokenUsage: { last: { totalTokens: 100, inputTokens: 0, outputTokens: 0 } } });
+      notify('item/completed', { item, completedAtMs: 110 });
+    };
     const finish = () => {
       notify('item/agentMessage/delta', { delta: 'po', itemId: item.id });
       notify('item/agentMessage/delta', { delta: 'ng', itemId: item.id });
       notify('item/completed', { item });
+      if (input === 'post compact') compact(260000);
       notify('thread/tokenUsage/updated', { tokenUsage: { last: { inputTokens: 7, outputTokens: 2 } } });
       notify('turn/completed', { turn: { id: turnId, status: 'completed', items: [item] } });
     };
@@ -98,13 +121,9 @@ for await (const line of createInterface({ input: process.stdin })) {
       setTimeout(() => answer({ turn: { id: turnId, status: 'inProgress' } }), 30);
       continue;
     }
-    if (input === 'auto compact') {
-      const item = { type: 'contextCompaction', id: 'compact-' + turnId };
-      notify('thread/tokenUsage/updated', { tokenUsage: { last: { totalTokens: 800, inputTokens: 700, outputTokens: 100 } } });
-      notify('item/started', { item, startedAtMs: 100 });
-      notify('thread/tokenUsage/updated', { tokenUsage: { last: { totalTokens: 100, inputTokens: 0, outputTokens: 0 } } });
-      notify('item/completed', { item, completedAtMs: 110 });
-    }
+    if (input === 'auto compact') compact(800);
+    if (input === 'async compact') compact(260000);
+    if (input === 'native compact') compact(405000);
     if (input === 'scheduled tools') {
       answer({ turn: { id: turnId, status: 'inProgress' } });
       approvals.set('dynamic-1', (result) => {
@@ -158,6 +177,7 @@ for await (const line of createInterface({ input: process.stdin })) {
 `;
 
 const emptySupplements = async function* () {};
+const noInspection = () => Promise.resolve(undefined);
 const io: AgentIO = {
   requestApproval: () => Promise.resolve(false),
   supplements: emptySupplements(),
@@ -194,13 +214,14 @@ test(
   async (t) => {
     const agent = new CodexAgent(
       {
+        inspect: noInspection,
         spawn(_command, _args, options) {
           return spawn(
             process.execPath,
             ['--input-type=module', '--eval', fakeServer],
             {
               ...options,
-              env: { ...options.env, TEST_CODEX_COMPACT_AT: '150000' },
+              env: { ...options.env, TEST_CODEX_NATIVE_LIMIT: '300000' },
             },
           );
         },
@@ -216,7 +237,7 @@ test(
       [
         {
           type: 'compaction',
-          trigger: 'auto',
+          trigger: 'native',
           tokensBefore: 800,
           tokensAfter: 100,
           durationMs: 10,
@@ -237,12 +258,178 @@ test(
   },
 );
 
+test('derives the native safety limit and caps it at the model context window', () => {
+  assert.equal(nativeCompactionLimit(1), 150_001);
+  assert.equal(nativeCompactionLimit(250_000), 400_000);
+  assert.equal(nativeCompactionLimit(300_001), 480_002);
+  assert.equal(nativeCompactionLimit(250_000, 200_000), 200_000);
+});
+
+const compactionCases = [
+  {
+    mode: 'post-turn',
+    available: true,
+    post: true,
+    compactAt: 1,
+    limit: 150_001,
+    timing: { features: { async_compaction: false }, postTurn: 1 },
+  },
+  {
+    mode: 'async',
+    enabled: true,
+    available: true,
+    post: true,
+    compactAt: 250_000,
+    limit: 400_000,
+    timing: {
+      features: {
+        async_compaction: {
+          enabled: true,
+          model_async_compact_threshold_percent: 50,
+        },
+        async_compaction_root_only: true,
+      },
+      postTurn: 0,
+    },
+  },
+  {
+    mode: 'post-turn',
+    enabled: true,
+    post: true,
+    defaultModel: true,
+    compactAt: 800_000,
+    limit: 500_000,
+    timing: { postTurn: 100 },
+  },
+  {
+    mode: 'unsupported',
+    enabled: true,
+    removed: true,
+    compactAt: 250_000,
+    limit: 400_000,
+    timing: {},
+  },
+] as const;
+
+for (const scenario of compactionCases) {
+  const { mode, limit, timing, compactAt } = scenario;
+  const enabled = 'enabled' in scenario && scenario.enabled;
+  const defaultModel = 'defaultModel' in scenario && scenario.defaultModel;
+  const inspect = async ([command]: string[]) => {
+    if (command === 'features') {
+      if ('available' in scenario)
+        return 'async_compaction under development false\nasync_compaction_root_only under development false';
+      return 'removed' in scenario ? 'async_compaction removed false' : '';
+    }
+    if (command === 'app-server') return 'post' in scenario ? '{}' : undefined;
+    if (command === 'debug')
+      return JSON.stringify({
+        models: [{ slug: 'fake-model', context_window: 500_000 }],
+      });
+    throw new Error(`Unexpected Codex inspection command ${command}`);
+  };
+
+  test(
+    `selects Codex ${mode} timing at compactAt ${compactAt}`,
+    { timeout: 5_000 },
+    async (t) => {
+      const agent = new CodexAgent(
+        {
+          inspect,
+          spawn(_command, _args, options) {
+            return spawn(
+              process.execPath,
+              ['--input-type=module', '--eval', fakeServer],
+              {
+                ...options,
+                env: {
+                  ...options.env,
+                  TEST_CODEX_DEFAULT_MODEL: defaultModel ? '1' : undefined,
+                  TEST_CODEX_NATIVE_LIMIT: String(limit),
+                  TEST_CODEX_TIMING: JSON.stringify(timing),
+                },
+              },
+            );
+          },
+        },
+        'codex',
+        { asyncCompaction: enabled, compactAt },
+      );
+      t.after(() => agent.stop());
+      const prompt =
+        mode === 'async'
+          ? 'async compact'
+          : mode === 'post-turn'
+            ? 'post compact'
+            : 'native compact';
+      const input = request(prompt);
+      const events = await collect(
+        agent.run(
+          { ...input, model: defaultModel ? 'default' : input.model },
+          io,
+        ),
+      );
+      assert.deepEqual(
+        events.flatMap((event) =>
+          event.type === 'compaction' ? [event.trigger] : [],
+        ),
+        [mode === 'unsupported' ? 'native' : mode],
+      );
+      if (mode === 'async') {
+        const events = await collect(agent.run(request('native compact'), io));
+        assert.ok(
+          events.some(
+            (event) =>
+              event.type === 'compaction' && event.trigger === 'native',
+          ),
+        );
+      }
+
+      const ctx: CheckContext = {
+        arch: process.arch,
+        platform: process.platform,
+        workspace: '/tmp/work',
+        entry: {
+          id: 'codex',
+          kind: 'codex',
+          options: { asyncCompaction: enabled },
+        },
+        credential: () => undefined,
+        fetch,
+        async runCommand([, command, ...args]) {
+          const stdout =
+            command === '--version'
+              ? 'codex-cli 0.170.0'
+              : command === 'login'
+                ? ''
+                : await inspect([command!, ...args]);
+          return {
+            exitCode: stdout === undefined ? 1 : 0,
+            stderr: '',
+            stdout: stdout ?? '',
+          };
+        },
+      };
+      const report = (await codexChecks(ctx)).find(
+        ({ id }) => id === 'codex-compaction',
+      );
+      assert.equal(report?.status, mode === 'unsupported' ? 'warn' : 'ok');
+      assert.match(
+        report?.detail ?? '',
+        new RegExp(mode === 'unsupported' ? 'does not support' : mode, 'i'),
+      );
+      assert.match(report?.localized?.['zh-TW']?.detail ?? '', /壓縮/);
+    },
+  );
+}
+
 test(
   'maps Codex method-not-found to unsupported compaction',
   { timeout: 5_000 },
   async (t) => {
     const agent = new CodexAgent(
       {
+        inspect: noInspection,
         spawn(_command, _args, options) {
           return spawn(
             process.execPath,
@@ -271,6 +458,7 @@ test(
     let spawns = 0;
     const agent = new CodexAgent(
       {
+        inspect: noInspection,
         spawn(command, args, options) {
           spawns++;
           assert.equal(command, 'fake-codex');
@@ -348,6 +536,7 @@ test(
     const interrupted = Promise.withResolvers<void>();
     const agent = new CodexAgent(
       {
+        inspect: noInspection,
         spawn(_command, _args, options) {
           spawns++;
           const child = spawn(
@@ -398,6 +587,7 @@ test(
   async (t) => {
     const agent = new CodexAgent(
       {
+        inspect: noInspection,
         spawn(_command, _args, options) {
           return spawn(
             process.execPath,

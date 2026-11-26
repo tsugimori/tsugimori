@@ -13,7 +13,11 @@ import type {
   ContextBlock,
 } from '@tsugimori/plugin-sdk';
 
-import { defaultCompactAt, definePlugin } from '@tsugimori/plugin-sdk';
+import {
+  defaultCompactAt,
+  definePlugin,
+  nativeCompactionLimit,
+} from '@tsugimori/plugin-sdk';
 import { realpath } from 'node:fs/promises';
 
 import {
@@ -35,6 +39,11 @@ type Query = (args: Parameters<typeof query>[0]) => AsyncIterable<SDKMessage>;
 
 interface ClaudeDependencies {
   query?: Query;
+}
+
+interface SessionSlot {
+  ready: Promise<void>;
+  release(): void;
 }
 
 const effortLevels = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
@@ -63,6 +72,10 @@ export class ClaudeAgent implements AgentConnector {
   readonly #home?: string;
   readonly #token?: string;
   readonly #active = new Set<AbortController>();
+  readonly #lifecycle = new AbortController();
+  readonly #sessionTails = new Map<string, Promise<void>>();
+  readonly #compactions = new Map<string, Promise<AgentCompactResult>>();
+  readonly #contextWindows = new Map<string, number>();
 
   constructor(
     { query }: ClaudeDependencies,
@@ -78,12 +91,48 @@ export class ClaudeAgent implements AgentConnector {
     this.#token = options?.token;
   }
 
-  stop() {
+  async stop() {
+    this.#lifecycle.abort();
     for (const controller of this.#active) controller.abort();
-    return Promise.resolve();
+    await Promise.allSettled(this.#compactions.values());
   }
 
-  async compact(request: AgentCompactRequest): Promise<AgentCompactResult> {
+  #reserveSession(sessionId: string): SessionSlot {
+    const ready = this.#sessionTails.get(sessionId) ?? Promise.resolve();
+    const released = Promise.withResolvers<void>();
+    const tail = ready.then(() => released.promise);
+    this.#sessionTails.set(sessionId, tail);
+    void tail.then(() => {
+      if (this.#sessionTails.get(sessionId) === tail)
+        this.#sessionTails.delete(sessionId);
+    });
+    return { ready, release: released.resolve };
+  }
+
+  #startCompaction(request: AgentCompactRequest, slot: SessionSlot) {
+    const compacting = slot.ready
+      .then(() => this.#compact(request))
+      .finally(() => {
+        this.#compactions.delete(request.sessionId);
+        slot.release();
+      });
+    this.#compactions.set(request.sessionId, compacting);
+    return compacting;
+  }
+
+  compact(request: AgentCompactRequest): Promise<AgentCompactResult> {
+    const active = this.#compactions.get(request.sessionId);
+    if (active)
+      return active.then((result) =>
+        result.status === 'compacted' ? { ...result, shared: true } : result,
+      );
+    return this.#startCompaction(
+      request,
+      this.#reserveSession(request.sessionId),
+    );
+  }
+
+  async #compact(request: AgentCompactRequest): Promise<AgentCompactResult> {
     let compacted: AgentCompactResult = { status: 'skipped' };
     const input: AgentRequest = {
       ...request,
@@ -117,10 +166,14 @@ export class ClaudeAgent implements AgentConnector {
   }
 
   async *#session(request: AgentRequest, io?: AgentIO, command?: '/compact') {
-    request.signal.throwIfAborted();
+    const requestSignal = AbortSignal.any([
+      request.signal,
+      this.#lifecycle.signal,
+    ]);
+    requestSignal.throwIfAborted();
     const abortController = new AbortController();
-    const abort = () => abortController.abort(request.signal.reason);
-    request.signal.addEventListener('abort', abort, { once: true });
+    const abort = () => abortController.abort(requestSignal.reason);
+    requestSignal.addEventListener('abort', abort, { once: true });
     this.#active.add(abortController);
     const signal = abortController.signal;
     try {
@@ -175,7 +228,12 @@ export class ClaudeAgent implements AgentConnector {
           [apiKeyName]: this.#apiKey,
           [oauthTokenName]: this.#token,
           CLAUDE_AGENT_SDK_CLIENT_APP: 'tsugimori/0.0.0',
-          CLAUDE_CODE_AUTO_COMPACT_WINDOW: String(this.#compactAt),
+          CLAUDE_CODE_AUTO_COMPACT_WINDOW: String(
+            nativeCompactionLimit(
+              this.#compactAt,
+              this.#contextWindows.get(request.model),
+            ),
+          ),
         },
         permissionMode: 'default',
         canUseTool: io
@@ -248,22 +306,83 @@ export class ClaudeAgent implements AgentConnector {
       signal.throwIfAborted();
     } finally {
       abortController.abort();
-      request.signal.removeEventListener('abort', abort);
+      requestSignal.removeEventListener('abort', abort);
       this.#active.delete(abortController);
     }
   }
 
   async *run(request: AgentRequest, io: AgentIO): AsyncIterable<AgentEvent> {
+    let slot = request.resumeSessionId
+      ? this.#reserveSession(request.resumeSessionId)
+      : undefined;
+    try {
+      await slot?.ready;
+      yield* this.#runTurn(request, io, (sessionId, tokensBefore) => {
+        if (!slot) slot = this.#reserveSession(sessionId);
+        if (tokensBefore === undefined || this.#compactions.has(sessionId))
+          return;
+        const startedAt = performance.now();
+        const compaction = this.#startCompaction(
+          {
+            sessionId,
+            model: request.model,
+            sandbox: request.sandbox,
+            workdir: request.workdir,
+            signal: AbortSignal.timeout(120_000),
+          },
+          slot,
+        );
+        slot = undefined;
+        const report = (result?: AgentCompactResult) => {
+          const compacted = result?.status === 'compacted' ? result : undefined;
+          io.reportCompaction?.({
+            type: 'compaction',
+            trigger: 'post-turn',
+            status: compacted ? 'ok' : 'error',
+            tokensBefore: compacted?.tokensBefore ?? tokensBefore,
+            tokensAfter: compacted?.tokensAfter,
+            durationMs: compacted?.durationMs ?? performance.now() - startedAt,
+          });
+        };
+        void compaction.then(report, () => report());
+      });
+    } finally {
+      slot?.release();
+    }
+  }
+
+  async *#runTurn(
+    request: AgentRequest,
+    io: AgentIO,
+    session: (sessionId: string, tokensBefore?: number) => void,
+  ): AsyncIterable<AgentEvent> {
     let sessionId: string | undefined;
     let lastText = '';
+    let model: string | undefined;
+    let lastContext: number | undefined;
+    let streamedContext: number | undefined;
+    let sawNativeCompaction = false;
+    let result:
+      Extract<SDKMessage, { subtype: 'success'; type: 'result' }> | undefined;
     const tools = new Map<string, string>();
     for await (const event of this.#session(request, io)) {
       if (event.session_id && sessionId !== event.session_id) {
         sessionId = event.session_id;
+        session(sessionId);
         yield { type: 'sessionId', sessionId };
       }
       if (event.type === 'stream_event' && event.parent_tool_use_id === null) {
         const { event: part } = event;
+        if (part.type === 'message_start') {
+          model = part.message.model;
+          streamedContext = contextTokens(part.message.usage, false);
+          lastContext = contextTokens(part.message.usage);
+        } else if (
+          part.type === 'message_delta' &&
+          streamedContext !== undefined
+        ) {
+          lastContext = streamedContext + part.usage.output_tokens;
+        }
         if (
           part.type === 'content_block_delta' &&
           part.delta.type === 'text_delta'
@@ -280,6 +399,13 @@ export class ClaudeAgent implements AgentConnector {
       } else if (event.type === 'assistant') {
         if (event.error)
           throw new Error(`Claude assistant failed (${event.error})`);
+        if (
+          event.parent_tool_use_id === null &&
+          streamedContext === undefined
+        ) {
+          model = event.message.model ?? model;
+          lastContext = contextTokens(event.message.usage) ?? lastContext;
+        }
         const text: string[] = [];
         for (const block of event.message.content) {
           if (block.type === 'text') text.push(block.text);
@@ -311,29 +437,80 @@ export class ClaudeAgent implements AgentConnector {
             status: block.is_error ? 'error' : 'ok',
           };
         }
+      } else if (event.type === 'system' && event.subtype === 'init') {
+        model = event.model;
       } else if (
         event.type === 'system' &&
         event.subtype === 'compact_boundary'
       ) {
+        sawNativeCompaction = true;
+        streamedContext = undefined;
+        lastContext = event.compact_metadata.post_tokens;
         yield {
           type: 'compaction',
-          trigger: event.compact_metadata.trigger,
+          trigger:
+            event.compact_metadata.trigger === 'auto' ? 'native' : 'manual',
           ...compactionDetails(event),
         };
       } else if (event.type === 'result') {
-        yield {
-          type: 'usage',
-          inputTokens: event.usage.input_tokens,
-          outputTokens: event.usage.output_tokens,
-        };
         assertSuccess(event);
-        const text = event.result || lastText;
-        if (text) yield { type: 'text.final', text };
-        return;
+        result = event;
+        break;
       }
     }
-    throw new Error('Claude query ended before a result');
+    if (!result) throw new Error('Claude query ended before a result');
+    const usageByModel = result.modelUsage ?? {};
+    const reportedModels = Object.values(usageByModel);
+    const window = (
+      usageByModel[model ?? request.model] ??
+      (reportedModels.length === 1 ? reportedModels[0] : undefined)
+    )?.contextWindow;
+    if (
+      typeof window === 'number' &&
+      Number.isSafeInteger(window) &&
+      window > 0
+    )
+      this.#contextWindows.set(request.model, window);
+
+    // Aggregate turn usage may count the same context several times across tool calls.
+    const tokens =
+      lastContext ??
+      (!sawNativeCompaction && (result.num_turns ?? 1) <= 1
+        ? contextTokens(result.usage)
+        : undefined);
+    if (
+      !request.purpose &&
+      sessionId &&
+      tokens !== undefined &&
+      tokens > this.#compactAt
+    )
+      session(sessionId, tokens);
+    yield {
+      type: 'usage',
+      inputTokens: result.usage.input_tokens,
+      outputTokens: result.usage.output_tokens,
+    };
+    const text = result.result || lastText;
+    if (text) yield { type: 'text.final', text };
   }
+}
+
+function contextTokens(
+  usage?: {
+    cache_creation_input_tokens?: number | null;
+    cache_read_input_tokens?: number | null;
+    input_tokens?: number | null;
+    output_tokens?: number | null;
+  },
+  includeOutput = true,
+) {
+  if (!usage || typeof usage.input_tokens !== 'number') return;
+  return (
+    usage.input_tokens +
+    (usage.cache_creation_input_tokens ?? 0) +
+    (usage.cache_read_input_tokens ?? 0) +
+    (includeOutput ? (usage.output_tokens ?? 0) : 0)
+  );
 }
 
 function assertSuccess(

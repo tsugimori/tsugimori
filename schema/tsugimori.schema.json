@@ -137,6 +137,10 @@
                 "options": {
                   "type": "object",
                   "properties": {
+                    "asyncCompaction": {
+                      "type": "boolean",
+                      "default": false
+                    },
                     "command": {
                       "type": "string",
                       "minLength": 1

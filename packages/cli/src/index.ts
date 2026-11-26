@@ -125,7 +125,9 @@ export async function main(
         items,
       );
       console.log(
-        parsed.values.json ? JSON.stringify(items, null, 2) : doctorText(items),
+        parsed.values.json
+          ? JSON.stringify(items, null, 2)
+          : doctorText(items, snapshot.config.locale),
       );
       return items.some(({ status }) => status === 'fail') ? 1 : 0;
     }

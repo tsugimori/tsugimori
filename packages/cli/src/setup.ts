@@ -7,15 +7,16 @@ import { SetupError } from '@tsugimori/core';
 import { createInterface } from 'node:readline/promises';
 import { Writable } from 'node:stream';
 
-export function doctorText(items: CheckReport[]) {
+export function doctorText(items: CheckReport[], locale?: 'en' | 'zh-TW') {
   return items
-    .map(({ detail, fix, status, target, title }) =>
-      [
-        `[${status.toUpperCase()}] ${target} · ${title}: ${detail}`,
+    .map(({ detail, fix, localized, status, target, title }) => {
+      const translation = locale === 'zh-TW' ? localized?.[locale] : undefined;
+      return [
+        `[${status.toUpperCase()}] ${target} · ${translation?.title ?? title}: ${translation?.detail ?? detail}`,
         ...(fix?.command ? [`  ${fix.command.join(' ')}`] : []),
-        ...(fix?.hint ? [`  ${fix.hint}`] : []),
-      ].join('\n'),
-    )
+        ...(fix?.hint ? [`  ${translation?.hint ?? fix.hint}`] : []),
+      ].join('\n');
+    })
     .join('\n');
 }
 

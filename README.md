@@ -52,9 +52,11 @@ Set `defaultAgent` to an agent ID to route new conversations by default. With a 
 
 ### Session compaction
 
-Set `agents[].compactAt` to a positive integer to configure the agent's native auto-compaction window in tokens. The default is 250,000. Codex receives `model_auto_compact_token_limit`, and Claude Code receives `CLAUDE_CODE_AUTO_COMPACT_WINDOW`. Claude Code requires at least 100,000 tokens for this setting. `tsugimori doctor` reports when the configured CLI cannot support compaction.
+Set `agents[].compactAt` to a positive token count. The default is 250,000. Tsugimori normally compacts between turns and keeps native auto-compaction as a safety net for long turns. The native limit is the larger of `compactAt × 1.6` (rounded up) and `compactAt + 150,000`, capped at the model's context window when known. This limit is passed as `model_auto_compact_token_limit` for Codex and `CLAUDE_CODE_AUTO_COMPACT_WINDOW` for Claude Code. The CLIs can impose their own limits.
 
-Owners can run `/compact` to compact the current chat's existing agent session. Task traces record automatic and manual compaction and include before and after token counts when available. The gateway's rolling conversation summaries are configured separately.
+Codex uses its post-turn threshold on supported CLIs. Setting `agents[].options.asyncCompaction` to `true` opts into async compaction when the installed CLI exposes it. The option defaults to `false`. Codex derives its percentage threshold from the model context window and uses the native safety net alone while that size is unavailable. `tsugimori doctor` reports the supported timing mode for the configured CLI and options.
+
+Claude starts `/compact` in the background when a completed turn's reported context exceeds `compactAt`. New messages for the same session wait for compaction and run in order. Owners can also run `/compact` to compact the current chat's existing agent session. Task traces report the trigger (`post-turn`, `async`, `manual`, or `native`) and include before and after token counts when available. The gateway's rolling conversation summaries are configured separately.
 
 ## Conversation summaries
 

@@ -74,7 +74,12 @@ export class Tracer {
     }
   }
 
-  record(name: string, attrs: TraceSpan['attrs'], durationMs = 0) {
+  record(
+    name: string,
+    attrs: TraceSpan['attrs'],
+    durationMs = 0,
+    status: TraceSpan['status'] = 'ok',
+  ) {
     const endedAt = Date.now();
     this.#record({
       name,
@@ -82,7 +87,7 @@ export class Tracer {
       startedAt: endedAt - Math.round(durationMs),
       endedAt,
       durationMs,
-      status: 'ok',
+      status,
     });
   }
 

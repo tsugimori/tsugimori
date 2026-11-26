@@ -228,15 +228,16 @@ async function fixture(
 }
 
 test(
-  'queues owner /compact behind the chat turn, preserves its session and records both triggers',
+  'queues owner /compact, preserves the session and records compaction after the task ends',
   { timeout: 5_000 },
   async (t) => {
     const turnStarted = Promise.withResolvers<void>();
     const finishTurn = Promise.withResolvers<void>();
+    let reportPostTurn: (() => void) | undefined;
     const order: string[] = [];
     const { configure, gateway, logs, platform, store, trace } = await fixture(
       t,
-      async function* (request) {
+      async function* (request, io) {
         if (!request.resumeSessionId) {
           order.push('turn');
           turnStarted.resolve();
@@ -244,10 +245,18 @@ test(
           yield { type: 'sessionId', sessionId: 'native-1' };
           yield {
             type: 'compaction',
-            trigger: 'auto',
+            trigger: 'native',
             tokensBefore: 251_000,
             durationMs: 12,
           };
+          reportPostTurn = () =>
+            io.reportCompaction?.({
+              type: 'compaction',
+              trigger: 'post-turn',
+              tokensBefore: 255_000,
+              tokensAfter: 2400,
+              durationMs: 20,
+            });
         } else {
           assert.equal(request.resumeSessionId, 'native-1');
           order.push('resume');
@@ -297,6 +306,8 @@ test(
       store.getMessage(chat, 'first-turn')?.seq,
     );
 
+    assert.ok(reportPostTurn);
+    reportPostTurn();
     await trace.flush();
     const spans = store
       .listChatTasks(chat)
@@ -311,12 +322,13 @@ test(
         ])
         .sort(),
       [
-        ['auto', 251_000, null],
         ['manual', 2400, 600],
+        ['native', 251_000, null],
+        ['post-turn', 255_000, 2400],
       ],
     );
     assert.equal(
-      spans.find(({ attrs }) => attrs.trigger === 'auto')?.durationMs,
+      spans.find(({ attrs }) => attrs.trigger === 'native')?.durationMs,
       12,
     );
 

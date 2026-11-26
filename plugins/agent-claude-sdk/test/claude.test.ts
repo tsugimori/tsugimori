@@ -1,5 +1,9 @@
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
-import type { AgentIO, AgentRequest } from '@tsugimori/plugin-sdk';
+import type {
+  AgentCompactionEvent,
+  AgentIO,
+  AgentRequest,
+} from '@tsugimori/plugin-sdk';
 
 import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
@@ -69,7 +73,7 @@ test(
           assert.deepEqual(options.skills, []);
           assert.equal(options.permissionMode, 'default');
           assert.equal(options.sandbox?.allowUnsandboxedCommands, false);
-          assert.equal(options.env?.CLAUDE_CODE_AUTO_COMPACT_WINDOW, '250000');
+          assert.equal(options.env?.CLAUDE_CODE_AUTO_COMPACT_WINDOW, '400000');
           assert.match(String(options.systemPrompt), /trusted rule/);
           assert.doesNotMatch(String(options.systemPrompt), /member rule/);
           if (options.resume) {
@@ -177,7 +181,7 @@ test(
     const agent = new ClaudeAgent(
       {
         async *query({ options, prompt }) {
-          assert.equal(options?.env?.CLAUDE_CODE_AUTO_COMPACT_WINDOW, '125000');
+          assert.equal(options?.env?.CLAUDE_CODE_AUTO_COMPACT_WINDOW, '275000');
           const manual = prompt === '/compact';
           if (manual) {
             assert.equal(options?.resume, 'claude-native');
@@ -221,7 +225,7 @@ test(
       [
         {
           type: 'compaction',
-          trigger: 'auto',
+          trigger: 'native',
           tokensBefore: 125_000,
           tokensAfter: 600,
           durationMs: 15,
@@ -270,6 +274,152 @@ test('Claude manual compaction distinguishes unsupported commands from sessions 
     );
   }
 });
+
+test(
+  'Claude compacts in the background and queues resumed messages in order',
+  { timeout: 5_000 },
+  async (t) => {
+    const compactStarted = Promise.withResolvers<void>();
+    const finishCompact = Promise.withResolvers<void>();
+    const finishSecond = Promise.withResolvers<void>();
+    const secondStarted = Promise.withResolvers<void>();
+    const traced = Promise.withResolvers<AgentCompactionEvent>();
+    const order: string[] = [];
+    const agent = new ClaudeAgent(
+      {
+        async *query({ options, prompt }) {
+          const requiredWindow = options?.resume ? '300000' : '400000';
+          assert.equal(
+            options?.env?.CLAUDE_CODE_AUTO_COMPACT_WINDOW,
+            requiredWindow,
+          );
+          if (prompt === '/compact') {
+            assert.equal(options?.resume, 'claude-native');
+            order.push('compact started');
+            compactStarted.resolve();
+            await finishCompact.promise;
+            order.push('compact finished');
+            yield frame({
+              type: 'system',
+              subtype: 'compact_boundary',
+              compact_metadata: {
+                trigger: 'manual',
+                pre_tokens: 260_010,
+                post_tokens: 4_500,
+                duration_ms: 15,
+              },
+            });
+          } else {
+            const { content } = JSON.parse(String(prompt).split('\n').at(-1)!);
+            order.push(content);
+            if (content === 'second') {
+              secondStarted.resolve();
+              await finishSecond.promise;
+            }
+            // Only the newest model call's context should count, including cache reads.
+            const cached = content === 'first' ? 260_000 : 10_000;
+            yield frame({
+              type: 'stream_event',
+              parent_tool_use_id: null,
+              event: {
+                type: 'message_start',
+                message: {
+                  model: 'fake-model',
+                  usage: {
+                    input_tokens: 8,
+                    cache_read_input_tokens: cached,
+                    output_tokens: 0,
+                  },
+                },
+              },
+            });
+            yield frame({
+              type: 'stream_event',
+              parent_tool_use_id: null,
+              event: {
+                type: 'message_delta',
+                usage: { output_tokens: 2 },
+              },
+            });
+          }
+          yield frame({
+            type: 'result',
+            subtype: 'success',
+            result: 'reply',
+            num_turns: 2,
+            usage: { input_tokens: 600_000, output_tokens: 10 },
+            modelUsage: { 'fake-model': { contextWindow: 300_000 } },
+          });
+        },
+      },
+      'claude',
+      null,
+    );
+    t.after(async () => {
+      finishCompact.resolve();
+      finishSecond.resolve();
+      await agent.stop();
+    });
+    const input = request(tmpdir());
+    const turn = (content: string, resumeSessionId?: string) =>
+      agent.run(
+        {
+          ...input,
+          context: [{ source: 'message', trust: 'owner', content }],
+          resumeSessionId,
+        },
+        {
+          ...io,
+          reportCompaction: traced.resolve,
+        },
+      );
+
+    const first = await collect(turn('first'));
+    assert.ok(
+      first.some(
+        (event) => event.type === 'text.final' && event.text === 'reply',
+      ),
+    );
+    await compactStarted.promise;
+    const second = collect(turn('second', 'claude-native'));
+    const third = collect(turn('third', 'claude-native'));
+    const shared = agent.compact({ ...input, sessionId: 'claude-native' });
+    await delay(0);
+    assert.deepEqual(order, ['first', 'compact started']);
+    finishCompact.resolve();
+    await secondStarted.promise;
+    assert.deepEqual(order, [
+      'first',
+      'compact started',
+      'compact finished',
+      'second',
+    ]);
+    finishSecond.resolve();
+    await Promise.all([second, third]);
+    assert.deepEqual(order, [
+      'first',
+      'compact started',
+      'compact finished',
+      'second',
+      'third',
+    ]);
+    assert.deepEqual(await shared, {
+      status: 'compacted',
+      shared: true,
+      tokensBefore: 260_010,
+      tokensAfter: 4_500,
+      durationMs: 15,
+    });
+    assert.deepEqual(await traced.promise, {
+      type: 'compaction',
+      trigger: 'post-turn',
+      status: 'ok',
+      tokensBefore: 260_010,
+      tokensAfter: 4_500,
+      durationMs: 15,
+    });
+  },
+);
 
 test(
   'Claude propagates cancellation to the SDK abort controller',

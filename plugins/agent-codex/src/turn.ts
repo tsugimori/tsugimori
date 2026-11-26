@@ -76,21 +76,24 @@ export class TurnCompactions {
     { startedAt: number; tokensAfter?: number; tokensBefore?: number }
   >();
   #latest?: number;
+  #replacement?: Pick<AgentCompaction, 'tokensAfter' | 'tokensBefore'>;
 
   constructor(tokensBefore?: number) {
     this.#latest = tokensBefore;
   }
 
-  observe({ method, params }: ServerFrame): AgentCompaction | undefined {
+  observe({ method, params }: ServerFrame) {
     if (method === 'thread/tokenUsage/updated') {
       const { totalTokens, inputTokens, outputTokens } = lastUsage(params);
       if (typeof totalTokens === 'number') {
-        this.#latest = totalTokens;
         // Codex publishes a replacement context estimate with zero billable input/output.
-        if (this.#items.size === 1 && inputTokens === 0 && outputTokens === 0) {
-          const active = this.#items.values().next().value!;
-          active.tokensAfter = totalTokens;
-        }
+        this.#replacement =
+          inputTokens === 0 && outputTokens === 0
+            ? { tokensBefore: this.#latest, tokensAfter: totalTokens }
+            : undefined;
+        if (this.#items.size === 1 && this.#replacement)
+          this.#items.values().next().value!.tokensAfter = totalTokens;
+        this.#latest = totalTokens;
       }
       return;
     }
@@ -109,11 +112,13 @@ export class TurnCompactions {
     this.#items.delete(id);
     const endedAt =
       typeof completedAtMs === 'number' ? completedAtMs : Date.now();
-    return {
+    const details = {
       durationMs: start && Math.max(0, endedAt - start.startedAt),
-      tokensBefore: start?.tokensBefore,
-      tokensAfter: start?.tokensAfter,
+      tokensBefore: start?.tokensBefore ?? this.#replacement?.tokensBefore,
+      tokensAfter: start?.tokensAfter ?? this.#replacement?.tokensAfter,
     };
+    this.#replacement = undefined;
+    return details;
   }
 }
 
@@ -121,6 +126,10 @@ export class TurnOutput {
   readonly #items = new Map<string, Record<string, unknown>>();
   #final: string | undefined;
   #fallback: string | undefined;
+
+  get hasFinalMessage() {
+    return this.#final !== undefined || this.#fallback !== undefined;
+  }
 
   events({ method, params }: ServerFrame): AgentEvent[] {
     if (

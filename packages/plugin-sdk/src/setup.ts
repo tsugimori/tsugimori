@@ -53,7 +53,7 @@ export interface CheckItem {
   detail: string;
   fix?: { command?: string[]; hint?: string; sudo?: boolean };
   id: string;
-  localized?: { 'zh-TW'?: { hint: string; title: string } };
+  localized?: { 'zh-TW'?: { detail?: string; hint: string; title: string } };
   status: 'ok' | 'warn' | 'fail';
   title: string;
 }

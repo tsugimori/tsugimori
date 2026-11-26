@@ -442,6 +442,7 @@ export class Tasks {
           ? m.compactUnsupported
           : m.compactSkipped;
       }
+      if (result.shared) return m.compactSuccess;
       attrs.tokensBefore = result.tokensBefore ?? null;
       attrs.tokensAfter = result.tokensAfter ?? null;
       end();

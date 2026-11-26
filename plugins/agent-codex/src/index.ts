@@ -14,12 +14,20 @@ import {
   ToolFailure,
   toolWireName,
 } from '@tsugimori/plugin-sdk';
+import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
+import { promisify } from 'node:util';
 
 import type { ServerFrame, SpawnServer } from './app-server.ts';
 
 import { AppServer, asRecord, RpcError } from './app-server.ts';
+import {
+  bundledContextWindows,
+  codexCompactionConfig,
+  codexCompactionSupport,
+  contextWindow,
+} from './compaction.ts';
 import { installCodex } from './install.ts';
 import {
   codexChecks,
@@ -40,14 +48,23 @@ import {
 } from './turn.ts';
 
 interface CodexOptions {
+  asyncCompaction?: boolean;
   codexHome?: string;
   command?: string;
   compactAt?: number;
 }
 
 interface CodexDependencies {
+  inspect?(args: string[]): Promise<string | undefined>;
   spawn?: SpawnServer;
 }
+
+interface ThreadContext {
+  tokens?: number;
+  window?: number;
+}
+
+const execFileAsync = promisify(execFile);
 
 export class CodexAgent implements AgentConnector {
   readonly id: string;
@@ -55,7 +72,15 @@ export class CodexAgent implements AgentConnector {
   readonly loop = 'external';
   readonly #deps: CodexDependencies;
   readonly #options: CodexOptions;
-  readonly #contextTokens = new WeakMap<AppServer, Map<string, number>>();
+  readonly #threadContexts = new WeakMap<
+    AppServer,
+    Map<string, ThreadContext>
+  >();
+  readonly #defaultModels = new WeakMap<
+    AppServer,
+    Promise<string | undefined>
+  >();
+  #inspection?: ReturnType<CodexAgent['inspect']>;
   #lifecycle?: AbortController;
   #connection?: Promise<AppServer>;
   #server?: AppServer;
@@ -75,15 +100,17 @@ export class CodexAgent implements AgentConnector {
 
   async stop() {
     const connection = this.#connection;
+    const inspection = this.#inspection;
     const server = this.#server;
     this.#lifecycle?.abort();
     this.#lifecycle = undefined;
     this.#connection = undefined;
     this.#server = undefined;
+    this.#inspection = undefined;
     this.#restartAt = 0;
     this.#backoff = 250;
     const closed = server?.close();
-    await Promise.allSettled([connection, closed]);
+    await Promise.allSettled([connection, closed, inspection]);
   }
 
   #connect() {
@@ -122,6 +149,7 @@ export class CodexAgent implements AgentConnector {
     signal.throwIfAborted();
     const { command = 'codex', codexHome } = this.#options;
     const env = codexEnvironment(codexHome);
+    this.#inspection ??= this.inspect(command, env, signal);
     const server = new AppServer(this.#deps.spawn, command, env);
     this.#server = server;
     const stop = () => server.fail('Codex agent stopped');
@@ -133,9 +161,9 @@ export class CodexAgent implements AgentConnector {
     );
     // Route server requests centrally so inactive threads never leave a prompt hanging.
     const listeners = new Map<string, (frame: ServerFrame) => void>();
-    const contextTokens = new Map<string, number>();
+    const contexts = new Map<string, ThreadContext>();
     this.#listeners.set(server, listeners);
-    this.#contextTokens.set(server, contextTokens);
+    this.#threadContexts.set(server, contexts);
     server.on('frame', (frame) => {
       const { threadId } = frame.params;
       if (
@@ -143,11 +171,19 @@ export class CodexAgent implements AgentConnector {
         frame.method === 'thread/tokenUsage/updated'
       ) {
         const { totalTokens } = lastUsage(frame.params);
-        if (typeof totalTokens === 'number') {
-          contextTokens.delete(threadId);
-          contextTokens.set(threadId, totalTokens);
-          if (contextTokens.size > 256)
-            contextTokens.delete(contextTokens.keys().next().value!);
+        const window = contextWindow(
+          asRecord(frame.params.tokenUsage).modelContextWindow,
+        );
+        if (typeof totalTokens === 'number' || window !== undefined) {
+          const previous = contexts.get(threadId);
+          contexts.delete(threadId);
+          contexts.set(threadId, {
+            tokens:
+              typeof totalTokens === 'number' ? totalTokens : previous?.tokens,
+            window: window ?? previous?.window,
+          });
+          if (contexts.size > 256)
+            contexts.delete(contexts.keys().next().value!);
         }
       }
       const listener =
@@ -181,6 +217,83 @@ export class CodexAgent implements AgentConnector {
     }
   }
 
+  private async inspect(
+    command: string,
+    env: NodeJS.ProcessEnv,
+    signal: AbortSignal,
+  ) {
+    const inspect =
+      this.#deps.inspect ??
+      (async (args: string[]) => {
+        try {
+          return (
+            await execFileAsync(command, args, {
+              env: { ...env, NO_COLOR: '1' },
+              signal,
+              timeout: 5000,
+              maxBuffer: 8 * 1024 * 1024,
+            })
+          ).stdout;
+        } catch {
+          // Unavailable CLI inspection leaves the native safety net in place.
+        }
+      });
+    const [support, windows] = await Promise.all([
+      codexCompactionSupport(inspect),
+      bundledContextWindows(inspect),
+    ]);
+    return { support, windows };
+  }
+
+  async #window(
+    server: AppServer,
+    windows: ReadonlyMap<string, number>,
+    model: string | undefined,
+    workdir: string,
+    threadId?: string,
+  ) {
+    const observed = threadId
+      ? this.#threadContexts.get(server)?.get(threadId)?.window
+      : undefined;
+    if (model) return windows.get(model) ?? observed;
+    if (observed !== undefined) return observed;
+    if (!windows.size) return;
+
+    try {
+      const result = await server.request('config/read', {
+        cwd: workdir,
+        includeLayers: false,
+      });
+      const config = asRecord(result.config);
+      const configured = contextWindow(config.model_context_window);
+      if (configured !== undefined) return configured;
+      if (typeof config.model === 'string') return windows.get(config.model);
+    } catch (error) {
+      if (!(error instanceof RpcError)) throw error;
+    }
+
+    let defaultModel = this.#defaultModels.get(server);
+    if (!defaultModel) {
+      defaultModel = server
+        .request('model/list', {})
+        .then(({ data }) => {
+          if (!Array.isArray(data)) return;
+          const entry = data
+            .map(asRecord)
+            .find(({ isDefault }) => isDefault === true);
+          const name = entry?.model ?? entry?.id;
+          if (typeof name === 'string') return name;
+        })
+        .catch((error: unknown) => {
+          if (!(error instanceof RpcError)) throw error;
+          return undefined;
+        });
+      this.#defaultModels.set(server, defaultModel);
+    }
+    const name = await defaultModel;
+    return name === undefined ? undefined : windows.get(name);
+  }
+
   readonly #listeners = new WeakMap<
     AppServer,
     Map<string, (frame: ServerFrame) => void>
@@ -208,6 +321,21 @@ export class CodexAgent implements AgentConnector {
     const model = request.model === 'default' ? undefined : request.model;
     const summarize = request.purpose === 'summary';
     const scope = request.sandbox;
+    const { support, windows } = await this.#inspection!;
+    const window = await this.#window(
+      server,
+      windows,
+      model,
+      workdir,
+      resumeSessionId,
+    );
+    signal.throwIfAborted();
+    const compaction = codexCompactionConfig(
+      support,
+      this.#options.asyncCompaction === true,
+      this.#options.compactAt ?? defaultCompactAt,
+      window,
+    );
     // With a gateway execution scope, Codex gets no native execution environment:
     // commands run only through gateway tools inside the scope's sandbox.
     const scoped = scope
@@ -224,8 +352,7 @@ export class CodexAgent implements AgentConnector {
       approvalsReviewer,
       ...(scoped ?? { sandbox: summarize ? 'read-only' : 'workspace-write' }),
       config: {
-        model_auto_compact_token_limit:
-          this.#options.compactAt ?? defaultCompactAt,
+        ...compaction.config,
         ...(scope
           ? { project_doc_max_bytes: 0 }
           : {
@@ -263,7 +390,7 @@ export class CodexAgent implements AgentConnector {
       (resumeSessionId && threadId !== resumeSessionId)
     )
       throw new Error('Codex returned an invalid thread ID');
-    return { server, signal, threadId, model, summarize };
+    return { server, signal, threadId, model, summarize, compaction, window };
   }
 
   async compact(request: AgentCompactRequest): Promise<AgentCompactResult> {
@@ -274,7 +401,7 @@ export class CodexAgent implements AgentConnector {
       throw new Error('Codex thread already has an active turn');
 
     const compactions = new TurnCompactions(
-      this.#contextTokens.get(server)?.get(threadId),
+      this.#threadContexts.get(server)?.get(threadId)?.tokens,
     );
     const frames = new TurnFrames();
     listeners.set(threadId, frames.push);
@@ -334,11 +461,8 @@ export class CodexAgent implements AgentConnector {
       this.acceptsSession(request.resumeSessionId, request.tools)
         ? request.resumeSessionId.slice(stamp.length)
         : undefined;
-    const { server, signal, threadId, model, summarize } = await this.#thread(
-      request,
-      resumeSessionId,
-      dynamicTools,
-    );
+    const { server, signal, threadId, model, summarize, compaction, window } =
+      await this.#thread(request, resumeSessionId, dynamicTools);
     const listeners = this.#listeners.get(server)!;
     if (listeners.has(threadId))
       throw new Error('Codex thread already has an active turn');
@@ -346,7 +470,7 @@ export class CodexAgent implements AgentConnector {
     const frames = new TurnFrames();
     const output = new TurnOutput();
     const compactions = new TurnCompactions(
-      this.#contextTokens.get(server)?.get(threadId),
+      this.#threadContexts.get(server)?.get(threadId)?.tokens,
     );
     listeners.set(threadId, frames.push);
     let turnId: string | undefined;
@@ -462,8 +586,24 @@ export class CodexAgent implements AgentConnector {
           }
         } else if (frame.params.turnId === turnId) {
           const details = compactions.observe(frame);
-          if (details)
-            yield { ...details, trigger: 'auto', type: 'compaction' };
+          if (details) {
+            // Item notifications carry no trigger. Codex also bounds the native limit
+            // at 90% of the model window, even when the configured limit is higher.
+            const nativeLimit = Math.min(
+              compaction.config.model_auto_compact_token_limit,
+              (window ?? Infinity) * 0.9,
+              this.#threadContexts.get(server)?.get(threadId)?.window ??
+                Infinity,
+            );
+            const trigger =
+              compaction.mode === 'async' &&
+              (details.tokensBefore ?? Infinity) < nativeLimit
+                ? 'async'
+                : compaction.mode === 'post-turn' && output.hasFinalMessage
+                  ? 'post-turn'
+                  : 'native';
+            yield { ...details, trigger, type: 'compaction' };
+          }
           yield* output.events(frame);
         }
       }
@@ -500,6 +640,7 @@ export default definePlugin({
     codex(config, { workspace }) {
       return new CodexAgent({}, config.id, {
         ...codexLocation(config, workspace),
+        asyncCompaction: config.options?.asyncCompaction === true,
         compactAt: config.compactAt,
       });
     },

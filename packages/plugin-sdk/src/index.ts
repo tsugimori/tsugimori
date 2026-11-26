@@ -316,6 +316,7 @@ export interface AgentRequest {
 }
 
 export interface AgentIO {
+  reportCompaction?(event: AgentCompactionEvent): void;
   requestApproval(request: ApprovalRequest): Promise<boolean>;
   supplements: AsyncIterable<InboundMessage>;
 }
@@ -334,11 +335,25 @@ export interface AgentCompaction {
   tokensBefore?: number;
 }
 
+export interface AgentCompactionEvent extends AgentCompaction {
+  status?: 'ok' | 'error';
+  trigger: 'post-turn' | 'async' | 'manual' | 'native';
+  type: 'compaction';
+}
+
 export type AgentCompactResult =
   | { status: 'unsupported' | 'skipped' }
-  | (AgentCompaction & { status: 'compacted' });
+  | (AgentCompaction & { shared?: boolean; status: 'compacted' });
 
 export const defaultCompactAt = 250_000;
+
+export function nativeCompactionLimit(
+  compactAt: number,
+  contextWindow?: number,
+) {
+  const limit = Math.ceil(Math.max((compactAt * 8) / 5, compactAt + 150_000));
+  return Math.min(limit, contextWindow ?? Number.MAX_SAFE_INTEGER);
+}
 
 export type AgentEvent =
   | { text: string; type: 'text.delta' }
@@ -352,7 +367,7 @@ export type AgentEvent =
     }
   | { request: ApprovalRequest; type: 'approval.requested' }
   | { error: Error; type: 'error' }
-  | (AgentCompaction & { trigger: 'auto' | 'manual'; type: 'compaction' })
+  | AgentCompactionEvent
   | { inputTokens?: number; outputTokens?: number; type: 'usage' }
   | { sessionId: string; type: 'sessionId' };
 

@@ -7,12 +7,12 @@ import type {
 } from '@tsugimori/plugin-sdk';
 
 import { agentHome, SetupError } from '@tsugimori/plugin-sdk';
-import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { mkdir } from 'node:fs/promises';
+import { resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 
 import { asRecord } from './app-server.ts';
+import { codexCompactionSupport, compactionMode } from './compaction.ts';
 import { codexBinary, hasCodexCodeModeHost, pinnedVersion } from './install.ts';
 
 const loginMessages = {
@@ -116,36 +116,20 @@ async function loggedIn(ctx: CheckContext, signal?: AbortSignal) {
   }
 }
 
-async function supportsCompaction(ctx: CheckContext) {
-  const { argv, ...options } = authContext(ctx);
-  const dir = await mkdtemp(join(tmpdir(), 'tsugimori-codex-schema-'));
-  try {
-    const result = await ctx.runCommand(
-      [
-        argv,
-        'app-server',
-        'generate-json-schema',
-        '--experimental',
-        '--out',
-        dir,
-      ],
-      options,
-    );
-    if (result.exitCode !== 0) return false;
-    const [requests, config] = await Promise.all([
-      readFile(join(dir, 'ClientRequest.json'), 'utf8'),
-      readFile(join(dir, 'v2', 'ConfigReadResponse.json'), 'utf8'),
-    ]);
-    return (
-      requests.includes('"thread/compact/start"') &&
-      config.includes('"model_auto_compact_token_limit"')
-    );
-  } catch {
-    return false;
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
-}
+const compactionMessages = {
+  async: {
+    en: 'Async compaction is active.',
+    'zh-TW': '已啟用非同步壓縮。',
+  },
+  'post-turn': {
+    en: 'Post-turn compaction is active.',
+    'zh-TW': '已啟用回合後壓縮。',
+  },
+  unsupported: {
+    en: 'This Codex CLI does not support configurable compaction timing.',
+    'zh-TW': '此版本的 Codex CLI 不支援設定壓縮時機。',
+  },
+};
 
 export async function codexChecks(ctx: CheckContext): Promise<CheckItem[]> {
   const { argv, ...options } = authContext(ctx);
@@ -196,7 +180,19 @@ export async function codexChecks(ctx: CheckContext): Promise<CheckItem[]> {
       },
     ];
   const login = await loggedIn(ctx);
-  const compaction = await supportsCompaction(ctx);
+  const support = await codexCompactionSupport(async (args) => {
+    try {
+      const result = await ctx.runCommand([argv, ...args], options);
+      if (result.exitCode === 0) return result.stdout;
+    } catch {
+      // Report unsupported timing without exposing CLI output.
+    }
+  });
+  const mode = compactionMode(
+    support,
+    ctx.entry.options?.asyncCompaction === true,
+  );
+  const compaction = compactionMessages[mode];
   return [
     { ...cli, status: 'ok', detail: 'The Codex CLI is available.' },
     {
@@ -220,16 +216,16 @@ export async function codexChecks(ctx: CheckContext): Promise<CheckItem[]> {
     {
       id: 'codex-compaction',
       title: 'Codex context compaction',
-      status: compaction ? 'ok' : 'warn',
-      detail: compaction
-        ? 'The app-server schema exposes manual and automatic compaction settings.'
-        : 'The app-server schema could not confirm support for native context compaction.',
-      fix: compaction
-        ? undefined
-        : { hint: 'Upgrade the configured Codex CLI.' },
+      status: mode === 'unsupported' ? 'warn' : 'ok',
+      detail: compaction.en,
+      fix:
+        mode === 'unsupported'
+          ? { hint: 'Upgrade the configured Codex CLI.' }
+          : undefined,
       localized: {
         'zh-TW': {
           title: 'Codex 上下文壓縮',
+          detail: compaction['zh-TW'],
           hint: '請更新設定使用的 Codex CLI。',
         },
       },

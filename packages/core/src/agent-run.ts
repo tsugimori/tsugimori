@@ -1,4 +1,5 @@
 import type {
+  AgentCompactionEvent,
   AgentConnector,
   AgentIO,
   AgentRequest,
@@ -28,9 +29,24 @@ export async function runAgent(
 ) {
   const { signal, taskId } = task;
   const attrs = { taskId, agentId: agent.id, model: request.model };
+  const reportCompaction = (event: AgentCompactionEvent) => {
+    trace.record(
+      'agent.compaction',
+      {
+        ...attrs,
+        trigger: event.trigger,
+        tokensBefore: event.tokensBefore ?? null,
+        tokensAfter: event.tokensAfter ?? null,
+      },
+      event.durationMs,
+      event.status,
+    );
+    io.reportCompaction?.(event);
+  };
   return trace.span('agent.run', attrs, async () => {
     signal.throwIfAborted();
-    const iterator = agent.run(request, io)[Symbol.asyncIterator]();
+    const events = agent.run(request, { ...io, reportCompaction });
+    const iterator = events[Symbol.asyncIterator]();
     const firstText = trace.begin('agent.first_text', attrs);
     const tools = new Map<string, ReturnType<Tracer['begin']>>();
     let complete = false;
@@ -79,16 +95,7 @@ export async function runAgent(
             })();
             break;
           case 'compaction':
-            trace.record(
-              'agent.compaction',
-              {
-                ...attrs,
-                trigger: event.trigger,
-                tokensBefore: event.tokensBefore ?? null,
-                tokensAfter: event.tokensAfter ?? null,
-              },
-              event.durationMs,
-            );
+            reportCompaction(event);
             break;
           case 'error':
             throw event.error;

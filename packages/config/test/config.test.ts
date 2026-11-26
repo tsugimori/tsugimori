@@ -50,6 +50,20 @@ test('preserves per-agent compaction thresholds and rejects invalid counts', () 
     assert.throws(() => compactAt(invalid), /\/agents\/0\/compactAt/);
 });
 
+test('Codex async compaction is a boolean opt-in', () => {
+  const options = (value: object) =>
+    parseConfig(
+      JSON.stringify({
+        agents: [
+          { id: 'codex', kind: 'codex', enabled: false, options: value },
+        ],
+      }),
+    ).agents[0]?.options;
+  assert.equal(options({})?.asyncCompaction, false);
+  assert.equal(options({ asyncCompaction: true })?.asyncCompaction, true);
+  assert.throws(() => options({ asyncCompaction: 'true' }), /asyncCompaction/);
+});
+
 test('parses shell-style assignments without evaluating them or leaking errors', () => {
   const values = parseEnv(
     '# comment\nexport A="one # two" # comment\nB=plain#comment\nC=\'literal\\n\'\nD="one\\ntwo"\nE=$A\n',
