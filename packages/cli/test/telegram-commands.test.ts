@@ -214,9 +214,11 @@ test(
         'add',
         'agent',
         'allow',
+        'cancel',
         'compact',
         'deny',
         'fast',
+        'help',
         'login',
         'model',
         'preview',
@@ -236,6 +238,10 @@ test(
       'Show status',
     );
     const dmScope = { type: 'chat', chat_id: String(owner) };
+    assert.equal(
+      ownerCommands.find(({ command }) => command === 'cancel')?.description,
+      'Cancel guided setup',
+    );
     const memberScope = (chatId: number, userId = owner) => ({
       type: 'chat_member',
       chat_id: String(chatId),
@@ -295,6 +301,10 @@ test(
     const localized = await reload('zh-TW');
     const zh = localized[0]?.commands;
     assert.ok(zh);
+    assert.equal(
+      zh.find(({ command }) => command === 'cancel')?.description,
+      '取消引導設定',
+    );
     assert.equal(
       zh.find(({ command }) => command === 'compact')?.description,
       '壓縮目前對話的上下文',

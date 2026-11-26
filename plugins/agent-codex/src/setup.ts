@@ -327,6 +327,12 @@ async function login(ctx: SetupContext) {
     }
   };
   const [result] = await Promise.all([device, status()]);
+  if (result.exitCode === 0)
+    ctx.recordCredential(
+      ctx.locale === 'zh-TW'
+        ? 'Codex 裝置登入憑證（代理程式主目錄）'
+        : 'Codex device login (agent home)',
+    );
   if (result.exitCode !== 0 || !(await loggedIn(ctx, ctx.signal)))
     throw new SetupError(m.incomplete);
   const email = await codexAccount(ctx);
@@ -347,6 +353,11 @@ export const codexSetup: SetupStep[] = [
     id: 'install',
     title: 'Install the pinned Codex CLI',
     localized: { 'zh-TW': '安裝指定版本的 Codex CLI' },
+    asks: [],
+    saves: {
+      text: 'installs the CLI into the workspace runtime',
+      localized: { 'zh-TW': '將 CLI 安裝至工作區的 runtime 目錄' },
+    },
     async run(ctx) {
       try {
         await ctx.install();
@@ -362,11 +373,22 @@ export const codexSetup: SetupStep[] = [
     id: 'login',
     title: 'Sign in to Codex',
     localized: { 'zh-TW': '登入 Codex' },
+    asks: [
+      {
+        text: 'Use the device code in your browser, then confirm the account (yes/no)',
+        localized: { 'zh-TW': '在瀏覽器輸入裝置驗證碼，再確認帳號（yes/no）' },
+      },
+    ],
+    saves: {
+      text: 'saves device sign-in in the agent home before account confirmation',
+      localized: { 'zh-TW': '在確認帳號前將裝置登入憑證儲存到代理程式主目錄' },
+    },
     run: login,
   },
   {
     id: 'test',
     title: 'Run a Codex test turn',
+    asks: [],
     localized: { 'zh-TW': '執行 Codex 測試回合' },
     run: (ctx) => ctx.testTurn(),
   },

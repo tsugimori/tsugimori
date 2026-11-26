@@ -45,7 +45,7 @@ import type { PlatformNotice } from './runtime.ts';
 
 import { acceptsServiceTier, formatServiceTier } from './agent-settings.ts';
 import { approvalDecisionText, approvalMessages } from './approval-messages.ts';
-import { parseCommand } from './chat-commands.ts';
+import { chatCommands, parseCommand } from './chat-commands.ts';
 import { ChatSetup } from './chat-setup.ts';
 import { EnvironmentChecks, failureText } from './checks.ts';
 import { CommandMenus } from './command-menus.ts';
@@ -1233,6 +1233,13 @@ export class Gateway {
     }
     if (!owner) return;
     switch (name) {
+      case 'help':
+        await send(
+          chatCommands(locale)
+            .owner.map(({ name, description }) => `/${name} · ${description}`)
+            .join('\n'),
+        );
+        break;
       case 'add': {
         const match =
           /^(agent|platform)\s+([A-Za-z0-9_.:-]+)(?:\s+--id\s+([A-Za-z0-9_.:-]+))?$/.exec(
@@ -1370,7 +1377,7 @@ export class Gateway {
   }
 }
 
-export { GuidedSetup } from './setup.ts';
+export { GuidedSetup, SetupCancelled } from './setup.ts';
 export type { SetupIO, SetupRequest } from './setup.ts';
 
 export { systemInstallPlan } from './system-setup.ts';

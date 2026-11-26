@@ -128,7 +128,7 @@ export interface SetupRun {
   lease: string | null;
   leaseUntil: number;
   mode: 'add' | 'login';
-  status: 'pending' | 'complete';
+  status: 'pending' | 'complete' | 'cancelled';
   step: number;
 }
 

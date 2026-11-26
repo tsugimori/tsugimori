@@ -315,6 +315,7 @@ async function login(ctx: SetupContext) {
   const cli = resolveBundledCli(ctx.platform, ctx.arch, ctx.locale);
   const method = (
     await ctx.prompt({
+      questions: { maximum: true, total: 3 },
       text: m.method,
     })
   )
@@ -325,6 +326,7 @@ async function login(ctx: SetupContext) {
   if (method === 'token') {
     const token = (
       await ctx.prompt({
+        questions: { total: 2 },
         secret: true,
         text: m.token,
       })
@@ -351,6 +353,12 @@ async function login(ctx: SetupContext) {
   }
   if (method !== 'login') throw new SetupError(m.invalidMethod);
   const result = await browserLogin(ctx, cli, options.home);
+  if (result?.exitCode === 0)
+    ctx.recordCredential(
+      ctx.locale === 'zh-TW'
+        ? 'Claude 瀏覽器登入憑證（代理程式主目錄）'
+        : 'Claude browser login (agent home)',
+    );
   const info =
     result?.exitCode === 0
       ? await authStatus(
@@ -367,6 +375,7 @@ async function login(ctx: SetupContext) {
   )
     throw new SetupError(m.missingAccount);
   const answer = await ctx.prompt({
+    questions: { total: result?.prompted ? 3 : 2 },
     text: m.confirm(email),
   });
   if (answer.trim().toLowerCase() !== 'yes')
@@ -384,7 +393,7 @@ async function browserLogin(ctx: SetupContext, cli: string, home: string) {
   let urlShown = false;
   let output = '';
   try {
-    return await ctx.runCommand([cli, 'auth', 'login'], {
+    const result = await ctx.runCommand([cli, 'auth', 'login'], {
       cwd: ctx.workspace,
       env: {
         ...claudeEnvironment(),
@@ -434,6 +443,7 @@ async function browserLogin(ctx: SetupContext, cli: string, home: string) {
         }
       },
     });
+    return { ...result, prompted };
   } catch (error) {
     if (error instanceof SetupError) throw error;
     throw new SetupError(m.incomplete);
@@ -445,11 +455,34 @@ export const claudeSetup: SetupStep[] = [
     id: 'login',
     title: 'Sign in to Claude',
     localized: { 'zh-TW': '登入 Claude' },
+    asks: [
+      {
+        text: 'Sign-in method (login/token)',
+        localized: { 'zh-TW': '登入方式（login/token）' },
+      },
+      {
+        text: 'Setup token or browser authorization code if requested',
+        localized: { 'zh-TW': '設定權杖，或瀏覽器登入所需的一次性授權碼' },
+        secret: true,
+      },
+      {
+        text: 'For browser login, confirm the account (yes/no)',
+        localized: { 'zh-TW': '瀏覽器登入時確認帳號（yes/no）' },
+      },
+    ],
+    saves: {
+      text: 'writes the verified setup token to .env or saves browser sign-in in the agent home before account confirmation',
+      localized: {
+        'zh-TW':
+          '將驗證通過的設定權杖寫入 .env，或在確認帳號前將瀏覽器登入憑證儲存到代理程式主目錄',
+      },
+    },
     run: login,
   },
   {
     id: 'test',
     title: 'Run a Claude test turn',
+    asks: [],
     localized: { 'zh-TW': '執行 Claude 測試回合' },
     retryFrom: 'login',
     run: (ctx) => ctx.testTurn(),

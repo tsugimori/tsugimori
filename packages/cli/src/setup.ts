@@ -113,6 +113,8 @@ export async function runSetup(
 
 export function terminalIO() {
   const abort = new AbortController();
+  const cancel = new AbortController();
+  const signal = AbortSignal.any([abort.signal, cancel.signal]);
   let hidden = false;
   const isTerminal = Boolean(process.stdin.isTTY && process.stdout.isTTY);
   const output = new Writable({
@@ -126,10 +128,16 @@ export function terminalIO() {
     output,
     terminal: isTerminal,
   });
-  terminal.on('SIGINT', () => abort.abort());
+  terminal.on('SIGINT', () => cancel.abort());
+  const handleCancel = (text: string) => {
+    if (text.trim().toLowerCase() === '/cancel') cancel.abort();
+  };
+  terminal.on('line', handleCancel);
   terminal.once('close', () => abort.abort());
   return {
     signal: abort.signal,
+    cancelSignal: cancel.signal,
+    secretInput: 'terminal',
     show: async (text) => {
       console.log(text);
     },
@@ -139,9 +147,12 @@ export function terminalIO() {
       hidden = secret === true;
       if (hidden) process.stdout.write(text + ' ');
       try {
-        return await terminal.question(hidden ? '' : text + ' ', {
-          signal: abort.signal,
+        const answer = await terminal.question(hidden ? '' : text + ' ', {
+          signal,
         });
+        handleCancel(answer);
+        signal.throwIfAborted();
+        return answer;
       } finally {
         if (hidden) process.stdout.write('\n');
         hidden = false;

@@ -187,6 +187,28 @@ export const lineSetup: SetupStep[] = [
     id: 'credentials',
     title: 'Verify LINE channel credentials',
     localized: { 'zh-TW': '驗證 LINE 頻道憑證' },
+    asks: [
+      {
+        text: 'Channel secret',
+        localized: { 'zh-TW': '頻道密鑰' },
+        secret: true,
+      },
+      {
+        text: 'Long-lived access token',
+        localized: { 'zh-TW': '長效存取權杖' },
+        secret: true,
+      },
+      {
+        text: 'Confirm the bot name (yes/no)',
+        localized: { 'zh-TW': '確認機器人名稱（yes/no）' },
+      },
+    ],
+    saves: {
+      text: 'writes the channel secret and access token to .env after you confirm the bot name',
+      localized: {
+        'zh-TW': '在你確認機器人名稱後將頻道密鑰與存取權杖寫入 .env',
+      },
+    },
     async run(ctx) {
       const m = messages[ctx.locale ?? 'en'];
       const secret = (

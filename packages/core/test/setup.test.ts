@@ -27,6 +27,7 @@ const adapterId = 'chat';
 const ownerId = '42';
 const group = {
   chatId: '-100',
+  chatTitle: 'Setup group',
   threadId: '7',
   chatKind: 'supergroup',
 } as const;
@@ -167,6 +168,7 @@ test('guided chat setup uses the original topic for progress and consumes secret
         {
           id: 'token',
           title: 'Verify token',
+          asks: [{ text: 'Token', secret: true }],
           async run(ctx) {
             const value = await ctx.prompt({
               text: 'Enter token.',
@@ -180,6 +182,7 @@ test('guided chat setup uses the original topic for progress and consumes secret
         {
           id: 'owner',
           title: 'Set owner',
+          asks: [{ text: 'Owner ID' }],
           async run(ctx) {
             const ownerId = await ctx.prompt({ text: 'Enter owner ID.' });
             ctx.writeConfig({ ownerId });
@@ -199,10 +202,11 @@ test('guided chat setup uses the original topic for progress and consumes secret
   );
   await platform.receive('owner-add', '/add platform new --id attached', group);
   const secret = await until(() =>
-    platform.sent.find(({ text }) => text.startsWith('Enter token.')),
+    platform.sent.find(({ text }) => text.startsWith('(1/2) Enter token.')),
   );
   assert.equal(secret.chatId, ownerId);
   assert.equal(secret.threadId, undefined);
+  assert.match(secret.text, /Setup started in Setup group\./);
   await platform.receive('group-token', credential, {
     ...group,
     replyTo: secret.messageId,
@@ -220,7 +224,7 @@ test('guided chat setup uses the original topic for progress and consumes secret
     raw: { credential },
   });
   const owner = await until(() =>
-    platform.sent.find(({ text }) => text.startsWith('Enter owner ID.')),
+    platform.sent.find(({ text }) => text.startsWith('(2/2) Enter owner ID.')),
   );
   assert.equal(owner.chatId, group.chatId);
   assert.equal(owner.threadId, group.threadId);
@@ -267,6 +271,139 @@ test('guided chat setup uses the original topic for progress and consumes secret
       f.store.getSetupRun('["add","platform","attached"]'),
     ]).includes(credential),
   );
+});
+
+test('only the owner can cancel setup in the origin or pending secret DM, and the next run starts fresh', async (t) => {
+  const platform = fixturePlatform();
+  const credential = 'a'.repeat(32);
+  const key = '["add","platform","trial"]';
+  const registry = new PluginRegistry([
+    platform.plugin,
+    {
+      name: 'target',
+      adapters: {
+        trial: () => assert.fail('Cancelled setup must stay detached'),
+      },
+      setupSteps: [
+        {
+          id: 'secret',
+          title: 'Save the token',
+          asks: [{ text: 'Test token', secret: true }],
+          async run(ctx) {
+            const token = await ctx.prompt({
+              text: 'Enter test token.',
+              secret: true,
+            });
+            await ctx.writeEnv('TEST_SETUP_TOKEN', token);
+            ctx.writeConfig({ entry: { tokenEnv: 'TEST_SETUP_TOKEN' } });
+          },
+        },
+        {
+          id: 'confirm',
+          title: 'Confirm the bot',
+          asks: [{ text: 'Bot name (yes/no)' }],
+          async run(ctx) {
+            await ctx.prompt({ text: 'Confirm test bot (yes/no).' });
+          },
+        },
+      ],
+    },
+  ]);
+  const { store, workspace } = await fixture(t, registry);
+  await platform.receive('idle', '/cancel');
+  assert.equal(platform.sent.at(-1)?.text, 'No setup is in progress.');
+  await platform.receive('help', '/help');
+  assert.match(
+    platform.sent.at(-1)?.text ?? '',
+    /^\/cancel · Cancel guided setup$/m,
+  );
+  await platform.receive('add1', '/add platform trial', group);
+  const dmPrompt = (start: number) =>
+    until(() =>
+      platform.sent
+        .slice(start)
+        .find(({ text }) => text.startsWith('(1/2) Enter test token.')),
+    );
+  const first = await dmPrompt(0);
+  const count = platform.sent.length;
+  await platform.receive('member-cancel', '/cancel', {
+    ...group,
+    userId: '43',
+  });
+  assert.equal(platform.sent.length, count);
+  assert.equal(store.getSetupRun(key)?.status, 'pending');
+  await platform.receive('other-thread-cancel', '/cancel', {
+    ...group,
+    threadId: '8',
+  });
+  assert.equal(platform.sent.at(-1)?.text, 'No setup is in progress.');
+  assert.equal(store.getSetupRun(key)?.status, 'pending');
+  await platform.receive('dm-cancel', '/cancel', { replyTo: first.messageId });
+  assert.equal(
+    platform.sent.at(-1)?.text,
+    'Setup cancelled. No credentials or configuration were saved in this run.',
+  );
+  assert.equal(platform.sent.at(-1)?.chatId, ownerId);
+  assert.deepEqual(store.getSetupRun(key), {
+    id: key,
+    category: 'platform',
+    mode: 'add',
+    status: 'cancelled',
+    step: 0,
+    lease: null,
+    leaseUntil: 0,
+    draft: { entry: { id: 'trial', kind: 'trial', enabled: true } },
+  });
+  const afterCancel = platform.sent.length;
+  await platform.receive('late-linked-secret', 'arbitrary credential', {
+    replyTo: first.messageId,
+  });
+  await platform.receive('late-unlinked-secret', credential);
+  assert.equal(platform.sent.length, afterCancel);
+  for (const id of ['late-linked-secret', 'late-unlinked-secret']) {
+    assert.equal(
+      store.getMessage({ adapterId, chatId: ownerId }, id),
+      undefined,
+    );
+    assert.ok(platform.removed.includes(id));
+  }
+
+  await platform.receive('add2', '/add platform trial', group);
+  const second = await dmPrompt(afterCancel);
+  await platform.receive('answer2', credential, { replyTo: second.messageId });
+  const confirm = await until(() =>
+    platform.sent.find(({ text }) => text.startsWith('(2/2) Confirm test bot')),
+  );
+  assert.equal(store.getSetupRun(key)?.step, 1);
+  await platform.receive('group-cancel', '/cancel', {
+    ...group,
+    replyTo: confirm.messageId,
+  });
+  assert.equal(
+    platform.sent.at(-1)?.text,
+    'Setup cancelled. Already saved: credentials (TEST_SETUP_TOKEN). Rerun setup to overwrite credentials.',
+  );
+  assert.equal(platform.sent.at(-1)?.threadId, group.threadId);
+  assert.equal(store.getSetupRun(key)?.status, 'cancelled');
+  assert.equal(store.getSetupRun(key)?.step, 0);
+  assert.equal(store.getSetupRun(key)?.draft.entry.tokenEnv, undefined);
+  assert.deepEqual(
+    (await loadSettings(workspace, registry)).platforms.map(({ id }) => id),
+    [adapterId],
+  );
+  const afterSecondCancel = platform.sent.length;
+  await platform.receive('late-confirm', 'yes', {
+    ...group,
+    replyTo: confirm.messageId,
+  });
+  assert.equal(
+    store.getMessage({ adapterId, chatId: '-100_7' }, 'late-confirm'),
+    undefined,
+  );
+  assert.equal(platform.sent.length, afterSecondCancel);
+  await platform.receive('add3', '/add platform trial', group);
+  await dmPrompt(afterSecondCancel);
+  assert.equal(store.getSetupRun(key)?.step, 0);
 });
 
 test('runtime isolates agent and execution failures and keeps owner-visible chat working', async (t) => {

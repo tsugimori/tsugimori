@@ -605,6 +605,7 @@ test('setup hides credentials, validates the token, confirms the bot and prints 
     signal: new AbortController().signal,
     runCheck: async () => assert.fail('Unexpected check'),
     runCommand: async () => assert.fail('Unexpected command'),
+    recordCredential: () => assert.fail('Unexpected external credential'),
     testTurn: async () => assert.fail('Unexpected test turn'),
     install: async () => assert.fail('Unexpected install'),
     credential: (name) => writes.get(name),

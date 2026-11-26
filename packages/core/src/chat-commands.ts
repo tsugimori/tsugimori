@@ -7,6 +7,7 @@ const descriptions = {
     en: 'Allow members to use the bot here',
     'zh-TW': '允許成員在此使用機器人',
   },
+  cancel: { en: 'Cancel guided setup', 'zh-TW': '取消引導設定' },
   compact: {
     en: 'Compact this chat’s context',
     'zh-TW': '壓縮目前對話的上下文',
@@ -19,6 +20,7 @@ const descriptions = {
     en: 'Show or set fast mode (on, off, default)',
     'zh-TW': '查看或設定快速模式（on、off、default）',
   },
+  help: { en: 'Show available commands', 'zh-TW': '查看可用指令' },
   login: { en: 'Sign in to an agent', 'zh-TW': '登入代理' },
   model: {
     en: 'Show or set the model (default to reset)',

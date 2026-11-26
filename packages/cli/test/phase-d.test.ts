@@ -4,6 +4,8 @@ import claude from '@tsugimori/agent-claude-sdk';
 import codex from '@tsugimori/agent-codex';
 import { loadSettings } from '@tsugimori/config';
 import { GuidedSetup, PluginRegistry } from '@tsugimori/core';
+import line from '@tsugimori/platform-line';
+import telegram from '@tsugimori/platform-telegram';
 import { SqliteStore } from '@tsugimori/storage-sqlite';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
@@ -32,6 +34,79 @@ async function fixture(t: TestContext, config = {}) {
   await writeFile(join(directory, 'tsugimori.json'), JSON.stringify(config));
   return directory;
 }
+
+test('guided setup sends localized plans before any prompts', async (t) => {
+  const workspace = await fixture(t, { locale: 'zh-TW' });
+  const store = new SqliteStore(':memory:');
+  t.after(() => store.close());
+  const registry = new PluginRegistry([line, claude, telegram]);
+  const setup = new GuidedSetup({ store, workspace, registry });
+  const cases = [
+    {
+      category: 'platform',
+      kind: 'line',
+      locale: undefined,
+      plan: [
+        '設定流程',
+        '1. 驗證 LINE 頻道憑證 · 頻道密鑰（私訊） / 長效存取權杖（私訊） / 確認機器人名稱（yes/no）',
+        '儲存時機：第 1 步在你確認機器人名稱後將頻道密鑰與存取權杖寫入 .env；所有步驟及檢查通過後儲存工作區設定。',
+        '隨時可以傳 /cancel 取消',
+      ],
+      header: '（1/1）驗證 LINE 頻道憑證',
+      prompt: '（1/1） · 第 1 題，共 3 題：請輸入 LINE 頻道密鑰。',
+    },
+    {
+      category: 'agent',
+      kind: 'claude-sdk',
+      locale: undefined,
+      plan: [
+        '設定流程',
+        '1. 登入 Claude · 登入方式（login/token） / 設定權杖，或瀏覽器登入所需的一次性授權碼（私訊） / 瀏覽器登入時確認帳號（yes/no）',
+        '2. 執行 Claude 測試回合 · 自動執行',
+        '儲存時機：第 1 步將驗證通過的設定權杖寫入 .env，或在確認帳號前將瀏覽器登入憑證儲存到代理程式主目錄；所有步驟及檢查通過後儲存工作區設定。',
+        '隨時可以傳 /cancel 取消',
+      ],
+      header: '（1/2）登入 Claude',
+      prompt:
+        '（1/2） · 第 1 題，最多 3 題：請回覆 login 登入 Claude，或回覆 token 使用 claude setup-token 產生的權杖。',
+    },
+    {
+      category: 'platform',
+      kind: 'telegram',
+      locale: 'en',
+      plan: [
+        'Setup plan',
+        '1. Verify Telegram bot token · Bot token (DM)',
+        '2. Set Telegram owner · Owner’s numeric user ID',
+        'Saves: Step 1: writes the bot token to .env after Telegram verifies it · workspace configuration after all steps and checks pass.',
+        'Send /cancel at any time to cancel setup.',
+      ],
+      header: '(1/2) Verify Telegram bot token',
+      prompt: '(1/2) Enter the Telegram bot token.',
+    },
+  ] as const;
+  for (const { category, kind, locale, plan, header, prompt } of cases) {
+    const messages: string[] = [];
+    await assert.rejects(
+      setup.run(
+        { mode: 'add', category, kind, id: kind },
+        {
+          locale,
+          signal: AbortSignal.timeout(2_000),
+          show: async (text) => {
+            messages.push(text);
+          },
+          prompt: async ({ text }) => {
+            assert.equal(text, prompt);
+            assert.deepEqual(messages, [plan.join('\n'), header]);
+            throw new Error('Stop at the first prompt');
+          },
+        },
+      ),
+      /Stop at the first prompt/,
+    );
+  }
+});
 
 function releases(
   version: string,
@@ -499,8 +574,15 @@ test('Codex add confirms the device-login account and /login runs only the login
     id: 'codex-1',
   } as const;
   await assert.rejects(setup.run(request, io), /not confirmed/);
+  assert.match(
+    seen[0] ?? '',
+    /1\. Install the pinned Codex CLI · Runs automatically\n2\. Sign in to Codex .*confirm the account \(yes\/no\)\n3\. Run a Codex test turn · Runs automatically/,
+  );
   assert.deepEqual((await loadSettings(workspace, registry)).agents, []);
+  const resumed = seen.length;
   await setup.run(request, io);
+  assert.match(seen[resumed] ?? '', /^Setup plan\n2\. Sign in to Codex/);
+  assert.doesNotMatch(seen[resumed] ?? '', /Install the pinned Codex CLI/);
   assert.equal(
     (await loadSettings(workspace, registry)).agents[0]?.version,
     '1.2.3',
@@ -512,7 +594,10 @@ test('Codex add confirms the device-login account and /login runs only the login
     ['-tzf', '-xzf'],
   );
   assert.equal(tested, 1);
+  const login = seen.length;
   await setup.run({ mode: 'login', id: 'codex-1' }, io);
+  assert.match(seen[login] ?? '', /^Setup plan\n1\. Sign in to Codex/);
+  assert.doesNotMatch(seen[login] ?? '', /test turn/);
   assert.equal(tested, 1);
   assert.equal(
     (await loadSettings(workspace, registry)).agents[0]?.enabled,
@@ -633,7 +718,11 @@ test('Claude browser login relays the vendor URL, handles a partial code prompt 
       return ok;
     },
   });
-  const run = (mode: 'add' | 'login', confirm: string) => {
+  const run = (
+    mode: 'add' | 'login',
+    confirm: string,
+    cancel?: AbortController,
+  ) => {
     prompts.length = 0;
     return setup.run(
       mode === 'add'
@@ -641,11 +730,13 @@ test('Claude browser login relays the vendor URL, handles a partial code prompt 
         : { mode, id: 'claude' },
       {
         signal: AbortSignal.timeout(5_000),
+        cancelSignal: cancel?.signal,
         show: async (text) => {
           progress.push(text);
         },
         prompt: async (question) => {
           prompts.push(question);
+          if (prompts.length === 3) cancel?.abort();
           return prompts.length === 1
             ? 'login'
             : question.secret
@@ -658,10 +749,26 @@ test('Claude browser login relays the vendor URL, handles a partial code prompt 
   await assert.rejects(run('add', 'no'), /not confirmed/);
   assert.equal(tested, 0);
   await run('add', 'yes');
+  await assert.rejects(
+    run('login', 'yes', new AbortController()),
+    /Already saved: credentials \(Claude browser login \(agent home\)\) and tsugimori\.json \(claude disabled for sign-in\)/,
+  );
+  assert.equal(
+    (await loadSettings(workspace, registry)).agents[0]?.enabled,
+    false,
+  );
   await run('login', 'yes');
+  assert.notEqual(
+    (await loadSettings(workspace, registry)).agents[0]?.enabled,
+    false,
+  );
   assert.equal(tested, 2);
-  assert.equal(written, (code + '\n').repeat(3));
-  assert.match(prompts[2]?.text ?? '', /owner@example\.test/);
+  assert.equal(written, (code + '\n').repeat(4));
+  assert.match(prompts[1]?.text ?? '', /^\(1\/2\) · Question 2 of 3:/);
+  assert.match(
+    prompts[2]?.text ?? '',
+    /^\(1\/2\) · Question 3 of 3: .*owner@example\.test/,
+  );
   assert.ok(progress.some((text) => text.includes(signIn)));
   assert.ok(!progress.join('\n').includes(code));
   assert.ok(!progress.join('\n').includes('ignored-callback-secret'));

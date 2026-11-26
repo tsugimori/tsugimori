@@ -52,13 +52,49 @@ const messages = {
     platformRecovered: (id: string) => `${id} is running again.`,
     delayed: (due: string) => `[Delayed schedule, originally due ${due}]`,
     setup: {
+      plan: 'Setup plan',
+      automatic: 'Runs automatically',
+      unspecified: 'Prompt details are not declared',
+      private: ' (DM)',
+      hiddenInput: ' (hidden input)',
+      savesAfter: (step: number, text: string) => `Step ${step}: ${text}`,
+      savesConfig: 'workspace configuration after all steps and checks pass',
+      disablesAgent: 'the agent is disabled in tsugimori.json before sign-in',
+      saving: (details: string[]) => `Saves: ${details.join(' · ')}.`,
+      canCancel: 'Send /cancel at any time to cancel setup.',
+      progress: (step: number, total: number) => `(${step}/${total})`,
+      stepMessage: (progress: string, text: string) => `${progress} ${text}`,
+      question: (
+        step: string,
+        question: number,
+        total: number,
+        text: string,
+        maximum = false,
+      ) =>
+        `${step} · Question ${question} of ${maximum ? 'up to ' : ''}${total}: ${text}`,
+      directMessage: 'this direct message',
+      origin: (name: string) => `Setup started in ${name}.`,
+      idle: 'No setup is in progress.',
+      cancelled: (credentials: string[], disabledId?: string) => {
+        const saved = [
+          ...(credentials.length
+            ? [`credentials (${credentials.join(', ')})`]
+            : []),
+          ...(disabledId
+            ? [`tsugimori.json (${disabledId} disabled for sign-in)`]
+            : []),
+        ];
+        return saved.length
+          ? `Setup cancelled. Already saved: ${saved.join(' and ')}.${credentials.length ? ' Rerun setup to overwrite credentials.' : ''}`
+          : 'Setup cancelled. No credentials or configuration were saved in this run.';
+      },
       replyPrivately:
         'Reply directly to the current private setup prompt to submit credentials.',
       useDirectMessage:
         'Submit setup credentials only in the bot’s direct message.',
       changedOwner: 'The platform or its owner changed during setup.',
       alreadyRunning:
-        'A guided setup is already running. Finish the current prompts first.',
+        'A guided setup is already running. Finish it or send /cancel in that chat.',
       sendingPrivately:
         'I’ll send the credential prompt in a direct message. Continue there for that step.',
       reply: 'Reply directly to this message.',
@@ -129,10 +165,43 @@ const messages = {
     platformRecovered: (id: string) => `${id} 已恢復運作。`,
     delayed: (due: string) => `［排程延遲，原定時間 ${due}］`,
     setup: {
+      plan: '設定流程',
+      automatic: '自動執行',
+      unspecified: '未提供提示說明',
+      private: '（私訊）',
+      hiddenInput: '（隱藏輸入）',
+      savesAfter: (step: number, text: string) => `第 ${step} 步${text}`,
+      savesConfig: '所有步驟及檢查通過後儲存工作區設定',
+      disablesAgent: '登入前先在 tsugimori.json 停用代理程式',
+      saving: (details: string[]) => `儲存時機：${details.join('；')}。`,
+      canCancel: '隨時可以傳 /cancel 取消',
+      progress: (step: number, total: number) => `（${step}/${total}）`,
+      stepMessage: (progress: string, text: string) => `${progress}${text}`,
+      question: (
+        step: string,
+        question: number,
+        total: number,
+        text: string,
+        maximum = false,
+      ) =>
+        `${step} · 第 ${question} 題，${maximum ? '最多' : '共'} ${total} 題：${text}`,
+      directMessage: '這個私訊',
+      origin: (name: string) => `設定來自「${name}」。`,
+      idle: '目前沒有進行中的設定',
+      cancelled: (credentials: string[], disabledId?: string) => {
+        const saved = [
+          ...(credentials.length ? [`憑證（${credentials.join('、')}）`] : []),
+          ...(disabledId ? [`tsugimori.json（登入前停用 ${disabledId}）`] : []),
+        ];
+        return saved.length
+          ? `已取消設定，本次已儲存${saved.join('、')}。${credentials.length ? '重新執行設定可覆寫憑證。' : ''}`
+          : '已取消設定，本次未儲存憑證或設定。';
+      },
       replyPrivately: '請直接回覆目前的私訊設定提示以提交憑證。',
       useDirectMessage: '請在機器人的私訊中提交設定憑證。',
       changedOwner: '設定期間，平台或主人身分已變更。',
-      alreadyRunning: '已有設定流程進行中。請先完成目前的步驟。',
+      alreadyRunning:
+        '已有設定流程進行中。請完成設定，或在原聊天室傳 /cancel。',
       sendingPrivately: '憑證輸入提示將透過私訊傳送。請在私訊完成這個步驟。',
       reply: '請直接回覆這則訊息。',
       expired: '設定提示已過期。請重新執行指令繼續。',

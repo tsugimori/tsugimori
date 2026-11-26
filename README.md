@@ -20,7 +20,7 @@ corepack pnpm exec tsugimori doctor ./ws
 corepack pnpm exec tsugimori start ./ws
 ```
 
-The gateway reloads validated configuration and credentials while running. Owners can run `/add <agent|platform> <kind> [--id <id>]` and `/login <agentId>`. Setup progress stays in the originating thread. Enter credentials by replying to the bot's linked prompt in the owner's direct message. Rerun the same command and ID to resume an interrupted setup. Press Ctrl+C or send SIGTERM to stop the gateway and flush traces.
+The gateway reloads validated configuration and credentials while running. Press Ctrl+C or send SIGTERM to stop the gateway and flush traces.
 
 For manual configuration, use the [example workspace](examples/workspace/tsugimori.json) and [JSON Schema](schema/tsugimori.schema.json). Set a native user ID by adapter ID or platform kind in `owner`, or run `tsugimori pair [dir] --adapter <id>` and send the printed command to the bot in a direct message within ten minutes. Owners can use `/allow`, `/deny`, and `/status`.
 
@@ -29,6 +29,14 @@ For manual configuration, use the [example workspace](examples/workspace/tsugimo
 - `tsugimori doctor [dir] [--json]` reports core and enabled-plugin checks and exits with status 1 on failure.
 - `tsugimori setup [dir] [--yes] [--upgrade]` prints the package-manager command for missing system packages. `--yes` runs that command. Setup installs the full Codex release package for each enabled Codex instance, verifies published SHA-256 checksums, and saves each version in `agents[].version`. Use `--upgrade` to update those pins to the latest release.
 - `tsugimori start [dir]` logs failed checks and disables the affected capabilities. The owner gets a direct message with failures when an owner channel with free push is available. Use `/status` for the current state.
+
+### Guided setup
+
+Owners run `/add <agent|platform> <kind> [--id <id>]` or `/login <agentId>` in chat. In a terminal, use `tsugimori setup <agent|platform> <kind> [--id <id>] [--dir <dir>]` or `tsugimori setup login <agentId> [--dir <dir>]`. `tsugimori add` also opens the add wizard.
+
+The first message lists the steps, what each asks for, and when setup saves credentials and configuration. The originating thread shows numbered progress. Reply directly to each numbered prompt. Secret prompts go to the owner's DM and identify the originating chat. The terminal hides secret input.
+
+Send `/cancel` in the originating chat or in the DM that has a pending secret prompt. In a terminal, enter `/cancel` or press Ctrl+C. Cancellation reports which credentials and configuration this attempt already saved. The next attempt starts at step 1. Rerun the same command and ID to resume an interrupted setup. `/help` lists owner commands, including `/cancel` for guided setup.
 
 ## Plugin configuration
 

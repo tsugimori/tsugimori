@@ -68,7 +68,14 @@ export interface SetupPatch {
 export interface SetupContext extends CheckContext {
   install(): Promise<void>;
   locale?: 'en' | 'zh-TW';
-  prompt(options: { secret?: boolean; text: string }): Promise<string>;
+  prompt(options: {
+    /** Override the plan's question count for a conditional path. */
+    questions?: { maximum?: boolean; total: number };
+    secret?: boolean;
+    text: string;
+  }): Promise<string>;
+  /** Report a credential saved by an external login command. Pass its name only. */
+  recordCredential(name: string): void;
   runCheck(id: string): Promise<CheckItem>;
   show(text: string): Promise<void>;
   signal: AbortSignal;
@@ -77,12 +84,20 @@ export interface SetupContext extends CheckContext {
   writeEnv(key: string, value: string): Promise<void>;
 }
 
+interface SetupText {
+  localized?: { 'zh-TW'?: string };
+  text: string;
+}
+
 export interface SetupStep {
+  /** Questions in plan order. An empty list declares an automatic step. */
+  asks?: readonly (SetupText & { secret?: boolean })[];
   id: string;
   localized?: { 'zh-TW'?: string };
   retryFrom?: string;
   run(ctx: SetupContext): void | Promise<void>;
   runOnLogin?: boolean;
+  saves?: SetupText;
   title: string;
 }
 

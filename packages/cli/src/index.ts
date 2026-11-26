@@ -1,5 +1,5 @@
 import type { Config, WorkspaceConfig } from '@tsugimori/config';
-import type { SetupDependencies } from '@tsugimori/core';
+import type { SetupDependencies, SetupRequest } from '@tsugimori/core';
 
 import claude from '@tsugimori/agent-claude-sdk';
 import codex from '@tsugimori/agent-codex';
@@ -17,6 +17,7 @@ import {
   Gateway,
   GuidedSetup,
   PluginRegistry,
+  SetupCancelled,
   systemInstallPlan,
 } from '@tsugimori/core';
 import { SetupError } from '@tsugimori/core';
@@ -33,7 +34,7 @@ import { isDeepStrictEqual, parseArgs } from 'node:util';
 import { doctorText, runSetup, terminalIO } from './setup.ts';
 
 const usage =
-  'Usage: tsugimori init [dir] | start [dir] | pair [dir] --adapter <id> | previews [dir] | doctor [dir] [--json] | setup [dir] [--yes] [--upgrade] | add <agent|platform> <kind> [--id <id>] [--dir <dir>]';
+  'Usage: tsugimori init [dir] | start [dir] | pair [dir] --adapter <id> | previews [dir] | doctor [dir] [--json] | setup [dir] [--yes] [--upgrade] | add <agent|platform> <kind> [--id <id>] [--dir <dir>] | setup <agent|platform> <kind> [--id <id>] [--dir <dir>] | setup login <agentId> [--dir <dir>]';
 
 class UsageError extends Error {}
 
@@ -49,7 +50,13 @@ export async function main(
   ]),
   deps: SetupDependencies = {},
 ) {
-  const [command, ...args] = argv;
+  const [action, ...parameters] = argv;
+  const [target, name] = parameters;
+  const guided = action === 'setup' && name && !name.startsWith('-');
+  const login = guided && target === 'login';
+  const command =
+    guided && (target === 'agent' || target === 'platform') ? 'add' : action;
+  const args = login ? parameters.slice(1) : parameters;
   if (command === '--help' || command === '-h') {
     console.log(usage);
     return;
@@ -70,8 +77,9 @@ export async function main(
     parsed = parseArgs({
       args,
       allowPositionals: true,
-      options:
-        command === 'pair'
+      options: login
+        ? { dir: { type: 'string' } }
+        : command === 'pair'
           ? { adapter: { type: 'string' } }
           : command === 'doctor'
             ? { json: { type: 'boolean' } }
@@ -84,14 +92,23 @@ export async function main(
   } catch {
     throw new UsageError(usage);
   }
-  if (command === 'add') {
+  if (command === 'add' || login) {
     const [category, kind] = parsed.positionals;
-    if (
-      (category !== 'agent' && category !== 'platform') ||
-      !kind ||
-      parsed.positionals.length !== 2
-    )
-      throw new UsageError(usage);
+    const request: SetupRequest | undefined = login
+      ? category && parsed.positionals.length === 1
+        ? { mode: 'login', id: category }
+        : undefined
+      : (category === 'agent' || category === 'platform') &&
+          kind &&
+          parsed.positionals.length === 2
+        ? {
+            mode: 'add',
+            category,
+            kind,
+            id: typeof parsed.values.id === 'string' ? parsed.values.id : kind,
+          }
+        : undefined;
+    if (!request) throw new UsageError(usage);
     const workspace = resolve(
       typeof parsed.values.dir === 'string' ? parsed.values.dir : '.',
     );
@@ -102,18 +119,13 @@ export async function main(
     const io = terminalIO();
     try {
       const setup = new GuidedSetup({ ...deps, registry, store, workspace });
-      const result = await setup.run(
-        {
-          mode: 'add',
-          category,
-          kind,
-          id: typeof parsed.values.id === 'string' ? parsed.values.id : kind,
-        },
-        io,
-      );
+      const result = await setup.run(request, io);
       console.log(
         `Saved ${result.id}. A running gateway will attach it after reloading the workspace.`,
       );
+    } catch (error) {
+      if (!(error instanceof SetupCancelled)) throw error;
+      console.log(error.message);
     } finally {
       io.close();
       store.close();

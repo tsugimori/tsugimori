@@ -18,6 +18,7 @@ import type { GuidedSetup, SetupRequest } from './setup.ts';
 import { untilAborted } from './abort.ts';
 import { failureText } from './checks.ts';
 import { conversationId } from './outbound.ts';
+import { SetupCancelled } from './setup.ts';
 import { systemMessages } from './system-messages.ts';
 import { reply } from './tasks.ts';
 
@@ -28,6 +29,16 @@ interface Pending {
   origin: string;
   response: ReturnType<typeof Promise.withResolvers<string>>;
   secret: boolean;
+  userId: string;
+}
+
+interface Running {
+  adapterId: string;
+  cancel: AbortController;
+  chatId: string;
+  done: Promise<SetupCancelled | undefined>;
+  finished?: boolean;
+  secretChatId?: string;
   userId: string;
 }
 
@@ -43,8 +54,9 @@ interface Dependencies {
 export class ChatSetup {
   readonly #deps: Dependencies;
   readonly #shutdown = new AbortController();
-  #running?: Promise<void>;
+  #running?: Running;
   #pending?: Pending;
+  readonly #cancelledSecretChats = new Map<string, number>();
 
   constructor(deps: Dependencies) {
     this.#deps = deps;
@@ -56,11 +68,19 @@ export class ChatSetup {
     message: InboundMessage,
     command?: Command['name'] | 'other-bot',
   ) {
-    const { store } = this.#deps;
+    const { store, trace } = this.#deps;
     const prompt = this.#pending;
     const owner = this.#deps.isOwner(adapter.id, message.userId);
+    if (command === 'cancel') {
+      if (owner && !message.edited)
+        await trace.span('trigger.command', { ...chat, command }, () =>
+          this.#cancel(adapter, chat, message),
+        );
+      return true;
+    }
     const eligible =
       prompt &&
+      !this.#running?.cancel.signal.aborted &&
       command !== 'other-bot' &&
       owner &&
       prompt.adapterId === chat.adapterId &&
@@ -71,9 +91,17 @@ export class ChatSetup {
       message.replyTo &&
       message.replyTo === prompt.messageId;
     const previouslySecret = store.isSetupSecret(chat, message.messageId);
+    const privateReply = Boolean(
+      message.replyTo && store.isSetupSecret(chat, message.replyTo),
+    );
+    const lateSecret = this.#cancelledSecretChats.size
+      ? this.#cancelledSecretChats.get(
+          JSON.stringify([chat.adapterId, chat.chatId, message.userId]),
+        )
+      : undefined;
     const secret =
       previouslySecret ||
-      Boolean(message.replyTo && store.isSetupSecret(chat, message.replyTo)) ||
+      privateReply ||
       Boolean(
         eligible &&
         prompt.secret &&
@@ -84,7 +112,12 @@ export class ChatSetup {
       ) ||
       /\b(?:\d{5,}:[A-Za-z0-9_-]{25,}|sk-ant-oat[A-Za-z0-9_-]{20,})\b/.test(
         message.text,
-      );
+      ) ||
+      (lateSecret !== undefined &&
+        Date.now() < lateSecret &&
+        /^(?:[a-f\d]{32}|[A-Za-z\d+/_-]{80,}={0,2}|[A-Za-z\d._-]{8,}#[A-Za-z\d._-]+)$/i.test(
+          message.text.trim(),
+        ));
     if (secret) {
       store.markSetupSecret(chat, message.messageId);
       try {
@@ -99,11 +132,19 @@ export class ChatSetup {
     }
     const accepted =
       linked &&
+      this.#pending === prompt &&
+      !this.#running?.cancel.signal.aborted &&
       !message.edited &&
       !previouslySecret &&
       (prompt.secret ? message.chatKind === 'dm' : !secret);
     if (accepted) prompt.response.resolve(message.text);
-    else if (secret && owner && !message.edited && !previouslySecret) {
+    else if (
+      secret &&
+      !privateReply &&
+      eligible &&
+      !message.edited &&
+      !previouslySecret
+    ) {
       const m = systemMessages(this.#deps.runtime.config.locale).setup;
       const text =
         message.chatKind === 'dm' ? m.replyPrivately : m.useDirectMessage;
@@ -118,6 +159,52 @@ export class ChatSetup {
     return Boolean(secret || linked);
   }
 
+  async #cancel(
+    adapter: PlatformAdapter,
+    chat: ChatRef,
+    message: InboundMessage,
+  ) {
+    const { runtime, store } = this.#deps;
+    const m = systemMessages(runtime.config.locale).setup;
+    const run = this.#running;
+    const pending = this.#pending;
+    if (
+      !run ||
+      run.finished ||
+      run.cancel.signal.aborted ||
+      run.adapterId !== adapter.id ||
+      run.userId !== message.userId ||
+      (chat.chatId !== run.chatId &&
+        !(
+          pending?.secret &&
+          pending.chatId === chat.chatId &&
+          message.chatKind === 'dm'
+        ))
+    ) {
+      await adapter.send(reply(message, m.idle));
+      return;
+    }
+    if (pending?.messageId)
+      store.markSetupSecret(
+        { adapterId: adapter.id, chatId: pending.chatId },
+        pending.messageId,
+      );
+    if (run.secretChatId) {
+      const now = Date.now();
+      for (const [key, expires] of this.#cancelledSecretChats)
+        if (expires <= now) this.#cancelledSecretChats.delete(key);
+      for (const chatId of [run.chatId, run.secretChatId])
+        this.#cancelledSecretChats.set(
+          JSON.stringify([adapter.id, chatId, message.userId]),
+          now + 10 * 60_000,
+        );
+    }
+    this.#pending = undefined;
+    run.cancel.abort();
+    const cancelled = await run.done;
+    await adapter.send(reply(message, cancelled?.message ?? m.idle));
+  }
+
   async start(
     adapter: PlatformAdapter,
     message: InboundMessage,
@@ -127,7 +214,8 @@ export class ChatSetup {
     const { locale } = runtime.config;
     const m = systemMessages(locale).setup;
     const adapterId = adapter.id;
-    const signal = this.#shutdown.signal;
+    const cancel = new AbortController();
+    const signal = AbortSignal.any([this.#shutdown.signal, cancel.signal]);
     const platform = () => {
       signal.throwIfAborted();
       const current = runtime.getAdapter(adapterId);
@@ -142,12 +230,18 @@ export class ChatSetup {
       await show(m.alreadyRunning);
       return;
     }
-    this.#running = (async () => {
+    const origin = conversationId(message);
+    const originName = (
+      message.chatTitle ||
+      (message.chatKind === 'dm' ? m.directMessage : origin)
+    ).replace(/\s+/gu, ' ');
+    const done = (async () => {
       try {
         const result = await setup.run(request, {
           locale,
           show,
-          signal,
+          signal: this.#shutdown.signal,
+          cancelSignal: cancel.signal,
           measure: (step, run) =>
             trace.span('setup.step', { adapterId, step }, run),
           waitForDetach: async (id) => {
@@ -155,8 +249,7 @@ export class ChatSetup {
             while (runtime.getAgent(id))
               await delay(50, undefined, { signal: wait });
           },
-          prompt: async ({ secret = false, text }) => {
-            const origin = conversationId(message);
+          prompt: async ({ secret = false, text }, progress) => {
             const privatePrompt = secret && message.chatKind !== 'dm';
             const address: Omit<OutboundMessage, 'text'> = privatePrompt
               ? { chatId: message.userId }
@@ -170,14 +263,20 @@ export class ChatSetup {
               response: Promise.withResolvers<string>(),
             };
             this.#pending = pending;
+            if (secret && this.#running?.cancel === cancel)
+              this.#running.secretChatId = pending.chatId;
             try {
-              if (privatePrompt) await show(m.sendingPrivately);
+              if (privatePrompt)
+                await show(m.stepMessage(progress, m.sendingPrivately));
               signal.throwIfAborted();
               const receipt = await platform().send({
                 ...address,
-                text: text + ' ' + m.reply,
+                text: secret
+                  ? `${text} ${m.reply}\n${m.origin(originName)}`
+                  : `${text} ${m.reply}`,
               });
-              if (secret)
+              // A cancellation can arrive before the platform returns the prompt ID.
+              if (secret || cancel.signal.aborted)
                 store.markSetupSecret(
                   { adapterId, chatId: pending.chatId },
                   receipt.messageId,
@@ -198,6 +297,8 @@ export class ChatSetup {
             }
           },
         });
+        if (this.#running?.cancel === cancel) this.#running.finished = true;
+        if (cancel.signal.aborted) return;
         if (!result.enabled) {
           await show(m.disabled(result.id));
           return;
@@ -221,20 +322,31 @@ export class ChatSetup {
           await show(m.saved(result.id) + '\n' + (details || m.checkStatus));
         }
       } catch (error) {
-        if (!signal.aborted) {
+        if (error instanceof SetupCancelled) return error;
+        if (!this.#shutdown.signal.aborted && !cancel.signal.aborted) {
           const text = error instanceof SetupError ? error.message : m.failed;
           await show(text).catch(() =>
             log({ level: 'warn', event: 'setup.feedback_failed', adapterId }),
           );
+        } else if (cancel.signal.aborted) {
+          return new SetupCancelled(m.failed);
         }
       }
+      return undefined;
     })().finally(() => {
       this.#running = undefined;
     });
+    this.#running = {
+      adapterId,
+      cancel,
+      chatId: origin,
+      done,
+      userId: message.userId,
+    };
   }
 
   async stop() {
     this.#shutdown.abort();
-    await this.#running;
+    await this.#running?.done;
   }
 }

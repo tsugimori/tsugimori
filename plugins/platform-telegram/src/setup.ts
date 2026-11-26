@@ -114,6 +114,13 @@ export const telegramSetup: SetupStep[] = [
     id: 'token',
     title: 'Verify Telegram bot token',
     localized: { 'zh-TW': '驗證 Telegram 機器人權杖' },
+    asks: [
+      { text: 'Bot token', localized: { 'zh-TW': '機器人權杖' }, secret: true },
+    ],
+    saves: {
+      text: 'writes the bot token to .env after Telegram verifies it',
+      localized: { 'zh-TW': '在 Telegram 驗證通過後將機器人權杖寫入 .env' },
+    },
     async run(ctx) {
       const m = setupMessages[ctx.locale ?? 'en'];
       const token = (
@@ -142,6 +149,12 @@ export const telegramSetup: SetupStep[] = [
     id: 'owner',
     title: 'Set Telegram owner',
     localized: { 'zh-TW': '設定 Telegram 主人' },
+    asks: [
+      {
+        text: 'Owner’s numeric user ID',
+        localized: { 'zh-TW': '主人的數字使用者 ID' },
+      },
+    ],
     async run(ctx) {
       const m = setupMessages[ctx.locale ?? 'en'];
       const ownerId = (
