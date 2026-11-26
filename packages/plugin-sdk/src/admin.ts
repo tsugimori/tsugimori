@@ -133,7 +133,6 @@ export type TriggerReason =
   | 'not-addressed'
   | 'not-allowlisted'
   | 'addressed-to-other'
-  | 'bot-message'
   | 'deleted'
   | 'duplicate';
 

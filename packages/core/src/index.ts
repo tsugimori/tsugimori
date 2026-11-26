@@ -1015,7 +1015,6 @@ export class Gateway {
     const parsed = parseCommand(event.text, adapter.botIdentity?.username);
     const command = parsed === 'other-bot' ? undefined : parsed;
     if (
-      !event.botMessage &&
       inbound.type !== 'chat-migrated' &&
       command?.name === 'cancel' &&
       (await this.#chatRemoval.receive(adapter, chat, event, true))
@@ -1024,7 +1023,6 @@ export class Gateway {
       return;
     }
     if (
-      !event.botMessage &&
       inbound.type !== 'chat-migrated' &&
       (await this.#chatSetup.receive(
         adapter,
@@ -1038,7 +1036,6 @@ export class Gateway {
       return;
     }
     if (
-      !event.botMessage &&
       inbound.type !== 'chat-migrated' &&
       parsed !== 'other-bot' &&
       (await this.#chatRemoval.receive(adapter, chat, event, false))
@@ -1110,13 +1107,9 @@ export class Gateway {
       text: stored.text,
     };
     await this.#hooks.emit('inbound.received', { chat, message });
-    if (event.botMessage || this.#isStopping() || parsed === 'other-bot') {
+    if (this.#isStopping() || parsed === 'other-bot') {
       recordDecision(
-        event.botMessage
-          ? 'bot-message'
-          : parsed === 'other-bot'
-            ? 'addressed-to-other'
-            : 'not-addressed',
+        parsed === 'other-bot' ? 'addressed-to-other' : 'not-addressed',
         false,
         stored.seq,
       );

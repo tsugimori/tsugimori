@@ -7,7 +7,6 @@ export function shouldTrigger(
   owner: boolean,
   allowlisted: boolean,
 ): Decision {
-  if (message.botMessage) return { triggered: false, reason: 'bot-message' };
   if (message.addressedToOther && !message.mentionsBot && !message.repliesToBot)
     return { triggered: false, reason: 'addressed-to-other' };
   if (owner && message.chatKind === 'dm')

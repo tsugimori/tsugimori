@@ -4226,7 +4226,13 @@ test('stores trigger reasons for skipped messages, duplicates, deletions and com
       'addressed-to-other',
       false,
     ],
-    [{ ...dm, botMessage: true }, true, true, 'bot-message', false],
+    [
+      { ...group, botMessage: true, mentionsBot: true },
+      false,
+      true,
+      'mention',
+      true,
+    ],
   ] as const) {
     assert.deepEqual(decideTrigger(message, owner, allowlisted), {
       triggered,
