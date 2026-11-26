@@ -33,6 +33,10 @@ export type AttachmentStatus = { id: string } & (
   | { attempt: number; retryAt: number; state: 'retrying' }
   | { failure?: CheckReport; state: 'unavailable' }
 );
+type AgentAttachmentStatus = AttachmentStatus & {
+  implementation?: string;
+  kind: string;
+};
 export type PlatformNotice =
   | { kind: 'unavailable' | 'recovered' }
   | { kind: 'environment'; report: CheckReport };
@@ -132,10 +136,19 @@ export class Runtime {
       },
     );
     const agents = this.config.agents.map(
-      ({ enabled, id }): AttachmentStatus => {
-        if (enabled === false) return { id, state: 'disabled' };
-        if (this.#agents.has(id)) return { id, state: 'running' };
-        return { id, state: 'unavailable', failure: failure('agent', id) };
+      ({ enabled, id, kind }): AgentAttachmentStatus => {
+        const entry = this.#agents.get(id);
+        const implementation =
+          entry?.agent.implementation ||
+          this.#deps.registry.agentImplementation(kind);
+        const identity = { id, implementation, kind };
+        if (enabled === false) return { ...identity, state: 'disabled' };
+        if (entry) return { ...identity, state: 'running' };
+        return {
+          ...identity,
+          state: 'unavailable',
+          failure: failure('agent', id),
+        };
       },
     );
     return { platforms, agents };

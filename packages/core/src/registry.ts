@@ -62,6 +62,10 @@ export class PluginRegistry implements PluginKinds {
     return new Set(this.#agents.keys());
   }
 
+  agentImplementation(kind: string) {
+    return this.#agents.get(kind)?.implementation;
+  }
+
   platform(kind: string) {
     const factory = this.#platforms.get(kind);
     if (!factory) throw new Error(`Unregistered platform kind: ${kind}`);

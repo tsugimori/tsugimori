@@ -444,24 +444,18 @@ test(
     );
     assert.equal(platform.sent.length, 0);
     const before = await status('before');
-    assert.match(before, /^Context · unknown\nQuota · 5h 90% left$/m);
-    assert.doesNotMatch(before, /^Session · /m);
+    assert.match(before, /^Context: unknown\nQuota: 5h 90% left$/m);
+    assert.doesNotMatch(before, /^Session: /m);
 
     await platform.emit(inbound('run', 'start work'));
     await entered.promise;
     await platform.emit(inbound('queue', 'follow up'));
     const live = await status('live');
-    assert.match(
-      live,
-      /^This chat · Agent test \| Model workspace-model \| Effort high \| Fast on$/m,
-    );
-    assert.match(live, /^Context · 32,000 \/ 250,000 tokens \(13%\)$/m);
-    assert.match(live, /^Session · active for /m);
-    assert.doesNotMatch(live, /^Last compaction · /m);
-    assert.match(
-      live,
-      /^Work · running for .* \(running agent\) · 1 queued · 1 running total$/m,
-    );
+    assert.match(live, /^Model: workspace-model · Effort: high · Fast: on$/m);
+    assert.match(live, /^Context: 32k \/ 250k \(13%\)$/m);
+    assert.match(live, /^Session: active for /m);
+    assert.doesNotMatch(live, /^Last compaction: /m);
+    assert.match(live, /^Work: running for .* \(running agent\) · 1 queued$/m);
     assert.equal(runs, 1);
 
     release.resolve();
@@ -470,22 +464,19 @@ test(
     await gateway.idle();
     assert.match(
       await status('before-flush'),
-      /^Last compaction · .* · 2 total$/m,
+      /^Last compaction: .* · 2 total$/m,
     );
     await trace.flush();
     const after = await status('after');
-    assert.match(after, /^Context · 8,000 \/ 250,000 tokens \(3%\)$/m);
-    assert.match(
-      after,
-      /^Last compaction · .* · manual · 32,000 → 8,000 tokens · 2 total$/m,
-    );
-    assert.match(after, /^Session · active for /m);
-    assert.doesNotMatch(after, /^Work · /m);
+    assert.match(after, /^Context: 8k \/ 250k \(3%\)$/m);
+    assert.match(after, /^Last compaction: .* · manual · 32k → 8k · 2 total$/m);
+    assert.match(after, /^Session: active for /m);
+    assert.doesNotMatch(after, /^Work: /m);
     await platform.emit(inbound('switch', '/model other'));
     const changed = await status('changed');
-    assert.match(changed, /^Context · unknown$/m);
-    assert.doesNotMatch(changed, /^Last compaction · /m);
-    assert.doesNotMatch(changed, /^Session · /m);
+    assert.match(changed, /^Context: unknown$/m);
+    assert.doesNotMatch(changed, /^Last compaction: /m);
+    assert.doesNotMatch(changed, /^Session: /m);
     assert.equal(runs, 2);
   },
 );
@@ -521,13 +512,13 @@ test('status caches agent defaults and refreshes them on hot reload', async (t) 
   const before = reads;
   assert.match(
     await status('route'),
-    /^This chat · Agent test \| Model first \| Effort low \(default\) \| Fast on$/m,
+    /^Model: first · Effort: low \(default\) · Fast: on$/m,
   );
   f.store.setWorkspaceSettings(chat, { model: 'default' });
   defaults = { model: 'new-model', effort: 'high', serviceTier: 'default' };
   assert.match(
     await status('cached'),
-    /^This chat · Agent test \| Model provider-model \(default\) \| Effort low \(default\) \| Fast on$/m,
+    /^Model: provider-model \(default\) · Effort: low \(default\) · Fast: on$/m,
   );
   assert.equal(reads, before);
 
@@ -536,7 +527,7 @@ test('status caches agent defaults and refreshes them on hot reload', async (t) 
   await until(t, () => reloads() > loaded);
   assert.match(
     await status('refreshed'),
-    /^This chat · Agent test \| Model new-model \(default\) \| Effort high \(default\) \| Fast off$/m,
+    /^Model: new-model \(default\) · Effort: high \(default\) · Fast: off$/m,
   );
   assert.equal(f.agentStarts, 1);
   assert.equal(f.agentStops, 0);
@@ -697,7 +688,7 @@ test(
     );
 
     await f.platform.emit(inbound('status', '/status'));
-    assert.match(f.platform.sent.at(-1)?.text ?? '', /最近核准結果 · 已逾時/);
+    assert.match(f.platform.sent.at(-1)?.text ?? '', /最近核准結果：已逾時/);
   },
 );
 

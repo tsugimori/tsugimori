@@ -17,5 +17,4 @@ function builtRevision() {
   }
 }
 
-const revision = builtRevision();
-export const gatewayVersion = revision ? `${version} (${revision})` : version;
+export const gatewayBuild = { version, revision: builtRevision() };

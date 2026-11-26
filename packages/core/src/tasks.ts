@@ -180,7 +180,6 @@ export class Tasks {
           ? { ...progress, stage: 'approval' as const }
           : progress,
       queued,
-      totalRunning: this.#running.size,
     };
   }
 

@@ -3,11 +3,13 @@ import type {
   AgentCompactResult,
   AgentConnector,
   AgentEvent,
+  AgentInstanceConfig,
   AgentIO,
   AgentQuota,
   AgentRequest,
   AgentSessionInfo,
   AgentTool,
+  PluginFactoryContext,
 } from '@tsugimori/plugin-sdk';
 
 import {
@@ -70,9 +72,11 @@ interface ThreadContext extends AgentSessionInfo {
 
 const execFileAsync = promisify(execFile);
 const debug = debuglog('tsugimori:codex');
+const implementation = 'Codex App Server';
 
 export class CodexAgent implements AgentConnector {
   readonly id: string;
+  readonly implementation = implementation;
   readonly kind = 'codex';
   readonly loop = 'external';
   readonly #deps: CodexDependencies;
@@ -696,13 +700,15 @@ function nativeSessionId(sessionId: string) {
 export default definePlugin({
   name: 'agent-codex',
   agents: {
-    codex(config, { workspace }) {
-      return new CodexAgent({}, config.id, {
-        ...codexLocation(config, workspace),
-        asyncCompaction: config.options?.asyncCompaction === true,
-        compactAt: config.compactAt,
-      });
-    },
+    codex: Object.assign(
+      (config: AgentInstanceConfig, { workspace }: PluginFactoryContext) =>
+        new CodexAgent({}, config.id, {
+          ...codexLocation(config, workspace),
+          asyncCompaction: config.options?.asyncCompaction === true,
+          compactAt: config.compactAt,
+        }),
+      { implementation },
+    ),
   },
   checks: codexChecks,
   credentialNames: () => [],

@@ -492,6 +492,8 @@ export interface AgentConnector {
   /** Return locally observed metadata for the given agent session. */
   describeSession?(sessionId: string): AgentSessionInfo | undefined;
   id: string;
+  /** Human-readable, unlocalized connector name. */
+  implementation?: string;
   kind: string;
   loop: 'framework' | 'external';
   run(request: AgentRequest, io: AgentIO): AsyncIterable<AgentEvent>;
@@ -528,10 +530,14 @@ export type PlatformFactory = (
   ctx: PluginFactoryContext,
 ) => PlatformAdapter | Promise<PlatformAdapter>;
 
-export type AgentFactory = (
-  config: AgentInstanceConfig,
-  ctx: PluginFactoryContext,
-) => AgentConnector | Promise<AgentConnector>;
+export interface AgentFactory {
+  (
+    config: AgentInstanceConfig,
+    ctx: PluginFactoryContext,
+  ): AgentConnector | Promise<AgentConnector>;
+  /** Connector name available before an instance starts. */
+  implementation?: string;
+}
 
 export interface HookEvents {
   'agent.before': { agentId: string; model: string; task: ToolContext };

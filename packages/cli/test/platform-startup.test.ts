@@ -216,7 +216,7 @@ test('two Telegram startup 502s leave schedules due until the adapter recovers',
   assert.equal(f.requests, 1);
   assert.match(
     (await f.status())!,
-    /telegram:test retrying \(attempt 1\) · next retry /,
+    /^🟡 tsugimori.*\n[\s\S]*telegram:test retrying \(attempt 1\), next retry /u,
   );
   const doctorOutput = t.mock.method(console, 'log', () => {});
   assert.equal(
@@ -250,10 +250,7 @@ test('two Telegram startup 502s leave schedules due until the adapter recovers',
   ]);
   assert.equal(f.store.getSchedule(latest)?.status, 'done');
   assert.equal(f.store.getSchedule(skip)?.status, 'done');
-  assert.match(
-    (await f.status())!,
-    /Platforms · telegram:test running \| fake:owner running/,
-  );
+  assert.match((await f.status())!, /^telegram:test, fake:owner running$/m);
   await f.gateway.stop();
   assert.deepEqual(
     f.spans
@@ -338,7 +335,7 @@ test(
     assert.equal(f.requests, 2);
     assert.match(
       (await f.status())!,
-      /^Platforms · telegram:test disabled \| fake:owner running$/m,
+      /^fake:owner running\ntelegram:test disabled$/m,
     );
   },
 );

@@ -8,9 +8,11 @@ import type {
   AgentCompactResult,
   AgentConnector,
   AgentEvent,
+  AgentInstanceConfig,
   AgentIO,
   AgentRequest,
   ContextBlock,
+  PluginFactoryContext,
 } from '@tsugimori/plugin-sdk';
 
 import {
@@ -62,8 +64,11 @@ function trustedInstructions(block: ContextBlock) {
   );
 }
 
+const implementation = 'Claude Agent SDK';
+
 export class ClaudeAgent implements AgentConnector {
   readonly id: string;
+  readonly implementation = implementation;
   readonly kind = 'claude-sdk';
   readonly loop = 'external';
   readonly #query?: Query;
@@ -544,12 +549,15 @@ export default definePlugin({
     ),
   setupSteps: claudeSetup,
   agents: {
-    'claude-sdk': (config, ctx) => {
-      const auth = claudeOptions(config, ctx);
-      return new ClaudeAgent({}, config.id, auth.apiKey ?? null, {
-        ...auth,
-        compactAt: config.compactAt,
-      });
-    },
+    'claude-sdk': Object.assign(
+      (config: AgentInstanceConfig, ctx: PluginFactoryContext) => {
+        const auth = claudeOptions(config, ctx);
+        return new ClaudeAgent({}, config.id, auth.apiKey ?? null, {
+          ...auth,
+          compactAt: config.compactAt,
+        });
+      },
+      { implementation },
+    ),
   },
 });

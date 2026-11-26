@@ -7,381 +7,481 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import { statusCard } from '../src/status.ts';
-import { gatewayVersion } from '../src/version.ts';
+
+type Dependencies = Parameters<typeof statusCard>[0];
+type Work = ReturnType<Dependencies['tasks']['status']>;
 
 const chat = { adapterId: 'telegram:main', chatId: 'room_9' };
 const other = { ...chat, chatId: 'elsewhere' };
 const target = { chatId: 'room', threadId: '9' };
-const now = Date.UTC(2026, 10, 26, 2, 5, 6);
+const now = localTime(13, 33, 52);
+const startedAt = localTime(13, 29, 12);
+const compactedAt = localTime(13, 3, 45);
 
-const snapshots = {
+const fullSnapshots = {
   en: [
-    ['Gateway', `v${gatewayVersion}`, 'up 1m 5s'].filter(Boolean).join(' · '),
-    'Started · 2026-11-26 10:04:01 (Asia/Taipei)',
-    'This chat · Agent codex | Model test-model | Effort high | Fast on',
-    'Context · 12,000 / 24,000 tokens (50%)',
-    'Quota · 5h 90% left (resets 15:40) · weekly 72% left (resets 12/01 09:00)',
-    'Last compaction · 2026-11-26 10:03:51 · post-turn · 48,000 → 12,000 tokens · 3 total',
-    'Session · active for 2h 32m',
-    'Summary · 2 messages · updated 2026-11-26 10:04:48',
-    'Work · running for 7s (running agent) · 1 queued · 2 running total',
-    'Approvals · 1 here / 2 total · next expiry 2026-11-26 10:06:21',
-    'Schedules · 2 active · #abcdef · next due 2026-11-26 10:06:36 · *raw* 1234567890123456789012🙂…',
-    'Platforms · telegram:main running | telegram:backup retrying (attempt 2) · next retry 2026-11-26 10:05:36 | telegram:old unavailable · Token rejected.',
-    'Agents · codex running | claude disabled',
-    'Exec sandbox · enabled',
-    'Health · 1 failing check · Telegram token',
+    '🟢 tsugimori c731004 · up 4m (started 13:29)',
+    '',
+    '💬 This chat',
+    'Agent: Codex App Server',
+    'Model: default · Effort: default · Fast: default',
+    'Context: 24k / 250k (10%)',
+    'Quota: weekly 86% left, resets 12/02 07:16',
+    'Session: active for 31m',
+    'Last compaction: 13:03 · post-turn · 48k → 12k · 3 total',
+    'Summary: 60 messages, updated 13:03',
+    'Work: running for 7s (running agent) · 1 queued',
+    'Approvals: 1 here / 2 total, earliest expiry 13:40',
+    'Schedules: 2 active, next 13:40 #abcdef *raw* 1234567890123456789012🙂…',
+    '',
+    '🖥 System',
+    'telegram:main, Codex App Server running',
+    'Sandbox enabled · checks passing',
   ],
   'zh-TW': [
-    ['閘道器', `v${gatewayVersion}`, '已運作 1 分鐘 5 秒']
-      .filter(Boolean)
-      .join(' · '),
-    '啟動時間 · 2026-11-26 10:04:01 (Asia/Taipei)',
-    '此聊天室 · Agent codex｜模型 test-model｜推理強度 high｜快速模式 開',
-    '上下文 · 12,000 / 24,000 tokens (50%)',
-    '額度 · 5 小時 剩 90%（15:40 重置）· 每週 剩 72%（12/01 09:00 重置）',
-    '上次壓縮 · 2026-11-26 10:03:51 · 回合後 · 48,000 → 12,000 tokens · 共 3 次',
-    '對話 · 已持續 2 小時 32 分鐘',
-    '對話摘要 · 涵蓋 2 則訊息 · 更新時間 2026-11-26 10:04:48',
-    '工作 · 已執行 7 秒（代理程式執行中） · 1 則排隊中 · 共 2 個任務執行中',
-    '待核准 · 此聊天室 1 件／共 2 件 · 最早到期 2026-11-26 10:06:21',
-    '排程 · 2 項啟用 · #abcdef · 下次執行 2026-11-26 10:06:36 · *raw* 1234567890123456789012🙂…',
-    '平台 · telegram:main 運作中 | telegram:backup 重試中（第 2 次） · 下次重試 2026-11-26 10:05:36 | telegram:old 無法使用 · 權杖遭拒。',
-    '代理程式 · codex 運作中 | claude 已停用',
-    '執行沙箱 · 已啟用',
-    '環境檢查 · 1 項未通過 · Telegram 權杖',
+    '🟢 tsugimori c731004 · 已運作 4 分鐘（13:29 啟動）',
+    '',
+    '💬 此聊天室',
+    'Agent：Codex App Server',
+    '模型：預設 · 推理：預設 · 快速：預設',
+    '上下文：24k / 250k（10%）',
+    '額度：每週剩 86%，12/02 07:16 重置',
+    '對話：已持續 31 分鐘',
+    '上次壓縮：13:03 · 回合後 · 48k → 12k · 共 3 次',
+    '摘要：60 則訊息，13:03 更新',
+    '工作：執行中 7 秒（代理程式執行中） · 1 則排隊',
+    '待核准：此聊天室 1 件／共 2 件，最早 13:40 到期',
+    '排程：2 項啟用，下次 13:40 #abcdef *raw* 1234567890123456789012🙂…',
+    '',
+    '🖥 系統',
+    'telegram:main、Codex App Server 運作中',
+    '沙箱已啟用 · 環境檢查正常',
   ],
 };
 
+const labels = {
+  en: [
+    'tsugimori',
+    'This chat',
+    'Agent',
+    'Model',
+    'Effort',
+    'Fast',
+    'Context',
+    'Quota',
+    'Session',
+    'Last compaction',
+    'Summary',
+    'Work',
+    'Approvals',
+    'Schedules',
+    'System',
+  ],
+  'zh-TW': [
+    'tsugimori',
+    '此聊天室',
+    'Agent',
+    '模型',
+    '推理',
+    '快速',
+    '上下文',
+    '額度',
+    '對話',
+    '上次壓縮',
+    '摘要',
+    '工作',
+    '待核准',
+    '排程',
+    '系統',
+  ],
+};
+
+const codex = {
+  id: 'codex',
+  implementation: 'Codex App Server',
+  kind: 'codex',
+  state: 'running',
+} as const;
+
+const weekly: AgentQuota = {
+  primary: {
+    usedPercent: 14,
+    windowDurationMins: 10_080,
+    resetsAt: Date.UTC(2026, 11, 1, 23, 16) / 1_000,
+  },
+};
+
 for (const locale of ['en', 'zh-TW'] as const) {
-  test(`renders the full owner status card in ${locale}`, (t) => {
-    t.mock.method(Date, 'now', () => now - 18_000);
+  const zh = locale === 'zh-TW';
+
+  test(`renders the healthy status card in ${locale}`, (t) => {
+    const store = new SqliteStore(':memory:');
+    t.after(() => store.close());
+    const deps = dependencies(store, locale, { quota: weekly });
+    const card = statusCard(deps, chat, target, now);
+    const expected = fullSnapshots[locale];
+    assert.deepEqual(card.text.split('\n'), [
+      ...expected.slice(0, 8),
+      ...expected.slice(-4),
+    ]);
+  });
+
+  test(`renders the full status card with chat activity in ${locale}`, (t) => {
+    t.mock.method(Date, 'now', () => compactedAt);
     const store = new SqliteStore(':memory:');
     t.after(() => store.close());
     prepareStore(store);
-
-    const failure = {
-      target: 'platform/telegram:old',
-      id: 'token',
-      title: 'Telegram token',
-      status: 'fail' as const,
-      detail: 'Token rejected.',
-      localized: { 'zh-TW': { title: 'Telegram 權杖', hint: '權杖遭拒。' } },
-    };
-    const compacted: TraceSpan = {
-      name: 'agent.compaction',
-      attrs: {
-        contextTokens: 12_000,
-        trigger: 'post-turn',
-        tokensBefore: 48_000,
-        tokensAfter: 12_000,
-      },
-      durationMs: 300,
-      startedAt: now - 75_300,
-      endedAt: now - 75_000,
-      status: 'ok',
-    };
-    const deps: Parameters<typeof statusCard>[0] = {
-      runtime: {
-        config: parseConfig(JSON.stringify({ locale })),
-        environmentReports: [failure],
-        attachments: {
-          platforms: [
-            { id: 'telegram:main', state: 'running' },
-            {
-              id: 'telegram:backup',
-              state: 'retrying',
-              attempt: 2,
-              retryAt: now + 30_000,
-            },
-            { id: 'telegram:old', state: 'unavailable', failure },
-          ],
-          agents: [
-            { id: 'codex', state: 'running' },
-            { id: 'claude', state: 'disabled' },
-          ],
-        },
-      },
-      startedAt: now - 65_000,
-      sandboxEnabled: true,
-      store,
-      tasks: {
-        status: () => ({
-          agentId: 'codex',
-          model: 'test-model',
-          thinking: 'high',
-          defaults: {
-            model: 'gpt-6.2-sol',
-            effort: 'medium',
-            serviceTier: 'default',
-          },
-          compactAt: 24_000,
-          serviceTier: 'priority',
-          quota: {
-            primary: {
-              usedPercent: 10.4,
-              windowDurationMins: 300,
-              resetsAt: Date.UTC(2026, 10, 26, 7, 40) / 1_000,
-            },
-            secondary: {
-              usedPercent: 28,
-              windowDurationMins: 10_080,
-              resetsAt: Date.UTC(2026, 11, 1, 1) / 1_000,
-            },
-          },
-          sessionScope: 'test-session',
-          running: { startedAt: now - 7_000, stage: 'agent' },
-          queued: 1,
-          totalRunning: 2,
-        }),
-      },
-      trace: {
-        latestSessionSpan: () => compacted,
-        sessionHistory: () => ({
-          compactions: 3,
-          createdAt: now - (2 * 60 + 32) * 60_000,
-        }),
-      },
+    const deps = dependencies(store, locale, {
+      quota: weekly,
+      running: { startedAt: now - 7_000, stage: 'agent' },
+      queued: 1,
+    });
+    const context = deps.trace.latestSessionSpan;
+    deps.trace = {
+      latestSessionSpan: (scope, kind) =>
+        kind === 'compaction'
+          ? span('agent.compaction', compactedAt, {
+              trigger: 'post-turn',
+              tokensBefore: 48_000,
+              tokensAfter: 12_000,
+            })
+          : context(scope, kind),
+      sessionHistory: () => ({
+        compactions: 3,
+        createdAt: now - (30 * 60 + 54) * 1_000,
+      }),
     };
     const card = statusCard(deps, chat, target, now);
-    assert.deepEqual(card.text.split('\n'), snapshots[locale]);
+    assert.deepEqual(card.text.split('\n'), fullSnapshots[locale]);
     assert.equal(card.parseTextMentions, false);
     assert.deepEqual(
       card.entities.map(({ type, offset, length }) => [
         type,
         card.text.slice(offset, offset + length),
       ]),
-      snapshots[locale].map((line) => ['bold', line.split(' · ')[0]]),
+      labels[locale].map((label) => ['bold', label]),
     );
 
     const schedule = store.getSchedule('abcdef-next');
     assert.ok(schedule);
-    const firstDueAt = Date.UTC(2026, 10, 26, 1, 6);
     assert.ok(
       store.updateSchedule(
         {
           ...schedule,
-          nextDueAt: Date.UTC(2026, 10, 26, 2, 6),
           timezone: 'UTC',
-          trigger: { kind: 'cron', expr: '6 * * * *', firstDueAt },
+          trigger: {
+            kind: 'cron',
+            expr: '40 * * * *',
+            firstDueAt: localTime(12, 40),
+          },
         },
         schedule,
         10,
       ),
     );
-    const recurring = statusCard(deps, chat, target, now).text;
-    assert.ok(
-      recurring.includes(
-        locale === 'zh-TW'
-          ? '#abcdef · 今天 01:06 起，每小時第 06 分鐘 · 下次執行 今天 02:06'
-          : '#abcdef · from today 01:06, hourly at :06 · next due today 02:06',
-      ),
-      recurring,
+    assert.deepEqual(
+      statusCard(deps, chat, target, now).text.split('\n'),
+      fullSnapshots[locale],
     );
   });
 
-  test(`labels known and unknown chat defaults in ${locale}`, (t) => {
+  test(`shows degraded components and aliased agent names in ${locale}`, (t) => {
     const store = new SqliteStore(':memory:');
     t.after(() => store.close());
-    const zh = locale === 'zh-TW';
-    const chatLine = (
+    const deps = dependencies(store, locale, { agentId: 'claude' });
+    const attachments: Dependencies['runtime']['attachments'] = {
+      platforms: [
+        { id: 'telegram:main', state: 'running' },
+        {
+          id: 'telegram:backup',
+          state: 'retrying',
+          attempt: 2,
+          retryAt: localTime(13, 40),
+        },
+        { id: 'telegram:new', state: 'starting' },
+      ],
+      agents: [
+        { ...codex },
+        {
+          id: 'claude',
+          kind: 'claude-sdk',
+          implementation: 'Claude Agent SDK',
+          state: 'running',
+        },
+        { id: 'custom', kind: 'other', state: 'disabled' },
+      ],
+    };
+    const runtime = { ...deps.runtime, attachments };
+    const render = () =>
+      statusCard({ ...deps, runtime }, chat, target, now).text;
+    assert.match(render(), /^🟡 tsugimori/u);
+    assert.ok(
+      render().includes(
+        zh
+          ? 'Agent：claude · Claude Agent SDK'
+          : 'Agent: claude · Claude Agent SDK',
+      ),
+    );
+    assert.deepEqual(
+      render().split('\n').slice(-6),
+      zh
+        ? [
+            '🖥 系統',
+            'telegram:main、Codex App Server、claude · Claude Agent SDK 運作中',
+            'telegram:backup 重試中（第 2 次），下次 13:40',
+            'telegram:new 啟動中',
+            'custom · other 已停用',
+            '沙箱已啟用 · 環境檢查正常',
+          ]
+        : [
+            '🖥 System',
+            'telegram:main, Codex App Server, claude · Claude Agent SDK running',
+            'telegram:backup retrying (attempt 2), next retry 13:40',
+            'telegram:new starting',
+            'custom · other disabled',
+            'Sandbox enabled · checks passing',
+          ],
+    );
+
+    attachments.platforms.splice(1);
+    runtime.environmentReports = ['git', 'exec'].map((id) => ({
+      detail: `${id} is unavailable.`,
+      target: 'core',
+      id,
+      title: id,
+      status: 'fail',
+    }));
+    assert.match(render(), /^🟡 tsugimori/u);
+    assert.ok(
+      render().endsWith(zh ? '環境檢查 2 項未通過' : '2 checks failing'),
+    );
+    attachments.agents[0] = { ...codex, state: 'unavailable' };
+    assert.match(render(), /^🔴 tsugimori/u);
+    assert.ok(
+      render()
+        .split('\n')
+        .includes(
+          zh ? 'Codex App Server 無法使用' : 'Codex App Server unavailable',
+        ),
+    );
+  });
+
+  test(`labels known and unknown chat settings in ${locale}`, (t) => {
+    const store = new SqliteStore(':memory:');
+    t.after(() => store.close());
+    const settings = (
       defaults: AgentDefaults | undefined,
       thinking?: string,
       serviceTier?: string | null,
+      model = 'default',
     ) =>
       statusCard(
-        {
-          runtime: {
-            config: parseConfig(JSON.stringify({ locale })),
-            environmentReports: [],
-            attachments: { agents: [], platforms: [] },
-          },
-          startedAt: now,
-          sandboxEnabled: false,
-          store,
-          tasks: {
-            status: () => ({
-              agentId: 'codex',
-              model: 'default',
-              thinking,
-              defaults,
-              quota: undefined,
-              serviceTier,
-              compactAt: undefined,
-              sessionScope: undefined,
-              running: undefined,
-              queued: 0,
-              totalRunning: 0,
-            }),
-          },
-          trace: {
-            latestSessionSpan: () => undefined,
-            sessionHistory: () => ({ compactions: 0 }),
-          },
-        },
+        dependencies(store, locale, { defaults, model, thinking, serviceTier }),
         chat,
         target,
         now,
-      ).text.split('\n')[2];
+      ).text.split('\n')[4];
     assert.equal(
-      chatLine({ model: 'gpt-6.2-sol', effort: 'high', serviceTier: 'fast' }),
+      settings({ model: 'gpt-6.2-sol', effort: 'high', serviceTier: 'fast' }),
       zh
-        ? '此聊天室 · Agent codex｜模型 gpt-6.2-sol（預設）｜推理強度 high（預設）｜快速模式 開'
-        : 'This chat · Agent codex | Model gpt-6.2-sol (default) | Effort high (default) | Fast on',
-    );
-    assert.equal(
-      chatLine({ serviceTier: 'fast' }, undefined, null),
-      zh
-        ? '此聊天室 · Agent codex｜模型 預設｜推理強度 預設｜快速模式 預設'
-        : 'This chat · Agent codex | Model default | Effort default | Fast default',
+        ? '模型：gpt-6.2-sol（預設） · 推理：high（預設） · 快速：開'
+        : 'Model: gpt-6.2-sol (default) · Effort: high (default) · Fast: on',
     );
     assert.equal(
-      chatLine({ model: 'gpt-6.2-sol' }, 'low', 'default'),
+      settings({ serviceTier: 'fast' }, undefined, null),
       zh
-        ? '此聊天室 · Agent codex｜模型 gpt-6.2-sol（預設）｜推理強度 low｜快速模式 關'
-        : 'This chat · Agent codex | Model gpt-6.2-sol (default) | Effort low | Fast off',
+        ? '模型：預設 · 推理：預設 · 快速：預設'
+        : 'Model: default · Effort: default · Fast: default',
     );
-    assert.ok(
-      chatLine(undefined, undefined, 'flex')?.endsWith(
-        zh ? '｜速度 flex' : ' | Speed flex',
-      ),
+    assert.equal(
+      settings({ model: 'gpt-6.2-sol' }, 'low', 'default'),
+      zh
+        ? '模型：gpt-6.2-sol（預設） · 推理：low · 快速：關'
+        : 'Model: gpt-6.2-sol (default) · Effort: low · Fast: off',
     );
-    assert.ok(
-      chatLine(undefined)?.endsWith(zh ? '｜快速模式 預設' : ' | Fast default'),
+    assert.equal(
+      settings(undefined, 'raw effort', 'flex-tier', 'raw model'),
+      zh
+        ? '模型：raw model · 推理：raw effort · 快速：flex-tier'
+        : 'Model: raw model · Effort: raw effort · Fast: flex-tier',
     );
   });
 
-  test(`renders a single quota window and session age without compaction in ${locale}`, (t) => {
+  test(`formats compact token counts and quota windows in ${locale}`, (t) => {
     const store = new SqliteStore(':memory:');
     t.after(() => store.close());
-    const zh = locale === 'zh-TW';
-    const render = (quota?: AgentQuota) =>
-      statusCard(
-        {
-          runtime: {
-            config: parseConfig(JSON.stringify({ locale })),
-            environmentReports: [],
-            attachments: { agents: [], platforms: [] },
-          },
-          startedAt: now,
-          sandboxEnabled: false,
-          store,
-          tasks: {
-            status: () => ({
-              agentId: 'codex',
-              model: 'default',
-              thinking: undefined,
-              defaults: undefined,
-              quota,
-              serviceTier: undefined,
-              compactAt: undefined,
-              sessionScope: 'test-session',
-              running: undefined,
-              queued: 0,
-              totalRunning: 0,
-            }),
-          },
-          trace: {
-            latestSessionSpan: () => undefined,
-            sessionHistory: () => ({ compactions: 0, createdAt: now - 81_000 }),
-          },
+    const deps = dependencies(store, locale, {
+      quota: {
+        primary: {
+          usedPercent: 10,
+          windowDurationMins: 300,
+          resetsAt: localTime(14, 15) / 1_000,
         },
-        chat,
-        target,
-        now,
-      )
-        .text.split('\n')
-        .slice(3, -2);
-    const context = zh ? '上下文 · 未知' : 'Context · unknown';
-    const age = zh
-      ? '對話 · 已持續 1 分鐘 21 秒'
-      : 'Session · active for 1m 21s';
-    assert.deepEqual(render(), [context, age]);
-    assert.deepEqual(
-      render({
         secondary: { usedPercent: 104, windowDurationMins: 1_440 },
         rateLimitReachedType: 'rate_limit_reached',
-      }),
-      [
-        context,
+      },
+    });
+    const render = () => statusCard(deps, chat, target, now).text.split('\n');
+    for (const [tokens, label] of [
+      [999, '999'],
+      [1_000, '1k'],
+      [9_500, '9.5k'],
+      [24_419, '24k'],
+      [250_000, '250k'],
+      [1_200_000, '1.2M'],
+    ] as const) {
+      deps.trace.latestSessionSpan = (_, kind) =>
+        kind === 'context'
+          ? span('agent.context', now, { contextTokens: tokens })
+          : undefined;
+      const percent = Math.round(tokens / 2_500);
+      assert.equal(
+        render()[5],
         zh
-          ? '額度 · 每日 剩 0% · 已達上限'
-          : 'Quota · daily 0% left · limit reached',
-        age,
-      ],
+          ? `上下文：${label} / 250k（${percent}%）`
+          : `Context: ${label} / 250k (${percent}%)`,
+      );
+    }
+    assert.equal(
+      render()[6],
+      zh
+        ? '額度：5 小時 剩 90%，14:15 重置 · 每日剩 0% · 已達上限'
+        : 'Quota: 5h 90% left, resets 14:15 · daily 0% left · limit reached',
     );
-    assert.deepEqual(
-      render({
-        primary: { usedPercent: -2, windowDurationMins: 90 },
-        secondary: { usedPercent: 12, windowDurationMins: 120 },
-      }),
-      [
-        context,
-        zh
-          ? '額度 · 90 分鐘 剩 100% · 2 小時 剩 88%'
-          : 'Quota · 90m 100% left · 2h 88% left',
-        age,
-      ],
-    );
+    deps.trace.latestSessionSpan = () => undefined;
+    assert.equal(render()[5], zh ? '上下文：未知' : 'Context: unknown');
   });
 
-  test(`omits empty status sections in ${locale}`, (t) => {
+  test(`formats uptime, dates and build information in ${locale}`, (t) => {
     const store = new SqliteStore(':memory:');
     t.after(() => store.close());
-    const card = statusCard(
-      {
-        runtime: {
-          config: parseConfig(JSON.stringify({ locale, timezone: 'UTC' })),
-          environmentReports: [],
-          attachments: { agents: [], platforms: [] },
-        },
-        startedAt: now,
-        sandboxEnabled: false,
-        store,
-        tasks: {
-          status: () => ({
-            agentId: undefined,
-            model: undefined,
-            thinking: undefined,
-            defaults: undefined,
-            quota: undefined,
-            serviceTier: undefined,
-            compactAt: undefined,
-            sessionScope: undefined,
-            running: undefined,
-            queued: 0,
-            totalRunning: 0,
-          }),
-        },
-        trace: {
-          latestSessionSpan: () => assert.fail('No session to look up'),
-          sessionHistory: () => assert.fail('No session to look up'),
-        },
-      },
-      chat,
-      target,
-      now,
-    );
-    const zh = locale === 'zh-TW';
-    assert.deepEqual(card.text.split('\n'), [
-      [
-        zh ? '閘道器' : 'Gateway',
-        `v${gatewayVersion}`,
-        zh ? '已運作 0 秒' : 'up 0s',
-      ]
-        .filter(Boolean)
-        .join(' · '),
+    const deps = dependencies(store, locale);
+    const header = () =>
+      statusCard(deps, chat, target, now).text.split('\n')[0];
+    assert.equal(header(), fullSnapshots[locale][0]);
+    deps.build = { version: '1.2.3', revision: 'c731004' };
+    deps.startedAt = now - (3 * 24 + 4) * 3_600_000 - 5 * 60_000;
+    assert.equal(
+      header(),
       zh
-        ? '啟動時間 · 2026-11-26 02:05:06 (UTC)'
-        : 'Started · 2026-11-26 02:05:06 (UTC)',
-      zh ? '執行沙箱 · 已停用' : 'Exec sandbox · disabled',
-      zh ? '環境檢查 · 全部正常' : 'Health · all checks passed',
-    ]);
+        ? '🟢 tsugimori v1.2.3 c731004 · 已運作 3 天 4 小時（11/23 09:28 啟動）'
+        : '🟢 tsugimori v1.2.3 c731004 · up 3d 4h (started 11/23 09:28)',
+    );
+    deps.build = { version: '0.0.0' };
+    deps.startedAt = now - (2 * 60 + 5) * 60_000 - 58_000;
+    assert.equal(
+      header(),
+      zh
+        ? '🟢 tsugimori · 已運作 2 小時 5 分鐘（11:27 啟動）'
+        : '🟢 tsugimori · up 2h 5m (started 11:27)',
+    );
+    const midnight = localTime(0, 0);
+    deps.startedAt = midnight - 1_000;
+    assert.equal(
+      statusCard(deps, chat, target, midnight).text.split('\n')[0],
+      zh
+        ? '🟢 tsugimori · 已運作 1 秒（11/25 23:59 啟動）'
+        : '🟢 tsugimori · up 1s (started 11/25 23:59)',
+    );
   });
 }
 
+test('omits the empty chat section when running with no plugins', (t) => {
+  const store = new SqliteStore(':memory:');
+  t.after(() => store.close());
+  const deps = dependencies(store, 'en', { agentId: undefined });
+  const runtime = {
+    ...deps.runtime,
+    attachments: { agents: [], platforms: [] },
+  };
+  assert.equal(
+    statusCard({ ...deps, runtime, sandboxEnabled: false }, chat, target, now)
+      .text,
+    '🟢 tsugimori c731004 · up 4m (started 13:29)\n\n🖥 System\nSandbox disabled · checks passing',
+  );
+});
+
+test('fits within a Telegram message and keeps valid UTF-16 entity offsets', (t) => {
+  const store = new SqliteStore(':memory:');
+  t.after(() => store.close());
+  const deps = dependencies(store, 'en', { model: '🙂'.repeat(3_000) });
+  const { text, entities } = statusCard(deps, chat, target, now);
+  assert.ok(text.length <= 4_096);
+  assert.ok(text.endsWith('…'));
+  assert.ok(text.isWellFormed());
+  assert.ok(
+    entities.every(({ offset, length }) => offset + length < text.length),
+  );
+});
+
+function dependencies(
+  store: SqliteStore,
+  locale: 'en' | 'zh-TW',
+  work: Partial<Work> = {},
+): Dependencies {
+  return {
+    build: { version: '0.0.0', revision: 'c731004' },
+    runtime: {
+      config: parseConfig(JSON.stringify({ locale })),
+      environmentReports: [],
+      attachments: {
+        platforms: [{ id: 'telegram:main', state: 'running' }],
+        agents: [codex],
+      },
+    },
+    startedAt,
+    sandboxEnabled: true,
+    store,
+    tasks: {
+      status: () => ({
+        agentId: 'codex',
+        model: 'default',
+        thinking: undefined,
+        defaults: undefined,
+        compactAt: undefined,
+        serviceTier: undefined,
+        quota: undefined,
+        sessionScope: 'test-session',
+        running: undefined,
+        queued: 0,
+        ...work,
+      }),
+    },
+    trace: {
+      latestSessionSpan: (_, kind) =>
+        kind === 'context'
+          ? span('agent.context', now, { contextTokens: 24_419 })
+          : undefined,
+      sessionHistory: () => ({
+        compactions: 0,
+        createdAt: now - (30 * 60 + 54) * 1_000,
+      }),
+    },
+  };
+}
+
+function span(
+  name: string,
+  endedAt: number,
+  attrs: TraceSpan['attrs'],
+): TraceSpan {
+  return {
+    name,
+    attrs,
+    durationMs: 300,
+    startedAt: endedAt - 300,
+    endedAt,
+    status: 'ok',
+  };
+}
+
+function localTime(hour: number, minute: number, second = 0) {
+  return Date.UTC(2026, 10, 26, hour - 8, minute, second);
+}
+
 function prepareStore(store: SqliteStore) {
-  for (const [index, ref] of [chat, other, chat, chat].entries()) {
+  for (let index = 0; index <= 60; index++) {
+    const ref = index === 1 ? other : chat;
     const result = store.recordInbound(
       { ...ref, kind: 'group', title: null },
       { adapterId: ref.adapterId, userId: 'owner', display: null },
@@ -396,7 +496,7 @@ function prepareStore(store: SqliteStore) {
         userId: 'owner',
       },
     );
-    if (index === 2) {
+    if (index === 60) {
       assert.ok(result);
       store.saveSummary({
         ...store.beginSummary(chat),
@@ -419,8 +519,8 @@ function prepareStore(store: SqliteStore) {
   });
   for (const [index, [ref, expiresAt]] of (
     [
-      [chat, now + 120_000],
-      [other, now + 75_000],
+      [chat, localTime(13, 42)],
+      [other, localTime(13, 40)],
       [chat, now - 1],
     ] as const
   ).entries()) {
@@ -451,15 +551,15 @@ function prepareStore(store: SqliteStore) {
     deliveryApprovedBy: null,
     mentions: [],
     missed: 'latest',
-    nextDueAt: now + 90_000,
+    nextDueAt: localTime(13, 40),
     status: 'active',
     timezone: 'Asia/Taipei',
-    trigger: { kind: 'once', at: now + 90_000 },
+    trigger: { kind: 'once', at: localTime(13, 40) },
   };
   assert.ok(store.createSchedule(schedule, 10));
   assert.ok(
     store.createSchedule(
-      { ...schedule, id: 'later', nextDueAt: now + 120_000 },
+      { ...schedule, id: 'later', nextDueAt: localTime(13, 42) },
       10,
     ),
   );

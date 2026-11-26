@@ -1,5 +1,6 @@
 import type {
   AdapterContext,
+  AgentFactory,
   AgentRequest,
   InboundMessage,
   OutboundMessage,
@@ -271,6 +272,22 @@ test('guided chat setup uses the original topic for progress and consumes secret
 test('runtime isolates agent and execution failures and keeps owner-visible chat working', async (t) => {
   const platform = fixturePlatform();
   const requests: AgentRequest[] = [];
+  const createAgent: AgentFactory = ({ id }) => {
+    assert.notEqual(id, 'bad');
+    return {
+      id,
+      implementation: 'Test Connector',
+      kind: 'agent',
+      loop: 'external',
+      async *run(request) {
+        requests.push(request);
+        yield await Promise.resolve({
+          type: 'text.final',
+          text: 'Still working.',
+        });
+      },
+    };
+  };
   const registry = new PluginRegistry([
     platform.plugin,
     {
@@ -287,21 +304,7 @@ test('runtime isolates agent and execution failures and keeps owner-visible chat
         },
       ],
       agents: {
-        agent: ({ id }) => {
-          assert.notEqual(id, 'bad');
-          return {
-            id,
-            kind: 'agent',
-            loop: 'external',
-            async *run(request) {
-              requests.push(request);
-              yield await Promise.resolve({
-                type: 'text.final',
-                text: 'Still working.',
-              });
-            },
-          };
-        },
+        agent: Object.assign(createAgent, { implementation: 'Test SDK' }),
       },
     },
     {
@@ -353,13 +356,11 @@ test('runtime isolates agent and execution failures and keeps owner-visible chat
   const status = platform.sent.at(-1)?.text ?? '';
   assert.match(
     status,
-    /^代理程式 · bad 無法使用 · 請先登入。 \| good 運作中$/m,
+    /^chat、good · Test Connector 運作中\nbad · Test SDK 無法使用 · 請先登入。$/m,
   );
-  assert.match(status, /^執行沙箱 · 已停用$/m);
-  assert.match(
-    status,
-    /^環境檢查 · 3 項未通過 · Git、Bubblewrap、代理程式登入$/m,
-  );
+  assert.match(status, /^Agent：bad · Test SDK$/m);
+  assert.match(status, /^沙箱已停用 · 環境檢查 3 項未通過$/m);
+  assert.match(status, /^🔴 tsugimori/u);
   await platform.receive('unavailable', 'Hello');
   await f.gateway.idle();
   assert.equal(
