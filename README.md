@@ -35,7 +35,7 @@ The gateway resumes an existing agent session when possible, using new chat cont
 
 ### Context and summaries
 
-A fresh session receives rules, any usable rolling summary, and recent raw messages. `context.recentMessages` defaults to 30. With summaries enabled and an applicable summary cursor, a fresh session can receive up to `recentMessages + 40` raw messages after that cursor, including when the summary text is still empty. Without an applicable cursor, the base limit applies. Older messages remain in storage.
+A fresh session receives rules, any usable rolling summary, and recent raw messages. `context.recentMessages` defaults to 30. With summaries enabled and an applicable summary cursor, a fresh session can receive up to `recentMessages + 40` raw messages after that cursor, including when the summary text is still empty. Without an applicable cursor, the base limit applies. The database keeps raw messages without a retention limit.
 
 | `context.summary` key | Default      | Behavior                                                                                                                                                      |
 | --------------------- | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -43,11 +43,15 @@ A fresh session receives rules, any usable rolling summary, and recent raw messa
 | `minMessages`         | `20`         | Minimum unsummarized messages outside the recent window before a background update.                                                                           |
 | `minIntervalMinutes`  | `15`         | Minimum time since the last saved update. If only the interval blocks a run, it is rechecked when the interval ends. Set to `0` to remove the delay.          |
 | `maxMessages`         | `200`        | Maximum messages per batch. A full batch with another full batch waiting queues an immediate catch-up that skips the interval and still checks `minMessages`. |
+| `maxMessageChars`     | `1000`       | Maximum characters per excerpt (minimum `100`). Long excerpts keep their beginning and end around an omission marker with the message number.                 |
+| `maxBatchChars`       | `60000`      | Character budget for the previous summary and excerpts (minimum `1000`). A batch always includes at least one message.                                        |
 | `model`               | Chat's model | Optional model override for summary turns.                                                                                                                    |
 | `thinking`            | `low`        | Reasoning effort for summary turns.                                                                                                                           |
 | `timeoutMs`           | `120000`     | Time limit in milliseconds for each summary turn.                                                                                                             |
 
-The first summary can run as soon as the backlog reaches the threshold. The saved summary is capped at 4,000 characters. Summary settings reload while the gateway runs. Agent session compaction is separate and preserves space in the provider's session. [Codex compaction](plugins/agent-codex/README.md#compaction) · [Claude compaction](plugins/agent-claude-sdk/README.md#compaction)
+The first summary can run as soon as the backlog reaches the threshold. When `maxBatchChars` cuts a batch and at least `minMessages` remain, the next batch skips the interval. The saved summary is capped at 4,000 characters. Summary settings reload while the gateway runs. Agent session compaction is separate and preserves space in the provider's session. [Codex compaction](plugins/agent-codex/README.md#compaction) · [Claude compaction](plugins/agent-claude-sdk/README.md#compaction)
+
+Agents can use `history.search` to find matching text in the current conversation, including its topic when applicable. Search returns excerpts, newest first, and accepts a sender ID and an inclusive range of recording times in Unix milliseconds. `history.read` takes a message sequence number and an optional inclusive end sequence, and returns the original text. Both tools return at most 50 messages per page and provide a cursor when more are available. `history.read` pages through oversized messages to keep each response within 40,000 characters. Results show recording times in the workspace time zone when available.
 
 ## Chat commands
 

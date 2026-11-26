@@ -12,6 +12,7 @@ import type {
   ChatSummary,
   CommandScopeChat,
   GrantQuery,
+  HistoryQuery,
   InboundRecord,
   NewMessage,
   ScheduleAddress,
@@ -36,6 +37,7 @@ import {
   desc,
   eq,
   gt,
+  gte,
   inArray,
   isNotNull,
   isNull,
@@ -1141,7 +1143,9 @@ export class SqliteStore implements Store {
     if (chatId !== chat.chatId)
       chat = { ...chat, chatId, kind: 'supergroup', title: null };
     return this.#db.transaction((tx) => {
-      const insert = tx.insert(messages).values(message);
+      const insert = tx
+        .insert(messages)
+        .values({ ...message, recordedAt: Date.now() });
       const result = (
         edited
           ? insert.onConflictDoUpdate({
@@ -1181,7 +1185,10 @@ export class SqliteStore implements Store {
     if (chatId !== message.chatId)
       message = { ...message, chatId, migratedFromChatId: message.chatId };
     this.#db.transaction((tx) => {
-      tx.insert(messages).values(message).onConflictDoNothing().run();
+      tx.insert(messages)
+        .values({ ...message, recordedAt: Date.now() })
+        .onConflictDoNothing()
+        .run();
       if (taskId) {
         tx.update(tasks)
           .set({ status: 'sent', finishedAt: Date.now() })
@@ -1338,6 +1345,63 @@ export class SqliteStore implements Store {
         ? query.all()
         : query.limit(options.limit).all()
     ).reverse();
+  }
+
+  historyMessages(ref: ChatRef, options: HistoryQuery) {
+    const search = 'query' in options ? options : undefined;
+    const match = search
+      ? sql<number>`instr(lower(${messages.text}), lower(${search.query}))`
+      : undefined;
+    const filter =
+      'fromSeq' in options
+        ? and(
+            gte(messages.seq, options.fromSeq),
+            lte(messages.seq, options.throughSeq),
+          )
+        : and(
+            gt(match!, 0),
+            options.beforeSeq === undefined
+              ? undefined
+              : lt(messages.seq, options.beforeSeq),
+            options.fromTime === undefined
+              ? undefined
+              : gte(messages.recordedAt, options.fromTime),
+            options.toTime === undefined
+              ? undefined
+              : lte(messages.recordedAt, options.toTime),
+            options.userId === undefined
+              ? undefined
+              : eq(messages.userId, options.userId),
+          );
+    return this.#db
+      .select({
+        seq: messages.seq,
+        direction: messages.direction,
+        recordedAt: messages.recordedAt,
+        userId: messages.userId,
+        displayName: users.display,
+        text: match
+          ? sql<string>`substr(${messages.text}, max(1, ${match} - 80), 400)`
+          : messages.text,
+      })
+      .from(messages)
+      .leftJoin(
+        users,
+        and(
+          eq(users.adapterId, messages.adapterId),
+          eq(users.userId, messages.userId),
+        ),
+      )
+      .where(
+        and(
+          chatScope(messages, this.resolveChat(ref)),
+          eq(messages.deleted, false),
+          filter,
+        ),
+      )
+      .orderBy(search ? desc(messages.seq) : asc(messages.seq))
+      .limit(options.limit)
+      .all();
   }
 
   getSession(ref: ChatRef, agentId: string, model?: string) {

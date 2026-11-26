@@ -40,12 +40,29 @@ export interface MessageRecord extends ChatRef {
   messageId: string;
   migratedFromChatId: string;
   raw: unknown;
+  recordedAt: number | null;
   replyTo: string | null;
   seq: number;
   text: string;
   threadId: string | null;
   userId: string | null;
 }
+
+export type HistoryQuery = { limit: number } & (
+  | { fromSeq: number; throughSeq: number }
+  | {
+      beforeSeq?: number;
+      fromTime?: number;
+      query: string;
+      toTime?: number;
+      userId?: string;
+    }
+);
+
+export type HistoryMessage = Pick<
+  MessageRecord,
+  'direction' | 'recordedAt' | 'seq' | 'text' | 'userId'
+> & { displayName: string | null };
 
 export interface ChatSummary extends ChatRef {
   revision: number;
@@ -159,7 +176,7 @@ export interface TraceSpan {
 
 export type NewMessage = Omit<
   MessageRecord,
-  'seq' | 'deleted' | 'migratedFromChatId'
+  'seq' | 'deleted' | 'migratedFromChatId' | 'recordedAt'
 > &
   Partial<Pick<MessageRecord, 'migratedFromChatId'>>;
 export type InboundRecord = NewMessage & {
@@ -341,6 +358,7 @@ export interface Store {
   getUser(ref: PrincipalRef): UserRecord | undefined;
   getUserDisplay(ref: PrincipalRef): string | undefined;
   getWorkspaceSettings(ref: ChatRef): WorkspaceSettings | undefined;
+  historyMessages(ref: ChatRef, query: HistoryQuery): HistoryMessage[];
   insertGrant(grant: StoredGrant): void;
   interruptScheduleRuns(now: number): void;
   interruptTasks(now: number): void;
@@ -355,7 +373,10 @@ export interface Store {
     format?: ApprovalPromptFormat,
   ): void;
   listApprovals(): ApprovalRecord[];
-  listChatMessages(ref: ChatRef, before?: number): Omit<MessageRecord, 'raw'>[];
+  listChatMessages(
+    ref: ChatRef,
+    before?: number,
+  ): Omit<MessageRecord, 'raw' | 'recordedAt'>[];
   listChats(): ChatRecord[];
   listChatTasks(ref: ChatRef): TaskRecord[];
   listGrants(): StoredGrant[];

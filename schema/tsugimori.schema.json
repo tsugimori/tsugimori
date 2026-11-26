@@ -220,6 +220,18 @@
             "enabled": {
               "type": "boolean"
             },
+            "maxBatchChars": {
+              "type": "integer",
+              "minimum": 1000,
+              "maximum": 9007199254740991,
+              "default": 60000
+            },
+            "maxMessageChars": {
+              "type": "integer",
+              "minimum": 100,
+              "maximum": 9007199254740991,
+              "default": 1000
+            },
             "maxMessages": {
               "type": "integer",
               "minimum": 1,

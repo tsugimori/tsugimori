@@ -95,6 +95,7 @@ export const messages = sqliteTable(
     text: text('text').notNull(),
     raw: text('raw', { mode: 'json' }).$type<unknown>(),
     deleted: integer('deleted', { mode: 'boolean' }).notNull().default(false),
+    recordedAt: integer('recorded_at'),
   },
   (table) => [
     uniqueIndex('messages_platform_id').on(

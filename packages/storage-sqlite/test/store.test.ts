@@ -33,6 +33,9 @@ test('upgrades old chat rows and carries settings through group migration', asyn
     legacy.exec(
       "INSERT INTO chats (adapter_id, chat_id, kind, model) VALUES ('a', 'old', 'group', 'chosen')",
     );
+    legacy.exec(
+      "INSERT INTO messages (adapter_id, chat_id, message_id, direction, text) VALUES ('a', 'old', 'original', 'inbound', 'Legacy message')",
+    );
   } finally {
     legacy.close();
   }
@@ -55,6 +58,20 @@ test('upgrades old chat rows and carries settings through group migration', asyn
     assert.equal(migrated?.model, 'chosen');
     assert.equal(migrated?.serviceTier, 'fast');
     assert.equal(migrated?.thinking, 'xhigh');
+    const history = reopened.historyMessages(chat, {
+      query: 'Legacy',
+      limit: 1,
+    });
+    assert.equal(history[0]?.text, 'Legacy message');
+    assert.equal(history[0]?.recordedAt, null);
+    assert.deepEqual(
+      reopened.historyMessages(chat, {
+        query: 'Legacy',
+        fromTime: 0,
+        limit: 1,
+      }),
+      [],
+    );
   } finally {
     reopened.close();
   }

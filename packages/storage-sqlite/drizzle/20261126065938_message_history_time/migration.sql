@@ -1,0 +1,1 @@
+ALTER TABLE `messages` ADD `recorded_at` integer;

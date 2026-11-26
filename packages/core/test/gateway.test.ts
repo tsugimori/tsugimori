@@ -1915,6 +1915,287 @@ test(
 );
 
 test(
+  'history tools scope reads and searches to the task topic and page through original text',
+  { timeout: 5_000 },
+  async (t) => {
+    let checked: Promise<void> | undefined;
+    const f = await fixture(t, async function* (request) {
+      checked = verify(request);
+      await checked;
+      yield { type: 'text.final', text: 'History inspected' };
+    });
+    const room = { chatId: '-1001', chatKind: 'group', threadId: '7' } as const;
+    const topic = { adapterId, chatId: '-1001_7' };
+    const original = `${'x'.repeat(6_000)} NeedLE%_ at the end`;
+    const oversized = '😀"\n'.repeat(13_000);
+    const firstTime = Date.UTC(2026, 0, 1, 17);
+    let now = firstTime;
+    t.mock.method(Date, 'now', () => now);
+    await f.platform.emit(
+      inbound('first', original, {
+        ...room,
+        userId: 'member',
+        userDisplay: 'Jamie',
+      }),
+    );
+    now += 1_000;
+    await f.platform.emit(
+      inbound('other-topic', 'needle%_ in a different topic', {
+        ...room,
+        threadId: '8',
+      }),
+    );
+    await f.platform.emit(
+      inbound('other-chat', 'needle%_ in a different group', {
+        ...room,
+        chatId: '-1002',
+      }),
+    );
+    await f.platform.emit(
+      inbound('dm', 'needle%_ in a DM', { chatId: 'member', userId: 'member' }),
+    );
+    const otherAdapter = { ...topic, adapterId: 'fake:other' };
+    const foreign = f.store.recordInbound(
+      { ...otherAdapter, kind: 'group', title: null },
+      { adapterId: otherAdapter.adapterId, userId: 'member', display: null },
+      {
+        ...otherAdapter,
+        direction: 'inbound',
+        messageId: 'foreign',
+        userId: 'member',
+        threadId: '7',
+        replyTo: null,
+        text: 'needle%_ on another adapter',
+        raw: null,
+      },
+    )!;
+    await f.platform.emit(inbound('deleted', 'needle%_ removed', room));
+    await f.platform.emit({ type: 'delete', ...room, messageId: 'deleted' });
+    await f.platform.emit(inbound('large', oversized, room));
+    await f.platform.emit(
+      inbound('literal', 'needlexy without punctuation', room),
+    );
+    f.store.recordOutbound({
+      ...topic,
+      direction: 'outbound',
+      messageId: 'sent',
+      replyTo: null,
+      threadId: '7',
+      userId: null,
+      text: 'Another needle%_ match',
+      raw: null,
+    });
+
+    const first = f.store.getMessage(topic, 'first')!.seq;
+    const large = f.store.getMessage(topic, 'large')!.seq;
+    const literal = f.store.getMessage(topic, 'literal')!.seq;
+    const sent = f.store.getMessage(topic, 'sent')!.seq;
+    const verify = async (request: AgentRequest) => {
+      const search = request.tools.find(
+        ({ name }) => name === 'history.search',
+      );
+      const read = request.tools.find(({ name }) => name === 'history.read');
+      assert.ok(search && read);
+      interface Page {
+        messages: {
+          direction: string;
+          displayName: string | null;
+          seq: number;
+          text: string;
+          textOffset?: number;
+          time: string;
+          userId: string | null;
+        }[];
+        next?: Record<string, number>;
+        truncated: boolean;
+        trust: string;
+      }
+      const query = { query: 'needle%_', limit: 1 };
+      const newest = (await search.run(query)) as Page;
+      assert.equal(newest.trust, 'untrusted');
+      assert.equal(newest.truncated, false);
+      assert.equal(newest.messages[0]?.seq, sent);
+      assert.equal(newest.messages[0]?.direction, 'outbound');
+      assert.equal(newest.messages[0]?.userId, null);
+      assert.ok(newest.next);
+      const older = (await search.run({ ...query, ...newest.next })) as Page;
+      assert.equal(older.next, undefined);
+      assert.deepEqual(
+        older.messages.map(({ seq }) => seq),
+        [first],
+      );
+      assert.match(older.messages[0]!.text, /NeedLE%_ at the end/);
+      const bySender = (await search.run({
+        query: 'needle%_',
+        userId: 'member',
+      })) as Page;
+      assert.deepEqual(bySender.messages, older.messages);
+      const byTime = (await search.run({
+        query: 'needle%_',
+        fromTime: firstTime,
+        toTime: firstTime,
+      })) as Page;
+      assert.deepEqual(byTime.messages, older.messages);
+      await assert.rejects(
+        search.run({ ...query, limit: 51 }),
+        /Invalid tool arguments/,
+      );
+      await assert.rejects(
+        search.run({ ...query, chatId: room.chatId }),
+        /Invalid tool arguments/,
+      );
+
+      const found = (await read.run({ seq: first })) as Page;
+      assert.deepEqual(found.messages, [
+        {
+          seq: first,
+          direction: 'inbound',
+          displayName: 'Jamie',
+          time: '2026-01-02, 01:00:00 GMT+8',
+          userId: 'member',
+          text: original,
+        },
+      ]);
+      assert.deepEqual(
+        ((await read.run({ seq: foreign.seq })) as Page).messages,
+        [],
+      );
+      await assert.rejects(
+        read.run({ seq: first, threadId: '8' }),
+        /Invalid tool arguments/,
+      );
+
+      const range = (await read.run({ seq: first, throughSeq: sent })) as Page;
+      assert.deepEqual(
+        range.messages.map(({ seq }) => seq),
+        [first],
+      );
+      assert.equal(range.truncated, true);
+      assert.equal(range.next?.seq, large);
+      let page = range;
+      let recovered = '';
+      const seen: number[] = [];
+      for (let i = 0; page.next && i < 5; i++) {
+        page = (await read.run(page.next)) as Page;
+        assert.ok(JSON.stringify(page).length <= 40_000);
+        for (const message of page.messages) {
+          if (message.seq === large) {
+            assert.equal(message.textOffset ?? 0, recovered.length);
+            assert.equal(message.text.isWellFormed(), true);
+            recovered += message.text;
+          } else seen.push(message.seq);
+        }
+      }
+      assert.equal(page.next, undefined);
+      assert.equal(recovered, oversized);
+      assert.deepEqual(seen, [literal, sent]);
+    };
+    await f.platform.emit(
+      inbound('trigger', 'Look up the conversation', {
+        ...room,
+        mentionsBot: true,
+      }),
+    );
+    await f.gateway.idle();
+    assert.ok(checked, 'the chat turn can call the history tools');
+    await checked;
+  },
+);
+
+test(
+  'summary character caps preserve short excerpts and catch up at the saved cursor',
+  { timeout: 5_000 },
+  async (t) => {
+    const summaries: AgentRequest[] = [];
+    const f = await fixture(
+      t,
+      async function* (request) {
+        if (request.purpose !== 'summary') return;
+        summaries.push(request);
+        yield {
+          type: 'text.final',
+          text: summaries.length === 1 ? 's'.repeat(400) : 'Caught up',
+        };
+      },
+      true,
+      {
+        context: { recentMessages: 2, summary: { minMessages: 2 } },
+      },
+    );
+    const reloads = () =>
+      f.logs.filter(({ event }) => event === 'config.reloaded').length;
+    await until(t, () => reloads() > 0);
+    const loaded = reloads();
+    await f.configure(true, {
+      context: {
+        recentMessages: 2,
+        summary: { minMessages: 2, maxMessageChars: 500, maxBatchChars: 1_000 },
+      },
+    });
+    await until(t, () => reloads() > loaded);
+    const original = `HEAD${'a'.repeat(13_000)}TAIL`;
+    const group = { chatKind: 'group' } as const;
+    const short = 'short excerpt';
+    const medium = 'm'.repeat(500);
+    for (const [id, text] of [
+      ['short', short],
+      ['long', original],
+      ['medium', medium],
+      ['another-short', short],
+      ['remaining', medium],
+      ['recent', 'Recently said'],
+    ] as const)
+      await f.platform.emit(inbound(id, text, group));
+    const long = f.store.getMessage(chat, 'long')!;
+    const savedCursors: number[] = [];
+    const saveSummary = f.store.saveSummary.bind(f.store);
+    t.mock.method(
+      f.store,
+      'saveSummary',
+      (summary: Parameters<typeof saveSummary>[0]) => {
+        savedCursors.push(summary.throughSeq);
+        return saveSummary(summary);
+      },
+    );
+    await f.platform.emit(
+      inbound('trigger', 'Summarize later', { ...group, mentionsBot: true }),
+    );
+    await f.gateway.idle();
+    await until(t, () => f.store.getSummary(chat)?.text === 'Caught up');
+    assert.equal(summaries.length, 2);
+    assert.deepEqual(savedCursors, [
+      long.seq,
+      f.store.getMessage(chat, 'another-short')!.seq,
+    ]);
+    const excerpts = (request: AgentRequest) =>
+      request.context
+        .filter(({ source }) => source === 'message')
+        .map(({ content }) => (JSON.parse(content) as { text: string }).text);
+    const [untouched, shortened] = excerpts(summaries[0]!);
+    assert.equal(untouched, short);
+    assert.ok(shortened && shortened.length <= 500);
+    const match = shortened.match(
+      /^(HEADa*)…\[omitted ([\d,]+) chars, message #(\d+)\]…(a*TAIL)$/,
+    );
+    assert.ok(match);
+    const [, head, count, seq, tail] = match;
+    assert.equal(Number(seq), long.seq);
+    assert.equal(
+      Number(count!.replaceAll(',', '')),
+      original.length - head!.length - tail!.length,
+    );
+    assert.ok(Math.abs(head!.length - 2 * tail!.length) <= 2);
+    assert.deepEqual(excerpts(summaries[1]!), [medium, short]);
+    assert.equal(f.store.getMessage(chat, 'long')?.text, original);
+    assert.match(
+      summaries[0]!.context[0]!.content,
+      /sender, topic and message number/,
+    );
+    assert.ok(summaries.every(({ tools }) => tools.length === 0));
+  },
+);
+
+test(
   'summaries run after delivery and fresh turns keep the summary cutoff and raw window',
   { timeout: 5000 },
   async (t) => {

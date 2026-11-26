@@ -28,6 +28,8 @@ export interface Config {
     recentMessages: number;
     summary?: {
       enabled?: boolean;
+      maxBatchChars?: number;
+      maxMessageChars?: number;
       maxMessages?: number;
       minIntervalMinutes?: number;
       minMessages?: number;

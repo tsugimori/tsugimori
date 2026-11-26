@@ -100,6 +100,8 @@ test('defaults and validates conversation summary settings', () => {
   const settings = (summary: object) =>
     parseConfig(JSON.stringify({ context: { summary } })).context.summary;
   const defaults = {
+    maxBatchChars: 60_000,
+    maxMessageChars: 1_000,
     maxMessages: 200,
     minIntervalMinutes: 15,
     minMessages: 20,
@@ -109,6 +111,8 @@ test('defaults and validates conversation summary settings', () => {
   assert.deepEqual(parseConfig('{}').context.summary, defaults);
   assert.deepEqual(settings({}), defaults);
   const overrides = {
+    maxBatchChars: 1_000,
+    maxMessageChars: 100,
     maxMessages: 40,
     minIntervalMinutes: 5,
     minMessages: 50,
@@ -118,6 +122,10 @@ test('defaults and validates conversation summary settings', () => {
   assert.deepEqual(settings(overrides), overrides);
   assert.equal(settings({ minIntervalMinutes: 0 })?.minIntervalMinutes, 0);
   for (const [name, invalid] of [
+    ['maxBatchChars', 999],
+    ['maxBatchChars', 1_000.5],
+    ['maxMessageChars', 99],
+    ['maxMessageChars', 100.5],
     ['maxMessages', 0],
     ['maxMessages', 1.5],
     ['maxMessages', Number.MAX_SAFE_INTEGER + 1],

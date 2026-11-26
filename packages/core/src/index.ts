@@ -50,6 +50,7 @@ import { ChatSetup } from './chat-setup.ts';
 import { EnvironmentChecks, failureText } from './checks.ts';
 import { CommandMenus } from './command-menus.ts';
 import { Executions, sandboxScope } from './executions.ts';
+import { historyTools } from './history.ts';
 import { HookRunner, logToStderr } from './hooks.ts';
 import { conversationId, Outbound } from './outbound.ts';
 import { Previews } from './previews.ts';
@@ -341,6 +342,10 @@ export class Gateway {
       tools: [
         ...registry.plugins.flatMap((plugin) => [...(plugin.tools ?? [])]),
         ...this.#scheduler.tools(),
+        ...historyTools({
+          store,
+          timezone: () => this.#runtime.config.timezone,
+        }),
         ...(this.#previews?.tools() ?? []),
         ...this.#execution.workspaceTools(),
         ...(registry.execution('local-sandbox') ? this.#execution.tools() : []),
