@@ -2,6 +2,7 @@ import type { Auth } from '@tsugimori/auth';
 import type { ContextAssembler } from '@tsugimori/context';
 import type {
   AgentConnector,
+  AgentImage,
   AgentRequest,
   ApprovalRequest,
   ChatRef,
@@ -29,9 +30,12 @@ import type {
 import type { Tracer } from '@tsugimori/trace';
 
 import { approvalCallbackId } from '@tsugimori/auth';
+import { messageContext } from '@tsugimori/context';
 import { pendingApprovalResult } from '@tsugimori/plugin-sdk';
 import { containsMention, scheduleReplyStyle } from '@tsugimori/scheduler';
 import { randomUUID } from 'node:crypto';
+import { rm } from 'node:fs/promises';
+import { setTimeout as delay } from 'node:timers/promises';
 import { isDeepStrictEqual } from 'node:util';
 
 import type { HookRunner, Logger } from './hooks.ts';
@@ -45,7 +49,9 @@ import { untilAborted } from './abort.ts';
 import { protectTools, runAgent, sessionScope } from './agent-run.ts';
 import { acceptsServiceTier, resolveAgentSetting } from './agent-settings.ts';
 import { approvalMessages, approvalPrompt } from './approval-messages.ts';
+import { attachmentTool, turnAttachments } from './attachments.ts';
 import { describeError } from './errors.ts';
+import { FfmpegMissing, findFfmpeg, prepareImage } from './media.ts';
 import { memoryAction } from './memory.ts';
 import { conversationId, DeliveryError, Outbound } from './outbound.ts';
 import { Supplements } from './supplements.ts';
@@ -91,6 +97,7 @@ type Work = {
   sessionScopeModel?: string;
   sessionValid: boolean;
   supplements: Supplements;
+  temporaryAttachments: Set<string>;
   workdir?: string;
 };
 
@@ -275,7 +282,7 @@ export class Tasks {
       !running.input.message.migratedFromChatId &&
       !running.abort.signal.aborted &&
       replyTo &&
-      running.messageIds.has(replyTo)
+      running.messageIds.has(replyTo.id)
     ) {
       running.messageIds.add(messageId);
       running.supplements.push(input);
@@ -293,6 +300,7 @@ export class Tasks {
       endForApproval: new AbortController(),
       messageIds: new Set([messageId]),
       supplements: new Supplements(),
+      temporaryAttachments: new Set(),
       acceptsSupplements: false,
       progress: { stage: 'preparing', startedAt: createdAt },
       sessionValid: true,
@@ -685,6 +693,18 @@ export class Tasks {
       }
     } finally {
       activity.abort();
+      for (const path of work.temporaryAttachments) {
+        try {
+          await rm(path, { force: true });
+        } catch (error) {
+          log({
+            level: 'error',
+            event: 'media.cleanup_failed',
+            taskId: id,
+            error: describeError(error),
+          });
+        }
+      }
       recorder.finish(outcome);
       if (work.workdir && !runtime.disabled('workspace.record')) {
         work.progress.stage = 'recording';
@@ -729,13 +749,23 @@ export class Tasks {
     }
   }
 
-  #toolDefinitions(adapter: PlatformAdapter) {
+  #toolDefinitions(adapter: PlatformAdapter, work?: Work) {
+    const { store, context } = this.#deps;
     return [
       ...this.#deps.tools.filter(
         ({ name }) =>
           !name.startsWith('exec.') || Boolean(this.#deps.backend()),
       ),
       ...(adapter.tools?.() ?? []),
+      ...(adapter.downloadAttachment
+        ? [
+            attachmentTool(
+              { store, workdir: (chat) => context.workdir(chat) },
+              adapter,
+              work?.temporaryAttachments,
+            ),
+          ]
+        : []),
     ];
   }
 
@@ -851,7 +881,7 @@ export class Tasks {
       principal: { adapterId: chat.adapterId, userId: input.message.userId },
     };
     const attrs = { ...chat, taskId: id };
-    const definitions = this.#toolDefinitions(adapter);
+    const definitions = this.#toolDefinitions(adapter, work);
     const current = store.getChat(chat);
     const previousSession = current?.sessionAgentId
       ? store.getSession(chat, current.sessionAgentId)
@@ -892,6 +922,14 @@ export class Tasks {
     work.sessionScopeChatId = session?.scopeChatId;
     work.sessionScopeModel = session?.model;
     work.acceptsSupplements = true;
+    if (
+      input.message.albumId &&
+      agent.imageLimits &&
+      adapter.downloadAttachment
+    )
+      await trace.span('media.album', attrs, () =>
+        delay(175, undefined, { signal }),
+      );
     const endContext = recorder.timing('contextMs');
     const assembled = await trace
       .span('context.assembled', attrs, async () => {
@@ -929,7 +967,16 @@ export class Tasks {
         const workdir = await context.workdir(chat);
         await prepareWorkspace(workdir, !runtime.disabled('workspace.record'));
         work.workdir = workdir;
-        return { blocks: entries.map(({ block }) => block), workdir };
+        return {
+          blocks: entries.map(({ block }) => block),
+          media: entries
+            .filter(
+              (entry) =>
+                entry.kind === 'new' || (session && entry.kind === 'history'),
+            )
+            .map(({ block }) => block),
+          workdir,
+        };
       })
       .finally(endContext);
 
@@ -942,7 +989,18 @@ export class Tasks {
         ? 'owner'
         : 'member',
       content: message.text,
+      message: messageContext({
+        albumId: message.albumId,
+        messageId: message.messageId,
+        metadata: message,
+        migratedFromChatId: '',
+        recordedAt: null,
+        replyTo: message.replyTo?.id ?? null,
+        userId: message.userId,
+      }),
     });
+    let media = assembled.media;
+    const seenImages = new Set<string>();
     for (;;) {
       signal.throwIfAborted();
       await hooks.emit('context.assembled', { task, context: blocks });
@@ -995,6 +1053,14 @@ export class Tasks {
         },
         definitions,
       );
+      const images = await this.#images(
+        work,
+        agent,
+        media,
+        session?.throughSeq,
+        sessionId === undefined,
+        seenImages,
+      );
       const endAgent = recorder.timing('agentMs');
       try {
         work.progress.stage = 'agent';
@@ -1029,6 +1095,7 @@ export class Tasks {
             toolsDisabled: runtime.disabled('exec'),
             sandbox: this.#deps.scope(assembled.workdir),
             context: blocks,
+            ...(images.length && { images }),
             resumeSessionId: sessionId,
             signal: passSignal,
             workdir: assembled.workdir,
@@ -1073,6 +1140,7 @@ export class Tasks {
         recorder.supplement(message.messageId, block);
         return block;
       });
+      media = blocks;
     }
     const seenAfter = [
       ...new Set([...(session?.seenAfter ?? []), ...supplements.delivered]),
@@ -1086,6 +1154,79 @@ export class Tasks {
       seenAfter,
       workdir: assembled.workdir,
     };
+  }
+
+  async #images(
+    { abort, adapter, chat, id, input }: Work,
+    { imageLimits }: AgentConnector,
+    blocks: readonly ContextBlock[],
+    afterSeq: number | undefined,
+    includeReplies: boolean,
+    seen: Set<string>,
+  ) {
+    const { store, trace, log } = this.#deps;
+    const download = adapter.downloadAttachment?.bind(adapter);
+    if (!download || !imageLimits || input.scheduled) return [];
+    const attachments = turnAttachments(
+      store,
+      chat,
+      blocks,
+      input.message.migratedFromChatId ?? '',
+      afterSeq,
+      includeReplies,
+    );
+    if (!attachments.length) return [];
+    const { signal } = abort;
+    return trace.span(
+      'media.prepare',
+      { ...chat, taskId: id, images: attachments.length },
+      async () => {
+        const command = await findFfmpeg();
+        if (!command) {
+          log({ level: 'warn', event: 'media.ffmpeg_missing', taskId: id });
+          return [];
+        }
+        const ready: AgentImage[] = [];
+        for (const {
+          albumFirstSeq,
+          attachment,
+          id: messageId,
+        } of attachments) {
+          const key = JSON.stringify([
+            albumFirstSeq ?? messageId,
+            attachment.index,
+          ]);
+          if (seen.has(key)) continue;
+          seen.add(key);
+          try {
+            const { bytes } = await download(
+              attachment,
+              signal,
+              imageLimits.sourceMaxBytes,
+            );
+            const image = await prepareImage(
+              bytes,
+              attachment,
+              imageLimits,
+              signal,
+              command,
+            );
+            ready.push({
+              ...image,
+              source: { messageId, index: attachment.index },
+            });
+          } catch (error) {
+            signal.throwIfAborted();
+            if (error instanceof FfmpegMissing) {
+              log({ level: 'warn', event: 'media.ffmpeg_missing', taskId: id });
+              break;
+            }
+            log({ level: 'warn', event: 'media.prepare_failed', taskId: id });
+          }
+        }
+        return ready;
+      },
+    );
   }
 
   async #requestApproval(

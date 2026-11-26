@@ -172,7 +172,10 @@ function repairSummary(tx: Transaction, ref: ChatRef, seq: number) {
   if (summary?.text) saveSummaryVersion(tx, summary);
 }
 
-function readMessage({ rawZ, ...row }: typeof messages.$inferSelect) {
+function readMessage<Row extends typeof messages.$inferSelect>({
+  rawZ,
+  ...row
+}: Row) {
   return { ...row, raw: rawZ === null ? row.raw : decodeRecord(rawZ) };
 }
 
@@ -2102,11 +2105,13 @@ export class SqliteStore implements Store {
       chat = { ...chat, chatId, kind: 'supergroup', title: null };
     const recorded = this.#db.transaction((tx) => {
       const rawZ = message.raw == null ? null : encodeRecord(message.raw, true);
+      let revised = false;
       if (edited) {
         const previous = tx
           .select({
             seq: messages.seq,
             revision: messages.revision,
+            metadata: messages.metadata,
             text: messages.text,
           })
           .from(messages)
@@ -2119,8 +2124,14 @@ export class SqliteStore implements Store {
             ),
           )
           .get();
-        if (previous && previous.text !== message.text)
-          tx.insert(messageEdits).values(previous).run();
+        revised = Boolean(
+          previous &&
+          (previous.text !== message.text ||
+            (message.metadata !== undefined &&
+              JSON.stringify(previous.metadata ?? null) !==
+                JSON.stringify(message.metadata))),
+        );
+        if (previous && revised) tx.insert(messageEdits).values(previous).run();
       }
       const insert = tx
         .insert(messages)
@@ -2139,7 +2150,12 @@ export class SqliteStore implements Store {
                 text: message.text,
                 raw: null,
                 rawZ,
-                revision: sql`${messages.revision} + (${messages.text} <> ${message.text})`,
+                replyTo: message.replyTo,
+                albumId: message.albumId,
+                metadata: message.metadata,
+                revision: revised
+                  ? sql`${messages.revision} + 1`
+                  : messages.revision,
               },
             })
           : insert.onConflictDoNothing()
@@ -2202,9 +2218,63 @@ export class SqliteStore implements Store {
     if (task) this.#publishTask(task);
   }
 
-  getMessage(ref: ChatRef, messageId: string, migratedFromChatId?: string) {
+  messageAlbum(ref: ChatRef, albumId: string, migratedFromChatId: string) {
+    return this.#db
+      .select({
+        ...getColumns(messages),
+        raw: sql<null>`null`,
+        rawZ: sql<null>`null`,
+      })
+      .from(messages)
+      .where(
+        and(
+          chatScope(messages, ref),
+          eq(messages.albumId, albumId),
+          eq(messages.migratedFromChatId, migratedFromChatId),
+        ),
+      )
+      .orderBy(messages.seq)
+      .all();
+  }
+
+  quotedAttachmentMessage(
+    ref: ChatRef,
+    messageId: string,
+    migratedFromChatId: string,
+  ) {
+    return this.#db
+      .select({
+        ...getColumns(messages),
+        raw: sql<null>`null`,
+        rawZ: sql<null>`null`,
+      })
+      .from(messages)
+      .where(
+        and(
+          chatScope(messages, ref),
+          eq(messages.replyTo, messageId),
+          eq(messages.migratedFromChatId, migratedFromChatId),
+          eq(messages.deleted, false),
+          sql`json_array_length(${messages.metadata}, '$.replyTo.attachments') > 0`,
+        ),
+      )
+      .orderBy(desc(messages.seq))
+      .get();
+  }
+
+  getMessage(
+    ref: ChatRef,
+    messageId: string,
+    migratedFromChatId?: string,
+    includeRaw = true,
+  ) {
+    const fields = getColumns(messages);
     const row = this.#db
-      .select()
+      .select(
+        includeRaw
+          ? fields
+          : { ...fields, raw: sql<null>`null`, rawZ: sql<null>`null` },
+      )
       .from(messages)
       .where(
         and(
@@ -2331,8 +2401,20 @@ export class SqliteStore implements Store {
     offset = 0,
   ) {
     return this.#db
-      .select()
+      .select({
+        ...getColumns(messages),
+        raw: sql<null>`null`,
+        rawZ: sql<null>`null`,
+        displayName: users.display,
+      })
       .from(messages)
+      .leftJoin(
+        users,
+        and(
+          eq(users.adapterId, messages.adapterId),
+          eq(users.userId, messages.userId),
+        ),
+      )
       .where(
         and(
           chatScope(messages, ref),
@@ -2372,10 +2454,22 @@ export class SqliteStore implements Store {
     const query = this.#db
       .select(
         options.includeRaw === false
-          ? { ...fields, raw: sql<null>`null`, rawZ: sql<null>`null` }
-          : fields,
+          ? {
+              ...fields,
+              raw: sql<null>`null`,
+              rawZ: sql<null>`null`,
+              displayName: users.display,
+            }
+          : { ...fields, displayName: users.display },
       )
       .from(messages)
+      .leftJoin(
+        users,
+        and(
+          eq(users.adapterId, messages.adapterId),
+          eq(users.userId, messages.userId),
+        ),
+      )
       .where(filter)
       .orderBy(desc(messages.seq));
     return (
@@ -2416,6 +2510,11 @@ export class SqliteStore implements Store {
     return this.#db
       .select({
         seq: messages.seq,
+        messageId: messages.messageId,
+        metadata: messages.metadata,
+        albumId: messages.albumId,
+        migratedFromChatId: messages.migratedFromChatId,
+        replyTo: messages.replyTo,
         direction: messages.direction,
         recordedAt: messages.recordedAt,
         userId: messages.userId,

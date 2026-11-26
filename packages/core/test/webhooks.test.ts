@@ -268,7 +268,7 @@ test('owner webhook setup saves only after a successful probe and gates the LINE
       chatKind: 'dm',
       messageId: 'in-' + ++id,
       text,
-      replyTo,
+      replyTo: replyTo ? { id: replyTo } : undefined,
     });
   await receive('/webhook setup manual', undefined, 'other');
   assert.equal(sent.length, 0);

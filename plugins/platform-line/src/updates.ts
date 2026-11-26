@@ -1,6 +1,7 @@
 import type { AdapterContext, InboundMessage } from '@tsugimori/plugin-sdk';
 
 import { nonempty, record } from './api.ts';
+import { lineAttachments } from './inbound-media.ts';
 
 interface LineMessage {
   inbound: InboundMessage;
@@ -57,6 +58,9 @@ export function mapEvent(
         record(entry)?.type === 'user' && record(entry)?.isSelf === false,
     );
   const user = encodeURIComponent(userId);
+  const replyId = nonempty(message.quotedMessageId);
+  const attachments = lineAttachments(message, messageId);
+  const timestamp = event.timestamp;
   const profilePath =
     sourceType === 'user'
       ? `/v2/bot/profile/${user}`
@@ -72,7 +76,10 @@ export function mapEvent(
       mentionsBot,
       messageId,
       raw: event,
-      replyTo: nonempty(message.quotedMessageId),
+      ...(replyId && { replyTo: { id: replyId } }),
+      ...(attachments.length && { attachments }),
+      ...(typeof timestamp === 'number' &&
+        Number.isSafeInteger(timestamp) && { at: timestamp }),
       text,
       type: 'message',
       userId,

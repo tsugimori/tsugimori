@@ -289,6 +289,9 @@ importers:
 
   packages/core:
     dependencies:
+      '@lottiefiles/dotlottie-web':
+        specifier: 0.83.2
+        version: 0.83.2
       '@tsugimori/auth':
         specifier: workspace:*
         version: link:../auth
@@ -573,6 +576,10 @@ packages:
 
   '@jridgewell/trace-mapping@0.3.31':
     resolution: {integrity: sha512-zzNR+SdQSDJzc8joaeP8QQoCQr8NuYx2dIIytl1QeBEZHJ9uW6hebsrYgbz8hJwUQao3TWCMtmfV8Nu1twOLAw==}
+
+  '@lottiefiles/dotlottie-web@0.83.2':
+    resolution: {integrity: sha512-MMI4RVcFtB5Vjv9mwbP8oWsSqy4N7GO2P+jwHVLo4GjbYAdR4Z7seK3rR7YefpcfayWrsQogaORMBzv6YFWntQ==}
+    engines: {node: '>=18.17.0', npm: '>=9.5.0'}
 
   '@modelcontextprotocol/sdk@1.32.2':
     resolution: {integrity: sha512-SWsVtH/0vULSQStoZ6xxH2K09Li8fXYTMC64ZeogCdpZ3XSi1eCPOByV1OpuJxuI3OcmHhosDWYyii07tpPsLw==}
@@ -2099,6 +2106,8 @@ snapshots:
     dependencies:
       '@jridgewell/resolve-uri': 3.1.3
       '@jridgewell/sourcemap-codec': 1.6.0
+
+  '@lottiefiles/dotlottie-web@0.83.2': {}
 
   '@modelcontextprotocol/sdk@1.32.2(supports-color@7.2.0)(zod@4.6.7)':
     dependencies:

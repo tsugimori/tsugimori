@@ -66,6 +66,7 @@ import { Executions, sandboxScope } from './executions.ts';
 import { guideTools } from './guides.ts';
 import { historyTools } from './history.ts';
 import { HookRunner, logToStderr } from './hooks.ts';
+import { hasPrivateArguments, resolveReplyTarget } from './inbound-message.ts';
 import { Memory, memoryAction } from './memory.ts';
 import { conversationId, Outbound } from './outbound.ts';
 import { Previews } from './previews.ts';
@@ -1045,11 +1046,14 @@ export class Gateway {
       if (this.#runtime.getAdapter(adapter.id)) recordDecision('command', true);
       return;
     }
-    const privateCommand =
-      command?.name === 'pair' ||
-      command?.name === 'login' ||
-      command?.name === 'add' ||
-      command?.name === 'webhook';
+    const privateCommand = command && hasPrivateArguments(command.name);
+    const replyId = event.replyTo?.id;
+    const { replyTo, sensitiveReply } = resolveReplyTarget(
+      { store, bot: adapter.botIdentity },
+      chat,
+      event.replyTo,
+      migratedFrom,
+    );
     const stored = this.#trace.span('inbound.received', { ...chat }, () =>
       store.recordInbound(
         {
@@ -1064,13 +1068,24 @@ export class Gateway {
           migratedFromChatId: migratedFrom,
           direction: 'inbound',
           userId: event.userId,
-          replyTo: event.replyTo ?? null,
+          replyTo: replyId ?? null,
+          albumId: event.albumId,
+          metadata: {
+            at: event.at,
+            attachments: event.attachments,
+            replyTo,
+            sender: event.sender,
+            userDisplay: event.userDisplay,
+          },
           threadId: event.threadId ?? null,
           text:
             privateCommand && command?.args
               ? `/${command.name} [redacted]`
-              : event.text,
-          raw: privateCommand ? null : (event.raw ?? null),
+              : event.text ||
+                (event.attachments?.length
+                  ? `[${event.attachments[0]!.kind}]`
+                  : ''),
+          raw: privateCommand || sensitiveReply ? null : (event.raw ?? null),
         },
         event.edited,
       ),
@@ -1088,9 +1103,12 @@ export class Gateway {
       recordDecision('duplicate', false, stored.seq);
       return;
     }
-    const message = privateCommand
-      ? { ...event, raw: undefined, text: stored.text }
-      : event;
+    const message = {
+      ...event,
+      replyTo,
+      raw: privateCommand || sensitiveReply ? undefined : event.raw,
+      text: stored.text,
+    };
     await this.#hooks.emit('inbound.received', { chat, message });
     if (event.botMessage || this.#isStopping() || parsed === 'other-bot') {
       recordDecision(
@@ -1105,11 +1123,11 @@ export class Gateway {
       return;
     }
 
-    if (event.replyTo) {
+    if (replyId) {
       const result = this.#resolveApproval(adapter, {
         ...chat,
         userId: event.userId,
-        replyTo: event.replyTo,
+        replyTo: replyId,
         text: event.text,
       });
       if (result) {
@@ -1117,7 +1135,7 @@ export class Gateway {
         if ('record' in result) {
           await this.#approvalFeedback(adapter, chat, {
             chatId: event.chatId,
-            messageId: event.replyTo,
+            messageId: replyId,
             decision: result.decision,
             ...result.record.promptFormat,
           });
@@ -1169,11 +1187,14 @@ export class Gateway {
       return;
     }
 
-    const { triggered, reason } = decideTrigger(
-      event,
-      owner,
-      this.#auth.isAllowlisted(chat),
-    );
+    const priorAlbumItem =
+      event.albumId &&
+      event.chatKind === 'dm' &&
+      store.messageAlbum(chat, event.albumId, migratedFrom ?? '')[0]?.seq !==
+        stored.seq;
+    const { triggered, reason } = priorAlbumItem
+      ? { triggered: false, reason: 'not-addressed' as const }
+      : decideTrigger(event, owner, this.#auth.isAllowlisted(chat));
     await this.#hooks.emit('trigger.decided', {
       chat,
       message,

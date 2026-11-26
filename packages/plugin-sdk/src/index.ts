@@ -11,6 +11,15 @@ export {
 
 import type { TriggerReason } from './admin.ts';
 import type {
+  AgentImage,
+  AttachmentContent,
+  ContextMessage,
+  ImageLimits,
+  InboundAttachment,
+  MessageSender,
+  ReplyTarget,
+} from './media.ts';
+import type {
   CheckContext,
   CheckItem,
   SetupCompletion,
@@ -54,6 +63,17 @@ export {
   textMentionMatches,
   userMentionLinks,
 } from './mentions.ts';
+export { attachmentBytes, attachmentMetadata, imageLimits } from './media.ts';
+export type {
+  AgentImage,
+  AttachmentContent,
+  AttachmentMetadata,
+  ContextMessage,
+  ImageLimits,
+  InboundAttachment,
+  MessageSender,
+  ReplyTarget,
+} from './media.ts';
 
 export interface ChatRef {
   adapterId: string;
@@ -82,6 +102,9 @@ interface InboundBase {
 
 export interface InboundMessage extends InboundBase {
   addressedToOther?: boolean;
+  albumId?: string;
+  at?: number;
+  attachments?: readonly InboundAttachment[];
   botMessage?: boolean;
   chatKind: 'dm' | 'group' | 'supergroup';
   chatTitle?: string;
@@ -89,7 +112,8 @@ export interface InboundMessage extends InboundBase {
   mentionsBot?: boolean;
   messageId: string;
   repliesToBot?: boolean;
-  replyTo?: string;
+  replyTo?: ReplyTarget;
+  sender?: MessageSender;
   text: string;
   type: 'message';
   userDisplay?: string;
@@ -266,6 +290,11 @@ export interface PlatformAdapter {
   describeCommandError?(
     error: unknown,
   ): PlatformCommandErrorDetails | undefined;
+  downloadAttachment?(
+    attachment: InboundAttachment,
+    signal: AbortSignal,
+    maxBytes?: number,
+  ): Promise<AttachmentContent>;
   id: string;
   kind: string;
   respondToApproval?(feedback: ApprovalFeedback): Promise<void>;
@@ -293,8 +322,18 @@ export interface PlatformAdapter {
 
 export interface ContextBlock {
   content: string;
+  message?: ContextMessage;
   source: 'system' | 'rule' | 'summary' | 'message' | 'tool' | 'external';
   trust: 'trusted' | 'owner' | 'member' | 'untrusted';
+}
+
+export function renderContextLine({
+  content,
+  message,
+  source,
+  trust,
+}: ContextBlock) {
+  return JSON.stringify({ source, trust, ...message, content });
 }
 
 export type ResourceRef =
@@ -428,6 +467,7 @@ export class ToolFailure extends Error {}
 export interface AgentRequest {
   context: ContextBlock[];
   exec?: ExecBackend;
+  images?: readonly AgentImage[];
   model: string;
   purpose?: 'summary';
   resumeSessionId?: string;
@@ -570,6 +610,7 @@ export interface AgentConnector {
     settings?: Pick<AgentRequest, 'model' | 'serviceTier' | 'thinking'>,
   ): AgentSessionInfo | undefined;
   id: string;
+  imageLimits?: ImageLimits;
   /** Human-readable, unlocalized connector name. */
   implementation?: string;
   kind: string;

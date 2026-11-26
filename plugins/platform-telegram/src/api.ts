@@ -1,3 +1,6 @@
+import type { InboundAttachment } from '@tsugimori/plugin-sdk';
+
+import { attachmentBytes, ToolFailure } from '@tsugimori/plugin-sdk';
 import { setTimeout as delay } from 'node:timers/promises';
 
 export function record(value: unknown): Record<string, unknown> | undefined {
@@ -63,6 +66,82 @@ export class BotApi {
     this.#fetch = fetch;
     this.#token = token;
     this.#url = `https://api.telegram.org/bot${token}/`;
+  }
+
+  async downloadAttachment(
+    attachment: InboundAttachment,
+    signal: AbortSignal,
+    maxBytes = Infinity,
+  ) {
+    const platformLimit = 20 * 1024 * 1024;
+    const limit = Math.min(platformLimit, maxBytes);
+    const platformError = 'Telegram bot downloads are limited to 20 MB';
+    const limitError =
+      limit === platformLimit
+        ? platformError
+        : 'Attachment exceeds the media preparation size limit';
+    if ((attachment.size ?? 0) > platformLimit)
+      throw new ToolFailure(platformError);
+    if ((attachment.size ?? 0) > limit) throw new ToolFailure(limitError);
+    if (!attachment.fileId)
+      throw new Error('Telegram attachment has no file ID');
+    let file: Record<string, unknown> | undefined;
+    try {
+      file = record(
+        await this.call('getFile', { file_id: attachment.fileId }, signal),
+      );
+    } catch (error) {
+      if (
+        error instanceof BotApiError &&
+        /file is too big/i.test(error.description ?? '')
+      )
+        throw new ToolFailure(platformError);
+      throw error;
+    }
+    if (typeof file?.file_size === 'number' && file.file_size > limit)
+      throw new ToolFailure(
+        file.file_size > platformLimit ? platformError : limitError,
+      );
+    const path = file?.file_path;
+    if (
+      typeof path !== 'string' ||
+      !path
+        .split('/')
+        .every(
+          (part) =>
+            part !== '.' && part !== '..' && /^[a-z0-9_.-]+$/i.test(part),
+        )
+    )
+      throw new Error('Telegram returned an invalid attachment path');
+    const downloadSignal = AbortSignal.any([
+      signal,
+      AbortSignal.timeout(30_000),
+    ]);
+    try {
+      const response = await this.#fetch(
+        `https://api.telegram.org/file/bot${this.#token}/${path}`,
+        {
+          redirect: 'error',
+          signal: downloadSignal,
+        },
+      );
+      if (!response.ok) {
+        await response.body?.cancel();
+        throw new BotApiError('file download', response.status);
+      }
+      return {
+        bytes: await attachmentBytes(response, limit, limitError),
+        mime:
+          attachment.mime ??
+          response.headers.get('content-type')?.split(';')[0],
+      };
+    } catch (error) {
+      signal.throwIfAborted();
+      if (error instanceof BotApiError) throw error;
+      if (error instanceof Error && error.message === limitError)
+        throw new ToolFailure(limitError);
+      throw new BotApiError('file download', undefined);
+    }
   }
 
   async #post(

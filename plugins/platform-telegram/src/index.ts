@@ -458,6 +458,12 @@ export class TelegramAdapter implements PlatformAdapter {
     };
   }
 
+  downloadAttachment(
+    ...args: Parameters<NonNullable<PlatformAdapter['downloadAttachment']>>
+  ) {
+    return this.#api.downloadAttachment(...args);
+  }
+
   typing(
     chat: Pick<OutboundMessage, 'chatId' | 'threadId'>,
     task: AbortSignal,

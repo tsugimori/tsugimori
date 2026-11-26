@@ -147,7 +147,7 @@ export class ChatRemoval {
       pending.userId !== message.userId ||
       !this.#deps.isOwner(adapter.id, message.userId) ||
       (!cancel &&
-        (!message.replyTo || !pending.messageIds.has(message.replyTo)))
+        (!message.replyTo || !pending.messageIds.has(message.replyTo.id)))
     )
       return false;
     if (message.edited) return true;

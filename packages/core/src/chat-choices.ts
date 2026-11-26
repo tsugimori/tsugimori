@@ -188,7 +188,7 @@ export class ChatChoices {
       this.#replyKey(adapter, {
         chatId: message.chatId,
         threadId: message.threadId,
-        messageId: message.replyTo,
+        messageId: message.replyTo.id,
       }),
     );
     if (reply?.adapter === adapter && reply.userId === message.userId)

@@ -59,3 +59,19 @@ Claude reports the active model and reasoning effort from the SDK initialization
 After a completed turn reports a context above `compactAt`, the connector queues a background `/compact`. Further turns on that session wait for it. The owner can also use `/compact` to request compaction for the current session. The gateway records native, manual, and post-turn compaction and records before/after token counts when supplied.
 
 Native auto-compaction is a safety net for long turns. Claude receives `CLAUDE_CODE_AUTO_COMPACT_WINDOW` as the larger of `compactAt × 1.6` (rounded up) and `compactAt + 150,000`, capped at the known model context window and subject to Claude's own limits. [Rolling summaries](../../README.md#context-and-summaries)
+
+## Inbound images
+
+The connector defaults to a 1,568 px long edge and a standard-tier pixel budget
+of 1,568 × 28² pixels. The Claude API accepts 10 MB per base64-encoded image,
+so the connector limits the raw image to 7,500,000 bytes. Set
+`agents[].options.imageMaxEdge` and `agents[].options.imageMaxBytes` to lower the
+limits for your deployment. Visual inputs are sent as base64 image content in
+the SDK streaming prompt.
+
+[Claude vision limits](https://platform.claude.com/docs/en/build-with-claude/vision#request-limits)
+and [Agent SDK streaming input](https://code.claude.com/docs/en/agent-sdk/streaming-vs-single-mode)
+
+Set `agents[].options.imageMaxPixels` to change the pixel budget. Automatic
+previews download up to 32 MiB per source attachment by default. Use
+`agents[].options.imageSourceMaxBytes` to change the source limit.

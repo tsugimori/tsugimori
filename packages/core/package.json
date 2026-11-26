@@ -13,6 +13,7 @@
     }
   },
   "dependencies": {
+    "@lottiefiles/dotlottie-web": "0.83.2",
     "@tsugimori/auth": "workspace:*",
     "@tsugimori/config": "workspace:*",
     "@tsugimori/context": "workspace:*",

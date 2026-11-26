@@ -350,18 +350,18 @@ test('chat platform removal authorizes a linked owner reply and backs up only af
       '請回覆這則訊息 yes 以刪除，其他回覆會取消。10 分鐘後逾時，也可傳送 /cancel。',
     ].join('\n'),
   );
-  await emit('yes', { replyTo: first.id, userId: 'member' });
-  await emit('yes', { replyTo: first.id, chatId: 'another-chat' });
+  await emit('yes', { replyTo: { id: first.id }, userId: 'member' });
+  await emit('yes', { replyTo: { id: first.id }, chatId: 'another-chat' });
   assert.ok(inbox.has('old'));
-  await emit('no', { replyTo: first.id });
+  await emit('no', { replyTo: { id: first.id } });
   assert.equal(sent.at(-1)?.text, '已取消移除。');
   await emit('/remove platform old');
   await emit('/cancel');
   assert.equal(sent.at(-1)?.text, '已取消移除。');
   await emit('/remove platform old');
-  await emit('yes', { replyTo: sent.at(-1)!.id, edited: true });
+  await emit('yes', { replyTo: { id: sent.at(-1)!.id }, edited: true });
   assert.ok(inbox.has('old'));
-  await emit('yes', { replyTo: sent.at(-1)!.id });
+  await emit('yes', { replyTo: { id: sent.at(-1)!.id } });
 
   assert.match(sent.at(-1)!.text, /^已移除 平台 old。/);
   assert.deepEqual(stopped, ['old']);
@@ -684,7 +684,7 @@ test('LINE shows removal categories and a text command hint', async (t) => {
   );
   assert.equal(sent.at(-1)!.buttons, undefined);
   await emit('/remove platform old');
-  await emit('yes', { replyTo: sent.at(-1)!.id });
+  await emit('yes', { replyTo: { id: sent.at(-1)!.id } });
   await emit('/remove platform');
   assert.match(sent.at(-1)!.text, /沒有可在此移除的項目/);
   assert.equal(sent.at(-1)!.buttons, undefined);

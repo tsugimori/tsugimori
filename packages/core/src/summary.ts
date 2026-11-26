@@ -3,6 +3,7 @@ import type { ChatRef, ExecScope } from '@tsugimori/plugin-sdk';
 import type { MessageRecord, RemovalTarget, Store } from '@tsugimori/storage';
 import type { Tracer } from '@tsugimori/trace';
 
+import { messageAlbumLookup, messageContext } from '@tsugimori/context';
 import { setImmediate } from 'node:timers/promises';
 
 import type { Logger } from './hooks.ts';
@@ -195,22 +196,44 @@ export class BackgroundSummaries implements SummaryProvider {
     const batch = store.summaryMessages(chat, afterSeq, cutoff, maxMessages);
     const maxMessageChars = summary?.maxMessageChars ?? 1_000;
     const maxBatchChars = summary?.maxBatchChars ?? 60_000;
-    const excerpts: Pick<
+    const excerpts: (Pick<
       MessageRecord,
       'direction' | 'seq' | 'text' | 'userId'
-    >[] = [];
+    > &
+      ReturnType<typeof messageContext>)[] = [];
+    const album = messageAlbumLookup(store, chat);
     let throughSeq = afterSeq;
     let batchChars = previous?.text.length ?? 0;
     let charLimited = false;
-    for (const { direction, seq, text, userId } of batch) {
+    for (const message of batch) {
+      const { direction, seq, text, userId } = message;
       if (direction !== 'inbound' || text.trim()) {
         const shortened = excerpt(text, seq, maxMessageChars);
-        if (excerpts.length && batchChars + shortened.length > maxBatchChars) {
+        const details = messageContext(message, album);
+        if (details.replyTo?.text)
+          details.replyTo.text = excerpt(
+            details.replyTo.text,
+            seq,
+            maxMessageChars,
+          );
+        if (details.replyTo?.quote)
+          details.replyTo.quote = excerpt(
+            details.replyTo.quote,
+            seq,
+            maxMessageChars,
+          );
+        const chars =
+          shortened.length +
+          (details.replyTo ? JSON.stringify(details.replyTo).length : 0) +
+          (details.attachments.length
+            ? JSON.stringify(details.attachments).length
+            : 0);
+        if (excerpts.length && batchChars + chars > maxBatchChars) {
           charLimited = true;
           break;
         }
-        excerpts.push({ direction, seq, userId, text: shortened });
-        batchChars += shortened.length;
+        excerpts.push({ direction, seq, userId, ...details, text: shortened });
+        batchChars += chars;
       }
       throughSeq = seq;
     }

@@ -4,6 +4,7 @@ import type {
 } from '@tsugimori/plugin-sdk';
 
 import { nativeId, record } from './api.ts';
+import { telegramAttachments, telegramText } from './inbound-media.ts';
 
 export interface BotIdentity {
   id: string;
@@ -127,34 +128,74 @@ function mapMessage(
   const sender = record(message.from);
   const userId = nativeId(sender?.id);
   if (userId === undefined) return;
+  const attachments = telegramAttachments(message);
   const text =
-    typeof message.text === 'string'
-      ? message.text
-      : typeof message.caption === 'string'
-        ? message.caption
-        : '';
+    telegramText(message) ||
+    (attachments.length ? `[${attachments[0]!.kind}]` : '');
   const entities =
     typeof message.text === 'string'
       ? message.entities
       : message.caption_entities;
   const reply = record(message.reply_to_message);
-  const replySender = record(reply?.from);
-  const repliesToBot = nativeId(replySender?.id) === bot.id;
+  const replySender = record(reply?.sender_chat) ?? record(reply?.from);
+  const replyId = nativeId(reply?.message_id);
+  const replySenderId = nativeId(replySender?.id);
+  const quote = record(message.quote)?.text;
+  const date = message.date;
+  const repliesToBot = nativeId(record(reply?.from)?.id) === bot.id;
   const mentionsBot = repliesToBot || mentions(entities, text, bot);
   const addressedToOther = !mentionsBot && replySender?.is_bot === true;
   const userDisplay = displayName(sender);
+  const senderChat = record(message.sender_chat);
+  const senderChatId = nativeId(senderChat?.id);
   return {
     ...room,
+    ...(attachments.length && { attachments }),
+    ...(typeof message.media_group_id === 'string' && {
+      albumId: message.media_group_id,
+    }),
+    ...(typeof date === 'number' &&
+      Number.isSafeInteger(date * 1000) && { at: date * 1000 }),
     type: 'message',
     raw: message,
     ...(sender?.is_bot === true && { botMessage: true }),
     ...(addressedToOther && { addressedToOther: true }),
     edited,
+    ...(senderChatId !== undefined && {
+      sender: {
+        id: senderChatId,
+        name:
+          typeof senderChat?.title === 'string' ? senderChat.title : undefined,
+      },
+    }),
     userId,
     userDisplay: userDisplay || undefined,
     userUsername: typeof sender?.username === 'string' ? sender.username : null,
     text,
-    replyTo: nativeId(reply?.message_id),
+    ...(reply &&
+      replyId !== undefined && {
+        replyTo: {
+          id: replyId,
+          sender:
+            replySenderId === undefined
+              ? undefined
+              : {
+                  id: replySenderId,
+                  name:
+                    displayName(replySender) ||
+                    (typeof replySender?.title === 'string'
+                      ? replySender.title
+                      : undefined),
+                },
+          text: telegramText(reply),
+          attachments: telegramAttachments(reply),
+          albumId:
+            typeof reply.media_group_id === 'string'
+              ? reply.media_group_id
+              : undefined,
+          quote: typeof quote === 'string' ? quote : undefined,
+        },
+      }),
     repliesToBot,
     mentionsBot,
   };

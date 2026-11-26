@@ -3,6 +3,7 @@ import type {
   query,
   SDKMessage,
   SDKRateLimitInfo,
+  SDKUserMessage,
 } from '@anthropic-ai/claude-agent-sdk';
 import type {
   AgentCompactRequest,
@@ -17,13 +18,16 @@ import type {
   AgentSessionInfo,
   AgentSettings,
   ContextBlock,
+  ImageLimits,
   PluginFactoryContext,
 } from '@tsugimori/plugin-sdk';
 
 import {
   defaultCompactAt,
   definePlugin,
+  imageLimits,
   nativeCompactionLimit,
+  renderContextLine,
   toolWireName,
 } from '@tsugimori/plugin-sdk';
 import { mkdir, realpath } from 'node:fs/promises';
@@ -53,6 +57,7 @@ interface ClaudeOptions {
   compactAt?: number;
   effort?: string;
   home?: string;
+  images?: ImageLimits;
   model?: string;
   token?: string;
 }
@@ -63,12 +68,39 @@ interface SessionSlot {
 }
 
 const effortLevels = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
+const defaultImageLimits: ImageLimits = {
+  sourceMaxBytes: 32 * 1024 * 1024,
+  maxEdge: 1568,
+  maxBytes: 7_500_000,
+  maxPixels: 1568 * 28 ** 2,
+};
+
 function render(blocks: ContextBlock[]) {
-  return blocks
-    .map(({ content, source, trust }) =>
-      JSON.stringify({ source, trust, content }),
-    )
-    .join('\n');
+  return blocks.map(renderContextLine).join('\n');
+}
+
+async function* imagePrompt(
+  text: string,
+  images: NonNullable<AgentRequest['images']>,
+): AsyncIterable<SDKUserMessage> {
+  const content = [
+    { type: 'text' as const, text },
+    ...images.flatMap(({ data, mime, source }) => [
+      ...(source
+        ? [{ type: 'text' as const, text: JSON.stringify(source) }]
+        : []),
+      {
+        type: 'image' as const,
+        source: { type: 'base64' as const, media_type: mime, data },
+      },
+    ]),
+  ];
+  yield {
+    type: 'user',
+    message: { role: 'user', content },
+    parent_tool_use_id: null,
+    session_id: '',
+  };
 }
 
 function trustedInstructions(block: ContextBlock) {
@@ -84,6 +116,7 @@ type QuotaWindow = keyof typeof quotaWindows;
 
 export class ClaudeAgent implements AgentConnector {
   readonly id: string;
+  readonly imageLimits: ImageLimits;
   readonly implementation = implementation;
   readonly kind = 'claude-sdk';
   readonly loop = 'external';
@@ -123,6 +156,7 @@ export class ClaudeAgent implements AgentConnector {
     options?: ClaudeOptions,
   ) {
     this.id = id;
+    this.imageLimits = options?.images ?? defaultImageLimits;
     this.#query = query;
     this.#apiKey = apiKey ?? undefined;
     this.#compactAt = options?.compactAt ?? defaultCompactAt;
@@ -409,7 +443,11 @@ export class ClaudeAgent implements AgentConnector {
             },
       };
       for await (const event of query({
-        prompt: command ?? render(context),
+        prompt:
+          command ??
+          (request.images?.length
+            ? imagePrompt(render(context), request.images)
+            : render(context)),
         options,
       })) {
         signal.throwIfAborted();
@@ -752,6 +790,7 @@ export default definePlugin({
         return new ClaudeAgent({}, config.id, auth.apiKey ?? null, {
           ...auth,
           compactAt: config.compactAt,
+          images: imageLimits(defaultImageLimits, config.options),
           model: typeof config.model === 'string' ? config.model : undefined,
           effort:
             typeof config.thinking === 'string' ? config.thinking : undefined,

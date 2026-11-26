@@ -181,6 +181,11 @@ for await (const line of createInterface({ input: process.stdin })) {
     const blocks = params.input[0].text.split('\n').map((line) => JSON.parse(line));
     assert.deepEqual(blocks.map(({ source }) => source), thread.resumed ? ['message'] : ['rule', 'message']);
     const input = blocks.at(-1).content;
+    if (input === 'photo') assert.deepEqual(params.input.slice(1), [
+      { type: 'text', text: '{"messageId":"photo","index":0}', text_elements: [] },
+      { type: 'image', url: 'data:image/png;base64,AQID' },
+    ]);
+    if (input === 'after photo') assert.equal(params.input.length, 1);
     if (input === 'quota update') {
       quotaUpdate({
         primary: { usedPercent: 17, windowDurationMins: null, resetsAt: 201 },
@@ -937,3 +942,44 @@ test('maps visible Codex reasoning summaries once and ignores hidden reasoning',
     [{ type: 'reasoning', text: '\n\nMore visible text' }],
   );
 });
+
+test(
+  'Codex sends inline image URLs without a local file',
+  { timeout: 5_000 },
+  async (t) => {
+    const agent = new CodexAgent(
+      {
+        inspect: noInspection,
+        spawn(_command, _args, options) {
+          return spawn(
+            process.execPath,
+            ['--input-type=module', '--eval', fakeServer],
+            options,
+          );
+        },
+      },
+      'codex',
+    );
+    t.after(() => agent.stop());
+    const events = await collect(
+      agent.run(
+        {
+          ...request('photo'),
+          images: [
+            {
+              mime: 'image/png',
+              data: 'AQID',
+              source: { messageId: 'photo', index: 0 },
+            },
+          ],
+        },
+        io,
+      ),
+    );
+    const session = events.find((event) => event.type === 'sessionId');
+    assert.ok(session);
+    await collect(
+      agent.run(request('after photo', undefined, session.sessionId), io),
+    );
+  },
+);

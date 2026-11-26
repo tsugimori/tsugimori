@@ -5,6 +5,7 @@ import type {
   ApprovalFeedback,
   ChatRef,
   Grant,
+  InboundMessage,
   PluginInstanceConfig,
   PreviewCloseReason,
   PrincipalRef,
@@ -42,10 +43,18 @@ export interface UserRecord extends PrincipalRef {
   username: string | null;
 }
 
+export type MessageMetadata = Pick<
+  InboundMessage,
+  'at' | 'attachments' | 'replyTo' | 'sender' | 'userDisplay'
+>;
+
 export interface MessageRecord extends ChatRef {
+  albumId?: string | null;
   deleted: boolean;
   direction: 'inbound' | 'outbound';
+  displayName?: string | null;
   messageId: string;
+  metadata?: MessageMetadata | null;
   migratedFromChatId: string;
   raw: unknown;
   recordedAt: number | null;
@@ -70,7 +79,16 @@ export type HistoryQuery = { limit: number } & (
 
 export type HistoryMessage = Pick<
   MessageRecord,
-  'direction' | 'recordedAt' | 'seq' | 'text' | 'userId'
+  | 'albumId'
+  | 'direction'
+  | 'messageId'
+  | 'metadata'
+  | 'migratedFromChatId'
+  | 'recordedAt'
+  | 'replyTo'
+  | 'seq'
+  | 'text'
+  | 'userId'
 > & { displayName: string | null };
 
 export interface ChatSummary extends ChatRef {
@@ -440,6 +458,7 @@ export interface Store {
     ref: ChatRef,
     messageId: string,
     migratedFromChatId?: string,
+    includeRaw?: boolean,
   ): MessageRecord | undefined;
   getOwner(adapterId: string): string | undefined;
   getSchedule(id: string): ScheduleRecord | undefined;
@@ -503,6 +522,11 @@ export interface Store {
     migratedFromChatId?: string,
   ): void;
   markSetupSecret(ref: ChatRef, messageId: string): void;
+  messageAlbum(
+    ref: ChatRef,
+    albumId: string,
+    migratedFromChatId: string,
+  ): MessageRecord[];
   messageRaw(ref: ChatRef, seq: number): unknown;
   migrateChat(ref: ChatRef, newChatId: string, title?: string): boolean;
   openPreview(preview: StoredPreview): void;
@@ -510,6 +534,11 @@ export interface Store {
     maxBytes: number,
     active?: readonly ActiveTaskRefs[],
   ): { bytes: number; tasks: number };
+  quotedAttachmentMessage(
+    ref: ChatRef,
+    messageId: string,
+    migratedFromChatId: string,
+  ): MessageRecord | undefined;
   recentMessages(
     ref: ChatRef,
     options: {

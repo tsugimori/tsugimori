@@ -236,7 +236,9 @@ test('setup offers typed choices when the chat platform has no inline buttons', 
   );
   assert.match(prompt.text, /選項：login \/ token/);
   assert.equal(prompt.buttons, undefined);
-  await platform.receive('selection', 'token', { replyTo: prompt.messageId });
+  await platform.receive('selection', 'token', {
+    replyTo: { id: prompt.messageId },
+  });
   await until(() => answers[0]);
   assert.deepEqual(answers, ['token']);
 });
@@ -323,7 +325,7 @@ test('guided chat setup uses the original topic for progress and consumes secret
   assert.match(name.text, /use [0-9a-f]{6}/);
   await platform.receive('invalid-name', 'invalid name', {
     ...group,
-    replyTo: name.messageId,
+    replyTo: { id: name.messageId },
   });
   const retry = await until(() =>
     platform.sent.find(({ text }) =>
@@ -332,7 +334,7 @@ test('guided chat setup uses the original topic for progress and consumes secret
   );
   await platform.receive('custom-name', 'attached', {
     ...group,
-    replyTo: retry.messageId,
+    replyTo: { id: retry.messageId },
   });
   const secret = await until(() =>
     platform.sent.find(({ text }) => text.startsWith('(2/3) Enter token.')),
@@ -342,18 +344,18 @@ test('guided chat setup uses the original topic for progress and consumes secret
   assert.match(secret.text, /Setup started in Setup group\./);
   await platform.receive('group-token', credential, {
     ...group,
-    replyTo: secret.messageId,
+    replyTo: { id: secret.messageId },
     raw: { credential },
   });
   await platform.receive('stranger-token', credential, {
     userId: '43',
     chatId: '43',
-    replyTo: secret.messageId,
+    replyTo: { id: secret.messageId },
     raw: { credential },
   });
   assert.equal(attached, 0);
   await platform.receive('owner-token', credential, {
-    replyTo: secret.messageId,
+    replyTo: { id: secret.messageId },
     raw: { credential },
   });
   const owner = await until(() =>
@@ -364,7 +366,7 @@ test('guided chat setup uses the original topic for progress and consumes secret
   assert.equal(owner.replyTo, 'owner-add');
   await platform.receive('owner-answer', ownerId, {
     ...group,
-    replyTo: owner.messageId,
+    replyTo: { id: owner.messageId },
   });
   const done = await until(() =>
     platform.sent.find(({ text }) => text === 'attached is attached.'),
@@ -377,7 +379,7 @@ test('guided chat setup uses the original topic for progress and consumes secret
     ownerId,
   );
   await platform.receive('late-token', 'arbitrary secret input', {
-    replyTo: secret.messageId,
+    replyTo: { id: secret.messageId },
     raw: { credential },
   });
   assert.deepEqual(platform.removed, [
@@ -476,7 +478,9 @@ test('only the owner can cancel setup in the origin or pending secret DM, and th
   });
   assert.equal(platform.sent.at(-1)?.text, 'No setup is in progress.');
   assert.equal(store.getSetupRun(key)?.status, 'pending');
-  await platform.receive('dm-cancel', '/cancel', { replyTo: first.messageId });
+  await platform.receive('dm-cancel', '/cancel', {
+    replyTo: { id: first.messageId },
+  });
   assert.equal(
     platform.sent.at(-1)?.text,
     'Setup cancelled. No credentials or configuration were saved in this run.',
@@ -494,7 +498,7 @@ test('only the owner can cancel setup in the origin or pending secret DM, and th
   });
   const afterCancel = platform.sent.length;
   await platform.receive('late-linked-secret', 'arbitrary credential', {
-    replyTo: first.messageId,
+    replyTo: { id: first.messageId },
   });
   await platform.receive('late-unlinked-secret', credential);
   assert.equal(platform.sent.length, afterCancel);
@@ -508,14 +512,16 @@ test('only the owner can cancel setup in the origin or pending secret DM, and th
 
   await platform.receive('add2', '/add platform trial --id trial', group);
   const second = await dmPrompt(afterCancel);
-  await platform.receive('answer2', credential, { replyTo: second.messageId });
+  await platform.receive('answer2', credential, {
+    replyTo: { id: second.messageId },
+  });
   const confirm = await until(() =>
     platform.sent.find(({ text }) => text.startsWith('(2/2) Confirm test bot')),
   );
   assert.equal(store.getSetupRun(key)?.step, 1);
   await platform.receive('group-cancel', '/cancel', {
     ...group,
-    replyTo: confirm.messageId,
+    replyTo: { id: confirm.messageId },
   });
   assert.equal(
     platform.sent.at(-1)?.text,
@@ -532,7 +538,7 @@ test('only the owner can cancel setup in the origin or pending secret DM, and th
   const afterSecondCancel = platform.sent.length;
   await platform.receive('late-confirm', 'yes', {
     ...group,
-    replyTo: confirm.messageId,
+    replyTo: { id: confirm.messageId },
   });
   assert.equal(
     store.getMessage({ adapterId, chatId: '-100_7' }, 'late-confirm'),

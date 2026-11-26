@@ -253,7 +253,8 @@ export class LineAdapter implements PlatformAdapter {
       const mapped = mapEvent(event, ctx);
       if (!mapped) continue;
       const { inbound, profilePath, quoteToken, replyToken } = mapped;
-      const { chatId, messageId, replyTo } = inbound;
+      const { chatId, messageId } = inbound;
+      const replyTo = inbound.replyTo?.id;
       if (replyToken)
         this.#replies.set(chatId, { messageId, receivedAt, token: replyToken });
       else this.#replies.delete(chatId);
@@ -373,6 +374,12 @@ export class LineAdapter implements PlatformAdapter {
       }
     }
     return this.#api.push(chatId, batch, signal);
+  }
+
+  downloadAttachment(
+    ...args: Parameters<NonNullable<PlatformAdapter['downloadAttachment']>>
+  ) {
+    return this.#api.downloadAttachment(...args);
   }
 
   typing({ chatId }: Pick<OutboundMessage, 'chatId'>, signal: AbortSignal) {

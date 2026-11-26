@@ -77,6 +77,14 @@ The first summary can run as soon as the backlog reaches the threshold. When `ma
 
 Agents can use `history.search` to find matching text in the current conversation, including its topic when applicable. Search returns excerpts, newest first, and accepts a sender ID and an inclusive range of recording times in Unix milliseconds. `history.read` takes a message sequence number and an optional inclusive end sequence, and returns the original text. Both tools return at most 50 messages per page and provide a cursor when more are available. `history.read` pages through oversized messages to keep each response within 40,000 characters. Results show recording times in the workspace time zone when available.
 
+For Telegram and LINE, chat context includes attachment metadata and quoted
+messages when available. Agents can use `attachment.get` with a message ID and
+attachment index to download a file into the current chat workspace. Image
+downloads made with this tool are removed when the task ends. With `ffmpeg` on
+PATH, supported inbound images and Telegram stickers are also sent to the
+model from memory. LINE stickers include webhook metadata. The LINE content
+API serves attachments hosted by LINE.
+
 ## Chat commands
 
 | Command                                     | Who                                                       | What it does                                                                                                |

@@ -686,3 +686,64 @@ test(
     await assert.rejects(running, { name: 'AbortError' });
   },
 );
+
+test('Claude sends native base64 image blocks with the new user message', async () => {
+  const agent = new ClaudeAgent(
+    {
+      async *query({ prompt, options }) {
+        assert.equal(options?.resume, 'claude-native');
+        assert.ok(typeof prompt !== 'string');
+        const messages = await collect(prompt);
+        assert.deepEqual(
+          messages.map(({ message }) => message),
+          [
+            {
+              role: 'user',
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify({
+                    source: 'message',
+                    trust: 'owner',
+                    content: 'reply pong',
+                  }),
+                },
+                {
+                  type: 'text',
+                  text: JSON.stringify({ messageId: 'photo', index: 0 }),
+                },
+                {
+                  type: 'image',
+                  source: {
+                    type: 'base64',
+                    media_type: 'image/png',
+                    data: 'AQID',
+                  },
+                },
+              ],
+            },
+          ],
+        );
+        yield success;
+      },
+    },
+    'claude',
+    null,
+  );
+  await collect(
+    agent.run(
+      {
+        ...request(tmpdir()),
+        resumeSessionId: 'claude-native',
+        images: [
+          {
+            mime: 'image/png',
+            data: 'AQID',
+            source: { messageId: 'photo', index: 0 },
+          },
+        ],
+      },
+      io,
+    ),
+  );
+});

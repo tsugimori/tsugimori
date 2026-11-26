@@ -60,3 +60,19 @@ Codex reports the active model and reasoning effort through the SDK `model` even
 The gateway configures Codex's post-turn compaction on supported CLIs. Set `options.asyncCompaction` to `true` to use async compaction when the CLI supports it. These modes derive a percentage threshold from `compactAt` and the model context window. With an unknown model window or unsupported timing, native auto-compaction is the fallback.
 
 The native safety net uses `model_auto_compact_token_limit`. Its value is the larger of `compactAt × 1.6` (rounded up) and `compactAt + 150,000`, capped at the known model context window and subject to Codex's own limits. `compactAt` must be a positive safe integer. Owners can use `/compact` for the existing session. Traces record compaction timing and before/after context counts when reported. [Rolling summaries](../../README.md#context-and-summaries)
+
+## Inbound images
+
+The connector defaults to a 2,048 px long edge and a high-detail pixel budget
+of 2,500 × 32² pixels. The OpenAI vision guide documents a 512 MB total image
+payload and up to 1,500 images per request. The connector uses a 10,000,000 byte
+per-image default to keep App Server messages small. Set
+`agents[].options.imageMaxEdge` and `agents[].options.imageMaxBytes` to change
+these limits. Images are sent as inline data URLs in App Server `turn/start`.
+
+[OpenAI image input requirements and model sizing](https://developers.openai.com/api/docs/guides/images-vision)
+and [Codex App Server turn input](https://developers.openai.com/codex/app-server#turns)
+
+Set `agents[].options.imageMaxPixels` to change the pixel budget. Automatic
+previews download up to 32 MiB per source attachment by default. Use
+`agents[].options.imageSourceMaxBytes` to change the source limit.

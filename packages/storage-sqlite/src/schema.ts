@@ -105,6 +105,10 @@ export const messages = sqliteTable(
     revision: integer('revision').notNull().default(0),
     deleted: integer('deleted', { mode: 'boolean' }).notNull().default(false),
     recordedAt: integer('recorded_at'),
+    albumId: text('album_id'),
+    metadata: text('metadata', { mode: 'json' }).$type<
+      NonNullable<MessageRecord['metadata']>
+    >(),
   },
   (table) => [
     uniqueIndex('messages_platform_id').on(
@@ -114,6 +118,24 @@ export const messages = sqliteTable(
       table.messageId,
       table.migratedFromChatId,
     ),
+    index('messages_chat_album')
+      .on(
+        table.adapterId,
+        table.chatId,
+        table.albumId,
+        table.migratedFromChatId,
+        table.seq,
+      )
+      .where(sql`${table.albumId} is not null`),
+    index('messages_chat_reply')
+      .on(
+        table.adapterId,
+        table.chatId,
+        table.replyTo,
+        table.migratedFromChatId,
+        table.seq,
+      )
+      .where(sql`${table.replyTo} is not null`),
     index('messages_chat_sequence').on(
       table.adapterId,
       table.chatId,
@@ -488,6 +510,9 @@ export const messageEdits = sqliteTable(
       .references(() => messages.seq, { onDelete: 'cascade' }),
     revision: integer('revision').notNull(),
     text: text('text').notNull(),
+    metadata: text('metadata', { mode: 'json' }).$type<
+      NonNullable<MessageRecord['metadata']>
+    >(),
   },
   (table) => [primaryKey({ columns: [table.seq, table.revision] })],
 );

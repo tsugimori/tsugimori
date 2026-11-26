@@ -94,10 +94,10 @@ export class ChatSetup {
       eligible &&
       prompt.chatId === chat.chatId &&
       message.replyTo &&
-      message.replyTo === prompt.messageId;
+      message.replyTo.id === prompt.messageId;
     const previouslySecret = store.isSetupSecret(chat, message.messageId);
     const privateReply = Boolean(
-      message.replyTo && store.isSetupSecret(chat, message.replyTo),
+      message.replyTo && store.isSetupSecret(chat, message.replyTo.id),
     );
     const lateSecret = this.#cancelledSecretChats.size
       ? this.#cancelledSecretChats.get(

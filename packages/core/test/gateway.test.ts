@@ -6,6 +6,7 @@ import type {
   AgentRequest,
   ApprovalFeedback,
   ApprovalReaction,
+  ImageLimits,
   InboundMessage,
   OutboundMessage,
   PlatformAdapter,
@@ -15,10 +16,11 @@ import type {
 } from '@tsugimori/plugin-sdk';
 import type { ScheduleRecord } from '@tsugimori/storage';
 
+import { renderContextLine } from '@tsugimori/plugin-sdk';
 import { SqliteStore } from '@tsugimori/storage-sqlite';
 import { Tracer } from '@tsugimori/trace';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import {
   mkdir,
   mkdtemp,
@@ -132,8 +134,10 @@ async function fixture(
     describeDefaults?: AgentConnector['describeDefaults'];
     describeQuota?: AgentConnector['describeQuota'];
     describeSession?: AgentConnector['describeSession'];
+    downloadAttachment?: PlatformAdapter['downloadAttachment'];
     durable?: boolean;
     envFixture?: string;
+    imageLimits?: ImageLimits;
     locale?: 'en' | 'zh-TW';
     onScopedTool?: (args: unknown, userId: string) => void;
     outboundPush?: PlatformCapabilities['outboundPush'];
@@ -153,6 +157,7 @@ async function fixture(
     options.reactions,
     options.outboundPush,
   );
+  platform.platform.downloadAttachment = options.downloadAttachment;
   let agentStarts = 0;
   let agentStops = 0;
   const registry = new PluginRegistry([
@@ -165,6 +170,7 @@ async function fixture(
           id,
           kind: 'fake',
           loop: 'external',
+          imageLimits: options.imageLimits,
           compact: options.compact,
           describeDefaults: options.describeDefaults,
           describeQuota: options.describeQuota,
@@ -355,7 +361,7 @@ test(
         inbound('member', '/compact', { userId: 'member', mentionsBot: true }),
       );
       await platform.emit(
-        inbound('owner', '/compact', { replyTo: 'first-turn' }),
+        inbound('owner', '/compact', { replyTo: { id: 'first-turn' } }),
       );
       assert.deepEqual(order, ['turn']);
     } finally {
@@ -881,7 +887,7 @@ test(
         await f.platform.emit(
           inbound(`decision-${request}`, decision, {
             chatId: 'owner',
-            replyTo: prompt.messageId,
+            replyTo: { id: prompt.messageId },
           }),
         );
         assert.equal(f.platform.feedback.at(-1)?.decision, decision);
@@ -1002,7 +1008,7 @@ test(
     await f.platform.emit(
       inbound('approve', 'approve', {
         chatId: 'owner',
-        replyTo: approval.promptMessageId,
+        replyTo: { id: approval.promptMessageId },
       }),
     );
     await f.gateway.idle();
@@ -1223,10 +1229,10 @@ test(
     await entered.promise;
     await f.platform.emit(inbound('queued', 'unrelated'));
     await f.platform.emit(
-      inbound('one', 'first supplement', { replyTo: 'source' }),
+      inbound('one', 'first supplement', { replyTo: { id: 'source' } }),
     );
     await f.platform.emit(
-      inbound('two', 'second supplement', { replyTo: 'one' }),
+      inbound('two', 'second supplement', { replyTo: { id: 'one' } }),
     );
     await until(t, () => seen.length === 2);
     assert.equal(inputs.length, 1);
@@ -1295,7 +1301,7 @@ test(
       inbound('forged', 'yes', {
         chatKind: 'group',
         userId: 'member',
-        replyTo: prompt.messageId,
+        replyTo: { id: prompt.messageId },
       }),
     );
     assert.equal(f.platform.sent.length, 2);
@@ -1320,7 +1326,9 @@ test(
     const second = f.platform.sent.at(-1);
     assert.ok(second?.buttons?.[0]);
     await f.platform.emit(
-      inbound('second-approval', 'always', { replyTo: second.messageId }),
+      inbound('second-approval', 'always', {
+        replyTo: { id: second.messageId },
+      }),
     );
     await f.gateway.idle();
     assert.equal(runCount, 2);
@@ -1439,7 +1447,7 @@ for (const mode of ['reload', 'restart'] as const) {
           await platform.emit(
             inbound('accept-schedule', 'yes', {
               chatId: 'owner',
-              replyTo: prompt.messageId,
+              replyTo: { id: prompt.messageId },
             }),
           );
         }
@@ -1463,7 +1471,7 @@ for (const mode of ['reload', 'restart'] as const) {
         await platform.emit(
           inbound('repeated-decision', 'yes', {
             chatId: 'owner',
-            replyTo: prompt.messageId,
+            replyTo: { id: prompt.messageId },
           }),
         );
         assert.equal(store.listSchedules(scope).length, 1);
@@ -1608,7 +1616,7 @@ test(
     await f.platform.emit(
       inbound('approve-by-quote', 'approve', {
         ...group,
-        replyTo: prompt.messageId,
+        replyTo: { id: prompt.messageId },
       }),
     );
     await f.gateway.idle();
@@ -1653,9 +1661,11 @@ test(
     );
     const replyTo = approval.promptMessageId;
     assert.equal(f.store.getApproval(approval.id)?.status, 'pending');
-    await f.platform.emit(inbound('tool-yes', 'yes', { ...group, replyTo }));
     await f.platform.emit(
-      inbound('tool-yes-again', 'yes', { ...group, replyTo }),
+      inbound('tool-yes', 'yes', { ...group, replyTo: { id: replyTo } }),
+    );
+    await f.platform.emit(
+      inbound('tool-yes-again', 'yes', { ...group, replyTo: { id: replyTo } }),
     );
     assert.deepEqual(calls, [
       { args: { id: 'original-scope' }, userId: 'member' },
@@ -1773,7 +1783,7 @@ for (const mode of ['reaction', 'fallback', 'answer'] as const) {
         );
       }
       await f.platform.emit(
-        inbound('deny', 'deny', { replyTo: approval.promptMessageId }),
+        inbound('deny', 'deny', { replyTo: { id: approval.promptMessageId } }),
       );
       assert.equal(f.store.getApproval(approval.id)?.status, 'denied');
       assert.deepEqual(
@@ -1839,7 +1849,7 @@ test(
     await f.platform.emit(inbound('original', 'original'));
     await entered.promise;
     await f.platform.emit(
-      inbound('supplement', 'more detail', { replyTo: 'original' }),
+      inbound('supplement', 'more detail', { replyTo: { id: 'original' } }),
     );
     release.resolve();
     await f.gateway.idle();
@@ -2091,6 +2101,11 @@ test(
           seq: first,
           direction: 'inbound',
           displayName: 'Jamie',
+          id: 'first',
+          at: firstTime,
+          sender: { id: 'member', name: 'Jamie' },
+          attachments: [],
+          replyTo: undefined,
           time: '2026-01-02, 01:00:00 GMT+8',
           userId: 'member',
           text: original,
@@ -2785,7 +2800,7 @@ test(
     const decide = f.platform.emit(
       inbound('linked-schedule-approval', '一律允許', {
         chatId: 'owner',
-        replyTo: prompt.messageId,
+        replyTo: { id: prompt.messageId },
       }),
     );
     await until(
@@ -3007,7 +3022,9 @@ test(
       return prompt;
     };
     const decide = (id: string, replyTo: string, userId = 'owner') =>
-      f.platform.emit(inbound(id, 'approve', { ...group, replyTo, userId }));
+      f.platform.emit(
+        inbound(id, 'approve', { ...group, replyTo: { id: replyTo }, userId }),
+      );
 
     await request('add');
     const add = await approval(1);
@@ -3843,7 +3860,9 @@ test(
       /requires-approval/,
     );
     await f.platform.emit(
-      inbound('gated-deny', 'deny', { replyTo: record.promptMessageId }),
+      inbound('gated-deny', 'deny', {
+        replyTo: { id: record.promptMessageId },
+      }),
     );
     await f.gateway.idle();
     assert.equal(f.store.taskToolCalls([record.taskId])[0]?.status, 'denied');
@@ -4129,7 +4148,7 @@ test(
       inbound('extra', 'One more detail', {
         chatKind: 'group',
         mentionsBot: true,
-        replyTo: 'request',
+        replyTo: { id: 'request' },
       }),
     );
     await f.gateway.idle();
@@ -4318,3 +4337,238 @@ test(
     assert.equal(span?.attrs.error, 'Error: Connector broke with [redacted]');
   },
 );
+
+test('renders an old quoted file and downloads only attachments in the current chat', async (t) => {
+  const requests: AgentRequest[] = [];
+  const downloads: string[] = [];
+  const f = await fixture(
+    t,
+    async function* (request) {
+      requests.push(request);
+      const tool = request.tools.find(({ name }) => name === 'attachment.get');
+      assert.ok(tool);
+      const saved = (await tool.run({ messageId: 'original', index: 0 })) as {
+        mime: string;
+        path: string;
+        size: number;
+      };
+      assert.equal(saved.mime, 'application/pdf');
+      assert.equal(saved.size, 3);
+      assert.ok(saved.path.startsWith(request.workdir + '/'));
+      assert.equal(await readFile(saved.path, 'utf8'), 'PDF');
+      const embedded = (await tool.run({
+        messageId: 'never-seen',
+        index: 0,
+      })) as { path: string };
+      assert.equal(await readFile(embedded.path, 'utf8'), 'PDF');
+      await assert.rejects(
+        tool.run({ messageId: 'other-chat-file', index: 0 }),
+        /not found in this conversation/,
+      );
+      yield { type: 'text.final', text: 'pong' };
+    },
+    true,
+    {
+      context: { recentMessages: 1, summary: { enabled: false } },
+      downloadAttachment: async ({ fileId }) => {
+        assert.ok(fileId);
+        downloads.push(fileId);
+        return { bytes: Buffer.from('PDF'), mime: 'application/pdf' };
+      },
+    },
+  );
+  const file = {
+    index: 0,
+    kind: 'file',
+    fileId: 'remote-original',
+    name: 'record.pdf',
+    mime: 'application/pdf',
+    size: 3,
+  } as const;
+  await f.platform.emit(
+    inbound('other-chat-file', '', {
+      chatId: 'another-room',
+      userId: 'member',
+      attachments: [file],
+    }),
+  );
+  await f.platform.emit(
+    inbound('original', '', {
+      userId: 'member',
+      userDisplay: 'Ada',
+      at: 1,
+      attachments: [file],
+    }),
+  );
+  await f.platform.emit(
+    inbound('snapshot', 'Old reply', {
+      userId: 'member',
+      replyTo: {
+        id: 'never-seen',
+        text: '',
+        attachments: [{ ...file, fileId: 'remote-snapshot' }],
+      },
+    }),
+  );
+  await f.platform.emit(
+    inbound('latest', 'What does this say?', {
+      at: 2,
+      userDisplay: 'Owner',
+      replyTo: { id: 'original', quote: 'part' },
+    }),
+  );
+  await f.gateway.idle();
+  const context = requests[0]?.context
+    .filter((block) => block.source === 'message')
+    .map(renderContextLine);
+  assert.equal(context?.length, 1);
+  assert.deepEqual(JSON.parse(context![0]!), {
+    source: 'message',
+    trust: 'owner',
+    content: 'What does this say?',
+    id: 'latest',
+    at: 2,
+    sender: { id: 'owner', name: 'Owner' },
+    replyTo: {
+      id: 'original',
+      text: '[file]',
+      sender: { id: 'member', name: 'Ada' },
+      attachments: [
+        {
+          index: 0,
+          kind: 'file',
+          name: 'record.pdf',
+          mime: 'application/pdf',
+          size: 3,
+        },
+      ],
+      quote: 'part',
+    },
+    attachments: [],
+  });
+  assert.deepEqual(downloads, ['remote-original', 'remote-snapshot']);
+  assert.equal(f.store.getMessage(chat, 'original')?.text, '[file]');
+  const task = f.store
+    .listChatTasks(chat)
+    .find(({ sourceMessageId }) => sourceMessageId === 'latest');
+  assert.ok(task);
+  assert.deepEqual(
+    f.store.taskToolCalls([task.id]).map(({ name, status }) => [name, status]),
+    [
+      ['attachment.get', 'ok'],
+      ['attachment.get', 'ok'],
+      ['attachment.get', 'error'],
+    ],
+  );
+});
+
+test('offers the first four album images once and removes explicitly downloaded images', async (t) => {
+  if (spawnSync('ffmpeg', ['-version']).status !== 0) {
+    t.skip('ffmpeg is unavailable on PATH');
+    return;
+  }
+  const photo = execFileSync('ffmpeg', [
+    '-loglevel',
+    'error',
+    '-f',
+    'lavfi',
+    '-i',
+    'color=red:s=80x40',
+    '-frames:v',
+    '1',
+    '-threads',
+    '1',
+    '-c:v',
+    'png',
+    '-f',
+    'image2pipe',
+    'pipe:1',
+  ]);
+  const requests: AgentRequest[] = [];
+  const downloads: string[] = [];
+  let explicitPath: string | undefined;
+  const f = await fixture(
+    t,
+    async function* (request) {
+      requests.push(request);
+      if (!request.resumeSessionId) {
+        const tool = request.tools.find(
+          ({ name }) => name === 'attachment.get',
+        );
+        assert.ok(tool);
+        const saved = (await tool.run({ messageId: 'album-0', index: 5 })) as {
+          path: string;
+        };
+        assert.deepEqual(await readFile(saved.path), photo);
+        explicitPath = saved.path;
+      }
+      yield { type: 'sessionId', sessionId: 'visual-session' };
+      yield { type: 'text.final', text: 'pong' };
+    },
+    true,
+    {
+      imageLimits: { maxEdge: 16, maxBytes: 2_000 },
+      downloadAttachment: async ({ fileId }) => {
+        assert.ok(fileId);
+        downloads.push(fileId);
+        return { bytes: photo, mime: 'image/png' };
+      },
+    },
+  );
+  for (let i = 0; i < 6; i++) {
+    await f.platform.emit(
+      inbound(`album-${i}`, '', {
+        albumId: 'photos',
+        attachments: [{ index: 0, kind: 'image', fileId: `photo-${i}` }],
+      }),
+    );
+  }
+  await f.gateway.idle();
+  assert.equal(requests.length, 1);
+  assert.deepEqual(
+    requests[0]?.images?.map(({ source }) => source?.index),
+    [0, 1, 2, 3],
+  );
+  assert.deepEqual(
+    requests[0]?.context.at(-1)?.message?.attachments.map(({ index }) => index),
+    [0, 1, 2, 3, 4, 5],
+  );
+  assert.ok(
+    requests[0]?.images?.every(
+      ({ data }) => Buffer.from(data, 'base64').length < 2_000,
+    ),
+  );
+  assert.ok(explicitPath);
+  await assert.rejects(readFile(explicitPath), { code: 'ENOENT' });
+  assert.ok(
+    f.trace.recent.some(
+      ({ name, durationMs }) => name === 'media.prepare' && durationMs > 0,
+    ),
+  );
+  await f.platform.emit(
+    inbound('next', 'Read the album', { replyTo: { id: 'album-0' } }),
+  );
+  await f.gateway.idle();
+  assert.equal(requests.length, 2);
+  assert.equal(requests[1]?.resumeSessionId, 'visual-session');
+  assert.equal(requests[1]?.images, undefined);
+  assert.deepEqual(downloads, [
+    'photo-0',
+    'photo-1',
+    'photo-2',
+    'photo-3',
+    'photo-5',
+  ]);
+
+  await f.platform.emit(
+    inbound('fresh', '', {
+      attachments: [{ index: 0, kind: 'image', fileId: 'fresh-photo' }],
+    }),
+  );
+  await f.gateway.idle();
+  assert.equal(requests[2]?.resumeSessionId, 'visual-session');
+  assert.deepEqual(
+    requests[2]?.images?.map(({ source }) => source),
+    [{ messageId: 'fresh', index: 0 }],
+  );
+});

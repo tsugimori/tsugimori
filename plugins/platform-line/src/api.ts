@@ -1,3 +1,6 @@
+import type { InboundAttachment } from '@tsugimori/plugin-sdk';
+
+import { attachmentBytes, ToolFailure } from '@tsugimori/plugin-sdk';
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 
@@ -59,6 +62,45 @@ export class LineApi {
   constructor(fetch: typeof globalThis.fetch, token: string) {
     this.#fetch = fetch;
     this.#token = token;
+  }
+
+  async downloadAttachment(
+    attachment: InboundAttachment,
+    signal: AbortSignal,
+    maxBytes?: number,
+  ) {
+    if (!attachment.fileId || attachment.kind === 'sticker')
+      throw new ToolFailure(
+        'This attachment is unavailable through the LINE content API',
+      );
+    signal.throwIfAborted();
+    const response = await this.#fetch(
+      `https://api-data.line.me/v2/bot/message/${encodeURIComponent(attachment.fileId)}/content`,
+      {
+        headers: { Authorization: `Bearer ${this.#token}` },
+        redirect: 'error',
+        signal: AbortSignal.any([signal, AbortSignal.timeout(30_000)]),
+      },
+    ).catch(() => {
+      signal.throwIfAborted();
+      throw new LineApiError(false);
+    });
+    if (response.status === 202 || !response.ok) {
+      await response.body?.cancel();
+      if (response.status === 202)
+        throw new ToolFailure(
+          'LINE is still preparing the attachment. Try again later.',
+        );
+      if (response.status === 404 || response.status === 410)
+        throw new ToolFailure(
+          'LINE no longer has the attachment available for download',
+        );
+      throw new LineApiError(false, response.status);
+    }
+    return {
+      bytes: await attachmentBytes(response, maxBytes),
+      mime: response.headers.get('content-type')?.split(';')[0],
+    };
   }
 
   async identity(signal: AbortSignal) {

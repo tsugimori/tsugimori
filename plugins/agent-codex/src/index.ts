@@ -10,12 +10,14 @@ import type {
   AgentSessionInfo,
   AgentSettings,
   AgentTool,
+  ImageLimits,
   PluginFactoryContext,
 } from '@tsugimori/plugin-sdk';
 
 import {
   defaultCompactAt,
   definePlugin,
+  imageLimits,
   ToolFailure,
   toolWireName,
 } from '@tsugimori/plugin-sdk';
@@ -59,6 +61,7 @@ interface CodexOptions {
   codexHome?: string;
   command?: string;
   compactAt?: number;
+  images?: ImageLimits;
 }
 
 interface CodexDependencies {
@@ -76,10 +79,17 @@ interface ThreadContext extends AgentSessionInfo {
 
 const execFileAsync = promisify(execFile);
 const debug = debuglog('tsugimori:codex');
+const defaultImageLimits: ImageLimits = {
+  sourceMaxBytes: 32 * 1024 * 1024,
+  maxEdge: 2048,
+  maxBytes: 10_000_000,
+  maxPixels: 2500 * 32 ** 2,
+};
 const implementation = 'Codex App Server';
 
 export class CodexAgent implements AgentConnector {
   readonly id: string;
+  readonly imageLimits: ImageLimits;
   readonly implementation = implementation;
   readonly kind = 'codex';
   readonly loop = 'external';
@@ -108,6 +118,7 @@ export class CodexAgent implements AgentConnector {
 
   constructor(deps: CodexDependencies, id: string, options: CodexOptions = {}) {
     this.id = id;
+    this.imageLimits = options.images ?? defaultImageLimits;
     this.#deps = deps;
     this.#options = options;
   }
@@ -749,6 +760,18 @@ export class CodexAgent implements AgentConnector {
             text: renderContext(request.context, resumeSessionId !== undefined),
             text_elements: [],
           },
+          ...(request.images ?? []).flatMap(({ data, mime, source }) => [
+            ...(source
+              ? [
+                  {
+                    type: 'text',
+                    text: JSON.stringify(source),
+                    text_elements: [],
+                  },
+                ]
+              : []),
+            { type: 'image', url: `data:${mime};base64,${data}` },
+          ]),
         ],
       });
       const id = asRecord(started.turn).id;
@@ -909,6 +932,7 @@ export default definePlugin({
           ...codexLocation(config, workspace),
           asyncCompaction: config.options?.asyncCompaction === true,
           compactAt: config.compactAt,
+          images: imageLimits(defaultImageLimits, config.options),
         }),
       { implementation },
     ),

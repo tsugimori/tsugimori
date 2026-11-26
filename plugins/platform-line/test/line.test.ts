@@ -419,7 +419,7 @@ test('one concurrent send can use the latest reply token and quoted bot messages
   ]);
   await f.waitFor(3);
   const answer = f.events.find(({ messageId }) => messageId === 'answer');
-  assert.equal(answer?.replyTo, receipt.messageId);
+  assert.equal(answer?.replyTo?.id, receipt.messageId);
   assert.equal(answer?.repliesToBot, true);
   assert.equal(
     f.events.find(({ messageId }) => messageId === 'other')?.repliesToBot,

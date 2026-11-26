@@ -134,7 +134,7 @@ test(
     assert.equal(first.userId, '79');
     assert.equal(first.userUsername, 'ExampleUser');
     assert.equal(first.text, '😀 @EXAMPLEBOT');
-    assert.equal(first.replyTo, '9');
+    assert.equal(first.replyTo?.id, '9');
     assert.equal(first.mentionsBot, true);
     assert.deepEqual(first.raw, updates[0]?.message);
     assert.equal(edit?.type, 'message');

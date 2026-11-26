@@ -9,6 +9,14 @@ import { constants } from 'node:fs';
 import { mkdir, open, readdir, realpath } from 'node:fs/promises';
 import { join } from 'node:path';
 
+import { messageAlbumLookup, messageContext } from './message.ts';
+
+export {
+  albumAttachments,
+  messageAlbumLookup,
+  messageContext,
+} from './message.ts';
+
 export interface SummaryProvider {
   get(chat: ChatRef): Promise<
     | {
@@ -38,7 +46,7 @@ export interface ContextRequest extends ChatRef {
 }
 
 interface ContextDependencies {
-  store: Pick<Store, 'recentMessages'>;
+  store: Pick<Store, 'recentMessages'> & Partial<Pick<Store, 'messageAlbum'>>;
   summary?: SummaryProvider;
   workspace: string;
 }
@@ -191,6 +199,12 @@ export class ContextAssembler {
       skipSeq: request.skipSeq,
       includeRaw: false,
     });
+    const album = this.#store.messageAlbum
+      ? messageAlbumLookup(
+          { messageAlbum: this.#store.messageAlbum.bind(this.#store) },
+          request,
+        )
+      : undefined;
     for (const message of messages) {
       entries.push({
         kind: message.seq === request.throughSeq ? 'new' : 'history',
@@ -203,6 +217,11 @@ export class ContextAssembler {
               ? 'owner'
               : 'member',
           content: message.text,
+          message: messageContext(
+            message,
+            album,
+            message.seq === request.throughSeq,
+          ),
         },
       });
     }
