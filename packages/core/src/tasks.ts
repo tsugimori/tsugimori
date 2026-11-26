@@ -160,6 +160,7 @@ export class Tasks {
       agentId,
       model,
       thinking,
+      defaults: selected?.defaults,
       compactAt: selected?.config.compactAt,
       sessionScope:
         sessionId && agentId && model

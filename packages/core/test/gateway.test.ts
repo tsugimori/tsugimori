@@ -112,6 +112,7 @@ async function fixture(
   options: {
     compact?: AgentConnector['compact'];
     context?: { recentMessages: number; summary?: { model: string } };
+    describeDefaults?: AgentConnector['describeDefaults'];
     durable?: boolean;
     locale?: 'en' | 'zh-TW';
     onScopedTool?: (args: unknown, userId: string) => void;
@@ -144,6 +145,7 @@ async function fixture(
           kind: 'fake',
           loop: 'external',
           compact: options.compact,
+          describeDefaults: options.describeDefaults,
           run,
           start() {
             agentStarts++;
@@ -439,7 +441,7 @@ test(
     const live = await status('live');
     assert.match(
       live,
-      /^This chat · test · workspace-model · reasoning high$/m,
+      /^This chat · Agent test \| Model workspace-model \| Effort high$/m,
     );
     assert.match(live, /^Context · 32,000 \/ 250,000 tokens \(13%\)$/m);
     assert.match(
@@ -467,6 +469,54 @@ test(
     assert.equal(runs, 2);
   },
 );
+
+test('status caches agent defaults and refreshes them on hot reload', async (t) => {
+  let defaults = { model: 'provider-model', effort: 'low' };
+  let reads = 0;
+  const f = await fixture(
+    t,
+    async function* () {
+      assert.fail('Status does not run the agent');
+    },
+    true,
+    {
+      describeDefaults() {
+        reads++;
+        return defaults;
+      },
+    },
+  );
+  const reloads = () =>
+    f.logs.filter(({ event }) => event === 'config.reloaded').length;
+  await until(t, () => reloads() > 0);
+  const status = async (id: string) => {
+    await f.platform.emit(inbound(id, '/status'));
+    return f.platform.sent.at(-1)!.text;
+  };
+
+  const before = reads;
+  assert.match(
+    await status('route'),
+    /^This chat · Agent test \| Model first \| Effort low \(default\)$/m,
+  );
+  f.store.setWorkspaceSettings(chat, { model: 'default' });
+  defaults = { model: 'new-model', effort: 'high' };
+  assert.match(
+    await status('cached'),
+    /^This chat · Agent test \| Model provider-model \(default\) \| Effort low \(default\)$/m,
+  );
+  assert.equal(reads, before);
+
+  const loaded = reloads();
+  await f.configure(true);
+  await until(t, () => reloads() > loaded);
+  assert.match(
+    await status('refreshed'),
+    /^This chat · Agent test \| Model new-model \(default\) \| Effort high \(default\)$/m,
+  );
+  assert.equal(f.agentStarts, 1);
+  assert.equal(f.agentStops, 0);
+});
 
 async function until(t: TestContext, condition: () => boolean) {
   while (!condition()) await delay(10, undefined, { signal: t.signal });

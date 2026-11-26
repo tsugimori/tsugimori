@@ -16,8 +16,11 @@ const messages = {
     uptime: 'up',
     started: 'Started',
     chat: 'This chat',
-    reasoning: 'reasoning',
-    default: 'default',
+    model: 'Model',
+    effort: 'Effort',
+    fieldSeparator: ' | ',
+    default: (value: string) => `${value} (default)`,
+    unset: (agent: string) => `unset (${agent} decides)`,
     context: 'Context',
     unknown: 'unknown',
     tokens: 'tokens',
@@ -76,8 +79,11 @@ const messages = {
     uptime: '已運作',
     started: '啟動時間',
     chat: '此聊天室',
-    reasoning: '推理強度',
-    default: '預設',
+    model: '模型',
+    effort: '推理強度',
+    fieldSeparator: '｜',
+    default: (value: string) => `${value}（預設）`,
+    unset: (agent: string) => `未指定（由 ${agent} 決定）`,
     context: '上下文',
     unknown: '未知',
     tokens: 'tokens',
@@ -201,14 +207,26 @@ export function statusCard(
   line(m.gateway, `v${gatewayVersion}`, `${m.uptime} ${elapsed(startedAt)}`);
   line(m.started, `${date(startedAt)} (${timezone})`);
   const work = tasks.status(chat);
-  if (work.agentId) {
-    const model =
-      work.model === 'default' ? m.default : (work.model ?? m.default);
+  const { agentId, defaults, thinking } = work;
+  if (agentId) {
+    const model = work.model === 'default' ? undefined : work.model;
+    const kind = runtime.config.agents.find(({ id }) => id === agentId)?.kind;
+    const setting = (
+      override: string | undefined,
+      fallback: string | undefined,
+      limit: number,
+    ) => {
+      if (override) return shortText(override, limit);
+      if (fallback) return m.default(shortText(fallback, limit));
+      return m.unset(kind ?? agentId);
+    };
     line(
       m.chat,
-      work.agentId,
-      shortText(model, 80),
-      `${m.reasoning} ${shortText(work.thinking ?? m.default, 30)}`,
+      [
+        `Agent ${agentId}`,
+        `${m.model} ${setting(model, defaults?.model, 80)}`,
+        `${m.effort} ${setting(thinking, defaults?.effort, 30)}`,
+      ].join(m.fieldSeparator),
     );
     const scope = work.sessionScope;
     const usage = scope ? trace.latestSessionSpan(scope, 'context') : undefined;

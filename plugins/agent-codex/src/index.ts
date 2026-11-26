@@ -28,6 +28,7 @@ import {
   codexCompactionSupport,
   contextWindow,
 } from './compaction.ts';
+import { readCodexDefaults } from './defaults.ts';
 import { installCodex } from './install.ts';
 import {
   codexChecks,
@@ -91,6 +92,10 @@ export class CodexAgent implements AgentConnector {
     this.id = id;
     this.#deps = deps;
     this.#options = options;
+  }
+
+  describeDefaults() {
+    return readCodexDefaults(this.#options.codexHome);
   }
 
   async start() {

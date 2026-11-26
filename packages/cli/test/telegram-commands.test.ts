@@ -70,10 +70,7 @@ test(
       const body = JSON.parse(init.body);
       if (method === 'sendMessage') {
         replies.push(body.text);
-        if (
-          typeof body.text === 'string' &&
-          body.text.startsWith('Gateway · v')
-        )
+        if (typeof body.text === 'string' && body.text.startsWith('Gateway · '))
           statusEntities = body.entities;
         return ok({ message_id: 1_000 + replies.length });
       }
@@ -273,8 +270,7 @@ test(
     );
     assert.ok(
       replies.some(
-        (text) =>
-          text.startsWith('Gateway · v') && text.includes('Platforms ·'),
+        (text) => text.startsWith('Gateway · ') && text.includes('Platforms ·'),
       ),
     );
     assert.ok(Array.isArray(statusEntities));

@@ -7,11 +7,47 @@ import type {
 import { nativeCompactionLimit } from '@tsugimori/plugin-sdk';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 
 import { CodexAgent } from '../src/index.ts';
 import { codexChecks } from '../src/setup.ts';
+
+test('describes only model and effort configured at the root of the Codex home', async (t) => {
+  const home = await mkdtemp(join(tmpdir(), 'tsugimori-codex-defaults-'));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const agent = new CodexAgent({}, 'custom', { codexHome: home });
+  const config = join(home, 'config.toml');
+  assert.deepEqual(await agent.describeDefaults(), {});
+
+  await writeFile(
+    config,
+    [
+      'instructions = """',
+      '[ignored]',
+      'model = "also-ignored"',
+      '"""',
+      'model = "gpt-6.2-sol" # selected model',
+      '"model_reasoning_effort" = \'high\' # selected effort',
+      '[profiles.other]',
+      'model = "other-model"',
+      'model_reasoning_effort = "low"',
+    ].join('\r\n'),
+  );
+  assert.deepEqual(await agent.describeDefaults(), {
+    model: 'gpt-6.2-sol',
+    effort: 'high',
+  });
+
+  await writeFile(
+    config,
+    'model_reasoning_effort = "medium"\n[profiles.other]\nmodel = "ignored"',
+  );
+  assert.deepEqual(await agent.describeDefaults(), { effort: 'medium' });
+});
 
 const fakeServer = String.raw`
 import assert from 'node:assert/strict';

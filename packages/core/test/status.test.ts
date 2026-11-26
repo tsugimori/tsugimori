@@ -1,3 +1,4 @@
+import type { AgentDefaults } from '@tsugimori/plugin-sdk';
 import type { ScheduleRecord, TraceSpan } from '@tsugimori/storage';
 
 import { parseConfig } from '@tsugimori/config';
@@ -15,9 +16,9 @@ const now = Date.UTC(2026, 10, 26, 2, 5, 6);
 
 const snapshots = {
   en: [
-    `Gateway · v${gatewayVersion} · up 1m 5s`,
+    ['Gateway', `v${gatewayVersion}`, 'up 1m 5s'].filter(Boolean).join(' · '),
     'Started · 2026-11-26 10:04:01 (Asia/Taipei)',
-    'This chat · codex · test-model · reasoning high',
+    'This chat · Agent codex | Model test-model | Effort high',
     'Context · 12,000 / 24,000 tokens (50%)',
     'Last compaction · 2026-11-26 10:03:51 · post-turn · 48,000 → 12,000 tokens',
     'Summary · 2 messages · updated 2026-11-26 10:04:48',
@@ -30,9 +31,11 @@ const snapshots = {
     'Health · 1 failing check · Telegram token',
   ],
   'zh-TW': [
-    `閘道器 · v${gatewayVersion} · 已運作 1 分鐘 5 秒`,
+    ['閘道器', `v${gatewayVersion}`, '已運作 1 分鐘 5 秒']
+      .filter(Boolean)
+      .join(' · '),
     '啟動時間 · 2026-11-26 10:04:01 (Asia/Taipei)',
-    '此聊天室 · codex · test-model · 推理強度 high',
+    '此聊天室 · Agent codex｜模型 test-model｜推理強度 high',
     '上下文 · 12,000 / 24,000 tokens (50%)',
     '上次壓縮 · 2026-11-26 10:03:51 · 回合後 · 48,000 → 12,000 tokens',
     '對話摘要 · 涵蓋 2 則訊息 · 更新時間 2026-11-26 10:04:48',
@@ -103,6 +106,7 @@ for (const locale of ['en', 'zh-TW'] as const) {
           agentId: 'codex',
           model: 'test-model',
           thinking: 'high',
+          defaults: { model: 'gpt-6.2-sol', effort: 'medium' },
           compactAt: 24_000,
           sessionScope: 'test-session',
           running: { startedAt: now - 7_000, stage: 'agent' },
@@ -149,6 +153,60 @@ for (const locale of ['en', 'zh-TW'] as const) {
     );
   });
 
+  test(`labels known and unknown chat defaults in ${locale}`, (t) => {
+    const store = new SqliteStore(':memory:');
+    t.after(() => store.close());
+    const zh = locale === 'zh-TW';
+    const chatLine = (defaults: AgentDefaults | undefined, thinking?: string) =>
+      statusCard(
+        {
+          runtime: {
+            config: parseConfig(JSON.stringify({ locale })),
+            environmentReports: [],
+            attachments: { agents: [], platforms: [] },
+          },
+          startedAt: now,
+          sandboxEnabled: false,
+          store,
+          tasks: {
+            status: () => ({
+              agentId: 'codex',
+              model: 'default',
+              thinking,
+              defaults,
+              compactAt: undefined,
+              sessionScope: undefined,
+              running: undefined,
+              queued: 0,
+              totalRunning: 0,
+            }),
+          },
+          trace: { latestSessionSpan: () => undefined },
+        },
+        chat,
+        target,
+        now,
+      ).text.split('\n')[2];
+    assert.equal(
+      chatLine({ model: 'gpt-6.2-sol', effort: 'high' }),
+      zh
+        ? '此聊天室 · Agent codex｜模型 gpt-6.2-sol（預設）｜推理強度 high（預設）'
+        : 'This chat · Agent codex | Model gpt-6.2-sol (default) | Effort high (default)',
+    );
+    assert.equal(
+      chatLine(undefined),
+      zh
+        ? '此聊天室 · Agent codex｜模型 未指定（由 codex 決定）｜推理強度 未指定（由 codex 決定）'
+        : 'This chat · Agent codex | Model unset (codex decides) | Effort unset (codex decides)',
+    );
+    assert.equal(
+      chatLine({ model: 'gpt-6.2-sol' }, 'low'),
+      zh
+        ? '此聊天室 · Agent codex｜模型 gpt-6.2-sol（預設）｜推理強度 low'
+        : 'This chat · Agent codex | Model gpt-6.2-sol (default) | Effort low',
+    );
+  });
+
   test(`omits empty status sections in ${locale}`, (t) => {
     const store = new SqliteStore(':memory:');
     t.after(() => store.close());
@@ -167,6 +225,7 @@ for (const locale of ['en', 'zh-TW'] as const) {
             agentId: undefined,
             model: undefined,
             thinking: undefined,
+            defaults: undefined,
             compactAt: undefined,
             sessionScope: undefined,
             running: undefined,
@@ -184,9 +243,13 @@ for (const locale of ['en', 'zh-TW'] as const) {
     );
     const zh = locale === 'zh-TW';
     assert.deepEqual(card.text.split('\n'), [
-      zh
-        ? `閘道器 · v${gatewayVersion} · 已運作 0 秒`
-        : `Gateway · v${gatewayVersion} · up 0s`,
+      [
+        zh ? '閘道器' : 'Gateway',
+        `v${gatewayVersion}`,
+        zh ? '已運作 0 秒' : 'up 0s',
+      ]
+        .filter(Boolean)
+        .join(' · '),
       zh
         ? '啟動時間 · 2026-11-26 02:05:06 (UTC)'
         : 'Started · 2026-11-26 02:05:06 (UTC)',

@@ -1,6 +1,7 @@
 import type { Config, WorkspaceConfig } from '@tsugimori/config';
 import type {
   AgentConnector,
+  AgentDefaults,
   PlatformAdapter,
   PlatformInboundEvent,
   PlatformInstanceConfig,
@@ -22,7 +23,11 @@ import { failureText } from './checks.ts';
 import { describeError } from './errors.ts';
 
 type AgentConfig = Config['agents'][number];
-type AgentEntry = { agent: AgentConnector; config: AgentConfig };
+type AgentEntry = {
+  agent: AgentConnector;
+  config: AgentConfig;
+  defaults?: AgentDefaults;
+};
 export type AttachmentStatus = { id: string } & (
   | { state: 'running' | 'disabled' | 'starting' }
   | { attempt: number; retryAt: number; state: 'retrying' }
@@ -379,6 +384,20 @@ export class Runtime {
       }
       for (const [id, entry] of this.#agents) {
         if (nextAgents.get(id) !== entry) changedAgents.add(id);
+      }
+      for (const [id, entry] of nextAgents) {
+        if (!entry.agent.describeDefaults) continue;
+        let defaults: AgentDefaults | undefined;
+        try {
+          defaults = await entry.agent.describeDefaults();
+        } catch {
+          this.#deps.log({
+            level: 'warn',
+            event: 'agent.defaults_failed',
+            target: `agent/${id}`,
+          });
+        }
+        nextAgents.set(id, { ...entry, defaults });
       }
       const sandboxChanged =
         this.#snapshot &&

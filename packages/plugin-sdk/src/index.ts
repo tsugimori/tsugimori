@@ -457,9 +457,16 @@ export function toolWireName(name: string) {
   return name.replace(/[^a-zA-Z0-9_-]/g, '_');
 }
 
+export interface AgentDefaults {
+  effort?: string;
+  model?: string;
+}
+
 export interface AgentConnector {
   acceptsSession?(id: string, tools: readonly ToolDefinition[]): boolean;
   compact?(request: AgentCompactRequest): Promise<AgentCompactResult>;
+  /** Describe locally known defaults for the gateway to cache on startup and reload. */
+  describeDefaults?(): AgentDefaults | Promise<AgentDefaults>;
   id: string;
   kind: string;
   loop: 'framework' | 'external';
