@@ -93,15 +93,21 @@ export class AppServer extends EventEmitter<{ frame: [ServerFrame] }> {
     return this.#closing.finally(() => clearTimeout(timer));
   }
 
-  async request(method: string, params: object, timeoutMs = 30_000) {
+  async request(
+    method: string,
+    params: object,
+    timeoutMs = 30_000,
+    { failOnTimeout = true } = {},
+  ) {
     this.signal.throwIfAborted();
     const id = ++this.#sequence;
     const pending = Promise.withResolvers<unknown>();
     this.#requests.set(id, pending);
-    const timeout = setTimeout(
-      () => this.fail(`Codex ${method} timed out`),
-      timeoutMs,
-    );
+    const timeout = setTimeout(() => {
+      const message = `Codex ${method} timed out`;
+      if (failOnTimeout) this.fail(message);
+      else pending.reject(new Error(message));
+    }, timeoutMs);
     timeout.unref();
     try {
       // Observe the response immediately, even if the transport fails during the write.

@@ -1,9 +1,14 @@
-import type { SessionMetric, Store, TraceSpan } from '@tsugimori/storage';
+import type {
+  SessionHistory,
+  SessionMetric,
+  Store,
+  TraceSpan,
+} from '@tsugimori/storage';
 
 const batchSize = 100;
 
 type TraceStore = Pick<Store, 'writeTraceSpans'> &
-  Partial<Pick<Store, 'latestSessionSpan'>>;
+  Partial<Pick<Store, 'latestSessionSpan' | 'sessionHistory'>>;
 
 interface TraceOptions {
   flushDelayMs?: number;
@@ -37,13 +42,36 @@ export class Tracer {
     const matches = (span: TraceSpan) =>
       span.attrs.sessionScope === scope &&
       (metric === 'compaction'
-        ? span.name === 'agent.compaction'
+        ? span.name === 'agent.compaction' && span.status === 'ok'
         : typeof span.attrs.contextTokens === 'number');
     return (
       this.#pending.findLast(matches) ??
       this.#writing?.findLast(matches) ??
       this.#store.latestSessionSpan?.(scope, metric)
     );
+  }
+
+  sessionHistory(scope: string): SessionHistory {
+    const history = this.#store.sessionHistory?.(scope);
+    let compactions = history?.compactions ?? 0;
+    let createdAt = history?.createdAt ?? Infinity;
+    let firstActivityAt = history?.firstActivityAt ?? Infinity;
+    for (const spans of [this.#writing ?? [], this.#pending]) {
+      for (const { attrs, name, startedAt, status } of spans) {
+        if (attrs.sessionScope !== scope) continue;
+        firstActivityAt = Math.min(firstActivityAt, startedAt);
+        if (name === 'agent.session.created')
+          createdAt = Math.min(createdAt, startedAt);
+        if (name === 'agent.compaction' && status === 'ok') compactions++;
+      }
+    }
+    return {
+      compactions,
+      createdAt: Number.isFinite(createdAt) ? createdAt : undefined,
+      firstActivityAt: Number.isFinite(firstActivityAt)
+        ? firstActivityAt
+        : undefined,
+    };
   }
 
   begin(name: string, attrs: TraceSpan['attrs'] = {}) {
@@ -144,7 +172,9 @@ export class Tracer {
       const batch = this.#pending.splice(0, batchSize);
       this.#writing = batch;
       try {
-        await this.#store.writeTraceSpans(batch);
+        const write = this.#store.writeTraceSpans(batch);
+        if (!write) this.#writing = undefined;
+        await write;
       } catch (error) {
         this.#pending = [...batch, ...this.#pending];
         throw error;

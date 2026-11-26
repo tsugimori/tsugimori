@@ -162,6 +162,10 @@ export class Tasks {
       thinking,
       defaults: selected?.defaults,
       compactAt: selected?.config.compactAt,
+      quota: selected?.agent.describeQuota?.(),
+      serviceTier: sessionId
+        ? selected?.agent.describeSession?.(sessionId)?.serviceTier
+        : undefined,
       sessionScope:
         sessionId && agentId && model
           ? sessionScope(

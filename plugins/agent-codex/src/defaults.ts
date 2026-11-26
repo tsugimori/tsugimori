@@ -29,13 +29,18 @@ export async function readCodexDefaults(home?: string): Promise<AgentDefaults> {
   const assignments =
     /^[ \t]*("[\w-]+"|'[\w-]+'|[\w-]+)[ \t]*=[ \t]*("(?:\\["\\bfnrt]|\\u[\da-fA-F]{4}|[^"\\\r\n])*"|'[^'\r\n]*')[ \t]*(?:#[^\r\n]*)?$/gmu;
   const defaults: AgentDefaults = {};
+  const keys = {
+    model: 'model',
+    model_reasoning_effort: 'effort',
+    service_tier: 'serviceTier',
+  } as const;
   for (const [, key, quoted] of root.matchAll(assignments)) {
     const name = key!.replace(/["']/gu, '');
-    if (name !== 'model' && name !== 'model_reasoning_effort') continue;
+    if (!Object.hasOwn(keys, name)) continue;
     const value: string = quoted!.startsWith("'")
       ? quoted!.slice(1, -1)
       : JSON.parse(quoted!);
-    if (value) defaults[name === 'model' ? 'model' : 'effort'] = value;
+    if (value) defaults[keys[name as keyof typeof keys]] = value;
   }
   return defaults;
 }

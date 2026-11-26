@@ -112,11 +112,18 @@ export async function runAgent(
             if (event.text) firstText();
             final = event.text;
             break;
-          case 'sessionId':
+          case 'sessionId': {
             sessionId = event.sessionId;
-            activeScope = scope(sessionId);
+            const nextScope = scope(sessionId);
+            if (nextScope && nextScope !== activeScope)
+              trace.record('agent.session.created', {
+                ...attrs,
+                sessionScope: nextScope,
+              });
+            activeScope = nextScope;
             onSession?.(sessionId);
             break;
+          }
           case 'tool.started':
             tools.get(event.callId)?.('error');
             tools.set(

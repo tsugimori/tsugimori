@@ -49,6 +49,12 @@ export interface ChatSummary extends ChatRef {
 
 export type SessionMetric = 'context' | 'compaction';
 
+export interface SessionHistory {
+  compactions: number;
+  createdAt?: number;
+  firstActivityAt?: number;
+}
+
 export interface AgentSession extends ChatRef {
   agentId: string;
   model: string;
@@ -396,6 +402,7 @@ export interface Store {
       'action' | 'id' | 'nextDueAt' | 'timezone' | 'trigger'
     >;
   };
+  sessionHistory(scope: string): SessionHistory;
   setAllowlisted(ref: ChatRef, allowlisted: boolean): void;
   setChatRoute(
     ref: ChatRef,

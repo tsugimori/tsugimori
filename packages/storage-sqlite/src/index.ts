@@ -16,6 +16,7 @@ import type {
   ScheduleAddress,
   ScheduleRecord,
   ScheduleRun,
+  SessionHistory,
   SessionMetric,
   SetupRun,
   Store,
@@ -780,12 +781,35 @@ export class SqliteStore implements Store {
         and(
           eq(sessionScope(traceSpans.attrs), scope),
           metric === 'compaction'
-            ? eq(traceSpans.name, 'agent.compaction')
+            ? and(
+                eq(traceSpans.name, 'agent.compaction'),
+                eq(traceSpans.status, 'ok'),
+              )
             : sql`json_extract(${traceSpans.attrs}, '$.contextTokens') is not null`,
         ),
       )
       .orderBy(desc(traceSpans.id))
       .get();
+  }
+
+  sessionHistory(scope: string): SessionHistory {
+    const { name, startedAt, status, attrs } = traceSpans;
+    const row = this.#db
+      .select({
+        compactions: sql<number>`count(*) filter (where ${name} = 'agent.compaction' and ${status} = 'ok')`,
+        createdAt: sql<
+          number | null
+        >`min(${startedAt}) filter (where ${name} = 'agent.session.created')`,
+        firstActivityAt: min(startedAt),
+      })
+      .from(traceSpans)
+      .where(eq(sessionScope(attrs), scope))
+      .get()!;
+    return {
+      compactions: row.compactions,
+      createdAt: row.createdAt ?? undefined,
+      firstActivityAt: row.firstActivityAt ?? undefined,
+    };
   }
 
   getWorkspaceSettings(ref: ChatRef) {

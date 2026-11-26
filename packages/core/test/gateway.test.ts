@@ -113,6 +113,8 @@ async function fixture(
     compact?: AgentConnector['compact'];
     context?: { recentMessages: number; summary?: { model: string } };
     describeDefaults?: AgentConnector['describeDefaults'];
+    describeQuota?: AgentConnector['describeQuota'];
+    describeSession?: AgentConnector['describeSession'];
     durable?: boolean;
     locale?: 'en' | 'zh-TW';
     onScopedTool?: (args: unknown, userId: string) => void;
@@ -146,6 +148,8 @@ async function fixture(
           loop: 'external',
           compact: options.compact,
           describeDefaults: options.describeDefaults,
+          describeQuota: options.describeQuota,
+          describeSession: options.describeSession,
           run,
           start() {
             agentStarts++;
@@ -407,6 +411,7 @@ test(
           };
           entered.resolve();
           await release.promise;
+          yield { type: 'compaction', trigger: 'native' };
         }
         yield { type: 'text.final', text: 'done' };
       },
@@ -418,6 +423,11 @@ test(
           tokensAfter: 8_000,
         }),
         context: { recentMessages: 30 },
+        describeQuota: () => ({
+          primary: { usedPercent: 10, windowDurationMins: 300 },
+        }),
+        describeSession: (id) =>
+          id === 'active-native' ? { serviceTier: 'fast' } : undefined,
       },
     );
     store.setWorkspaceSettings(chat, {
@@ -433,7 +443,9 @@ test(
       inbound('member', '/status', { userId: 'member', mentionsBot: true }),
     );
     assert.equal(platform.sent.length, 0);
-    assert.match(await status('before'), /^Context · unknown$/m);
+    const before = await status('before');
+    assert.match(before, /^Context · unknown\nQuota · 5h 90% left$/m);
+    assert.doesNotMatch(before, /^Session · /m);
 
     await platform.emit(inbound('run', 'start work'));
     await entered.promise;
@@ -441,9 +453,11 @@ test(
     const live = await status('live');
     assert.match(
       live,
-      /^This chat · Agent test \| Model workspace-model \| Effort high$/m,
+      /^This chat · Agent test \| Model workspace-model \| Effort high \| Fast on$/m,
     );
     assert.match(live, /^Context · 32,000 \/ 250,000 tokens \(13%\)$/m);
+    assert.match(live, /^Session · active for /m);
+    assert.doesNotMatch(live, /^Last compaction · /m);
     assert.match(
       live,
       /^Work · running for .* \(running agent\) · 1 queued · 1 running total$/m,
@@ -454,24 +468,34 @@ test(
     await gateway.idle();
     await platform.emit(inbound('compact-status', '/compact'));
     await gateway.idle();
+    assert.match(
+      await status('before-flush'),
+      /^Last compaction · .* · 2 total$/m,
+    );
     await trace.flush();
     const after = await status('after');
     assert.match(after, /^Context · 8,000 \/ 250,000 tokens \(3%\)$/m);
     assert.match(
       after,
-      /^Last compaction · .* · manual · 32,000 → 8,000 tokens$/m,
+      /^Last compaction · .* · manual · 32,000 → 8,000 tokens · 2 total$/m,
     );
+    assert.match(after, /^Session · active for /m);
     assert.doesNotMatch(after, /^Work · /m);
     await platform.emit(inbound('switch', '/model other'));
     const changed = await status('changed');
     assert.match(changed, /^Context · unknown$/m);
     assert.doesNotMatch(changed, /^Last compaction · /m);
+    assert.doesNotMatch(changed, /^Session · /m);
     assert.equal(runs, 2);
   },
 );
 
 test('status caches agent defaults and refreshes them on hot reload', async (t) => {
-  let defaults = { model: 'provider-model', effort: 'low' };
+  let defaults = {
+    model: 'provider-model',
+    effort: 'low',
+    serviceTier: 'fast',
+  };
   let reads = 0;
   const f = await fixture(
     t,
@@ -497,13 +521,13 @@ test('status caches agent defaults and refreshes them on hot reload', async (t) 
   const before = reads;
   assert.match(
     await status('route'),
-    /^This chat · Agent test \| Model first \| Effort low \(default\)$/m,
+    /^This chat · Agent test \| Model first \| Effort low \(default\) \| Fast on$/m,
   );
   f.store.setWorkspaceSettings(chat, { model: 'default' });
-  defaults = { model: 'new-model', effort: 'high' };
+  defaults = { model: 'new-model', effort: 'high', serviceTier: 'default' };
   assert.match(
     await status('cached'),
-    /^This chat · Agent test \| Model provider-model \(default\) \| Effort low \(default\)$/m,
+    /^This chat · Agent test \| Model provider-model \(default\) \| Effort low \(default\) \| Fast on$/m,
   );
   assert.equal(reads, before);
 
@@ -512,7 +536,7 @@ test('status caches agent defaults and refreshes them on hot reload', async (t) 
   await until(t, () => reloads() > loaded);
   assert.match(
     await status('refreshed'),
-    /^This chat · Agent test \| Model new-model \(default\) \| Effort high \(default\)$/m,
+    /^This chat · Agent test \| Model new-model \(default\) \| Effort high \(default\) \| Fast off$/m,
   );
   assert.equal(f.agentStarts, 1);
   assert.equal(f.agentStops, 0);

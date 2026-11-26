@@ -1,4 +1,4 @@
-import type { AgentDefaults } from '@tsugimori/plugin-sdk';
+import type { AgentDefaults, AgentQuota } from '@tsugimori/plugin-sdk';
 import type { ScheduleRecord, TraceSpan } from '@tsugimori/storage';
 
 import { parseConfig } from '@tsugimori/config';
@@ -18,9 +18,11 @@ const snapshots = {
   en: [
     ['Gateway', `v${gatewayVersion}`, 'up 1m 5s'].filter(Boolean).join(' · '),
     'Started · 2026-11-26 10:04:01 (Asia/Taipei)',
-    'This chat · Agent codex | Model test-model | Effort high',
+    'This chat · Agent codex | Model test-model | Effort high | Fast on',
     'Context · 12,000 / 24,000 tokens (50%)',
-    'Last compaction · 2026-11-26 10:03:51 · post-turn · 48,000 → 12,000 tokens',
+    'Quota · 5h 90% left (resets 15:40) · weekly 72% left (resets 12/01 09:00)',
+    'Last compaction · 2026-11-26 10:03:51 · post-turn · 48,000 → 12,000 tokens · 3 total',
+    'Session · active for 2h 32m',
     'Summary · 2 messages · updated 2026-11-26 10:04:48',
     'Work · running for 7s (running agent) · 1 queued · 2 running total',
     'Approvals · 1 here / 2 total · next expiry 2026-11-26 10:06:21',
@@ -35,9 +37,11 @@ const snapshots = {
       .filter(Boolean)
       .join(' · '),
     '啟動時間 · 2026-11-26 10:04:01 (Asia/Taipei)',
-    '此聊天室 · Agent codex｜模型 test-model｜推理強度 high',
+    '此聊天室 · Agent codex｜模型 test-model｜推理強度 high｜快速模式 開',
     '上下文 · 12,000 / 24,000 tokens (50%)',
-    '上次壓縮 · 2026-11-26 10:03:51 · 回合後 · 48,000 → 12,000 tokens',
+    '額度 · 5 小時 剩 90%（15:40 重置）· 每週 剩 72%（12/01 09:00 重置）',
+    '上次壓縮 · 2026-11-26 10:03:51 · 回合後 · 48,000 → 12,000 tokens · 共 3 次',
+    '對話 · 已持續 2 小時 32 分鐘',
     '對話摘要 · 涵蓋 2 則訊息 · 更新時間 2026-11-26 10:04:48',
     '工作 · 已執行 7 秒（代理程式執行中） · 1 則排隊中 · 共 2 個任務執行中',
     '待核准 · 此聊天室 1 件／共 2 件 · 最早到期 2026-11-26 10:06:21',
@@ -106,15 +110,38 @@ for (const locale of ['en', 'zh-TW'] as const) {
           agentId: 'codex',
           model: 'test-model',
           thinking: 'high',
-          defaults: { model: 'gpt-6.2-sol', effort: 'medium' },
+          defaults: {
+            model: 'gpt-6.2-sol',
+            effort: 'medium',
+            serviceTier: 'default',
+          },
           compactAt: 24_000,
+          serviceTier: 'priority',
+          quota: {
+            primary: {
+              usedPercent: 10.4,
+              windowDurationMins: 300,
+              resetsAt: Date.UTC(2026, 10, 26, 7, 40) / 1_000,
+            },
+            secondary: {
+              usedPercent: 28,
+              windowDurationMins: 10_080,
+              resetsAt: Date.UTC(2026, 11, 1, 1) / 1_000,
+            },
+          },
           sessionScope: 'test-session',
           running: { startedAt: now - 7_000, stage: 'agent' },
           queued: 1,
           totalRunning: 2,
         }),
       },
-      trace: { latestSessionSpan: () => compacted },
+      trace: {
+        latestSessionSpan: () => compacted,
+        sessionHistory: () => ({
+          compactions: 3,
+          createdAt: now - (2 * 60 + 32) * 60_000,
+        }),
+      },
     };
     const card = statusCard(deps, chat, target, now);
     assert.deepEqual(card.text.split('\n'), snapshots[locale]);
@@ -157,7 +184,11 @@ for (const locale of ['en', 'zh-TW'] as const) {
     const store = new SqliteStore(':memory:');
     t.after(() => store.close());
     const zh = locale === 'zh-TW';
-    const chatLine = (defaults: AgentDefaults | undefined, thinking?: string) =>
+    const chatLine = (
+      defaults: AgentDefaults | undefined,
+      thinking?: string,
+      serviceTier?: string | null,
+    ) =>
       statusCard(
         {
           runtime: {
@@ -174,6 +205,8 @@ for (const locale of ['en', 'zh-TW'] as const) {
               model: 'default',
               thinking,
               defaults,
+              quota: undefined,
+              serviceTier,
               compactAt: undefined,
               sessionScope: undefined,
               running: undefined,
@@ -181,29 +214,114 @@ for (const locale of ['en', 'zh-TW'] as const) {
               totalRunning: 0,
             }),
           },
-          trace: { latestSessionSpan: () => undefined },
+          trace: {
+            latestSessionSpan: () => undefined,
+            sessionHistory: () => ({ compactions: 0 }),
+          },
         },
         chat,
         target,
         now,
       ).text.split('\n')[2];
     assert.equal(
-      chatLine({ model: 'gpt-6.2-sol', effort: 'high' }),
+      chatLine({ model: 'gpt-6.2-sol', effort: 'high', serviceTier: 'fast' }),
       zh
-        ? '此聊天室 · Agent codex｜模型 gpt-6.2-sol（預設）｜推理強度 high（預設）'
-        : 'This chat · Agent codex | Model gpt-6.2-sol (default) | Effort high (default)',
+        ? '此聊天室 · Agent codex｜模型 gpt-6.2-sol（預設）｜推理強度 high（預設）｜快速模式 開'
+        : 'This chat · Agent codex | Model gpt-6.2-sol (default) | Effort high (default) | Fast on',
     );
     assert.equal(
-      chatLine(undefined),
+      chatLine({ serviceTier: 'fast' }, undefined, null),
       zh
-        ? '此聊天室 · Agent codex｜模型 預設｜推理強度 預設'
-        : 'This chat · Agent codex | Model default | Effort default',
+        ? '此聊天室 · Agent codex｜模型 預設｜推理強度 預設｜快速模式 預設'
+        : 'This chat · Agent codex | Model default | Effort default | Fast default',
     );
     assert.equal(
-      chatLine({ model: 'gpt-6.2-sol' }, 'low'),
+      chatLine({ model: 'gpt-6.2-sol' }, 'low', 'default'),
       zh
-        ? '此聊天室 · Agent codex｜模型 gpt-6.2-sol（預設）｜推理強度 low'
-        : 'This chat · Agent codex | Model gpt-6.2-sol (default) | Effort low',
+        ? '此聊天室 · Agent codex｜模型 gpt-6.2-sol（預設）｜推理強度 low｜快速模式 關'
+        : 'This chat · Agent codex | Model gpt-6.2-sol (default) | Effort low | Fast off',
+    );
+    assert.ok(
+      chatLine(undefined, undefined, 'flex')?.endsWith(
+        zh ? '｜速度 flex' : ' | Speed flex',
+      ),
+    );
+    assert.ok(
+      chatLine(undefined)?.endsWith(zh ? '｜快速模式 預設' : ' | Fast default'),
+    );
+  });
+
+  test(`renders a single quota window and session age without compaction in ${locale}`, (t) => {
+    const store = new SqliteStore(':memory:');
+    t.after(() => store.close());
+    const zh = locale === 'zh-TW';
+    const render = (quota?: AgentQuota) =>
+      statusCard(
+        {
+          runtime: {
+            config: parseConfig(JSON.stringify({ locale })),
+            environmentReports: [],
+            attachments: { agents: [], platforms: [] },
+          },
+          startedAt: now,
+          sandboxEnabled: false,
+          store,
+          tasks: {
+            status: () => ({
+              agentId: 'codex',
+              model: 'default',
+              thinking: undefined,
+              defaults: undefined,
+              quota,
+              serviceTier: undefined,
+              compactAt: undefined,
+              sessionScope: 'test-session',
+              running: undefined,
+              queued: 0,
+              totalRunning: 0,
+            }),
+          },
+          trace: {
+            latestSessionSpan: () => undefined,
+            sessionHistory: () => ({ compactions: 0, createdAt: now - 81_000 }),
+          },
+        },
+        chat,
+        target,
+        now,
+      )
+        .text.split('\n')
+        .slice(3, -2);
+    const context = zh ? '上下文 · 未知' : 'Context · unknown';
+    const age = zh
+      ? '對話 · 已持續 1 分鐘 21 秒'
+      : 'Session · active for 1m 21s';
+    assert.deepEqual(render(), [context, age]);
+    assert.deepEqual(
+      render({
+        secondary: { usedPercent: 104, windowDurationMins: 1_440 },
+        rateLimitReachedType: 'rate_limit_reached',
+      }),
+      [
+        context,
+        zh
+          ? '額度 · 每日 剩 0% · 已達上限'
+          : 'Quota · daily 0% left · limit reached',
+        age,
+      ],
+    );
+    assert.deepEqual(
+      render({
+        primary: { usedPercent: -2, windowDurationMins: 90 },
+        secondary: { usedPercent: 12, windowDurationMins: 120 },
+      }),
+      [
+        context,
+        zh
+          ? '額度 · 90 分鐘 剩 100% · 2 小時 剩 88%'
+          : 'Quota · 90m 100% left · 2h 88% left',
+        age,
+      ],
     );
   });
 
@@ -226,6 +344,8 @@ for (const locale of ['en', 'zh-TW'] as const) {
             model: undefined,
             thinking: undefined,
             defaults: undefined,
+            quota: undefined,
+            serviceTier: undefined,
             compactAt: undefined,
             sessionScope: undefined,
             running: undefined,
@@ -235,6 +355,7 @@ for (const locale of ['en', 'zh-TW'] as const) {
         },
         trace: {
           latestSessionSpan: () => assert.fail('No session to look up'),
+          sessionHistory: () => assert.fail('No session to look up'),
         },
       },
       chat,

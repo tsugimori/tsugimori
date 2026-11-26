@@ -460,6 +460,26 @@ export function toolWireName(name: string) {
 export interface AgentDefaults {
   effort?: string;
   model?: string;
+  serviceTier?: string;
+}
+
+export interface AgentQuotaWindow {
+  /** Reset timestamp in Unix seconds. */
+  resetsAt?: number;
+  usedPercent?: number;
+  windowDurationMins?: number;
+}
+
+export interface AgentQuota {
+  limitName?: string;
+  planType?: string;
+  primary?: AgentQuotaWindow;
+  rateLimitReachedType?: string;
+  secondary?: AgentQuotaWindow;
+}
+
+export interface AgentSessionInfo {
+  serviceTier?: string | null;
 }
 
 export interface AgentConnector {
@@ -467,6 +487,10 @@ export interface AgentConnector {
   compact?(request: AgentCompactRequest): Promise<AgentCompactResult>;
   /** Describe locally known defaults for the gateway to cache on startup and reload. */
   describeDefaults?(): AgentDefaults | Promise<AgentDefaults>;
+  /** Return cached account quota, if available. */
+  describeQuota?(): AgentQuota | undefined;
+  /** Return locally observed metadata for the given agent session. */
+  describeSession?(sessionId: string): AgentSessionInfo | undefined;
   id: string;
   kind: string;
   loop: 'framework' | 'external';

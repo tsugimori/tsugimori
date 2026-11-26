@@ -4,7 +4,9 @@ import type {
   AgentConnector,
   AgentEvent,
   AgentIO,
+  AgentQuota,
   AgentRequest,
+  AgentSessionInfo,
   AgentTool,
 } from '@tsugimori/plugin-sdk';
 
@@ -17,7 +19,7 @@ import {
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
-import { promisify } from 'node:util';
+import { debuglog, promisify } from 'node:util';
 
 import type { ServerFrame, SpawnServer } from './app-server.ts';
 
@@ -30,6 +32,7 @@ import {
 } from './compaction.ts';
 import { readCodexDefaults } from './defaults.ts';
 import { installCodex } from './install.ts';
+import { mergeQuota } from './quota.ts';
 import {
   codexChecks,
   codexEnvironment,
@@ -60,12 +63,13 @@ interface CodexDependencies {
   spawn?: SpawnServer;
 }
 
-interface ThreadContext {
+interface ThreadContext extends AgentSessionInfo {
   tokens?: number;
   window?: number;
 }
 
 const execFileAsync = promisify(execFile);
+const debug = debuglog('tsugimori:codex');
 
 export class CodexAgent implements AgentConnector {
   readonly id: string;
@@ -84,6 +88,7 @@ export class CodexAgent implements AgentConnector {
   #inspection?: ReturnType<CodexAgent['inspect']>;
   #lifecycle?: AbortController;
   #connection?: Promise<AppServer>;
+  #quota?: AgentQuota;
   #server?: AppServer;
   #restartAt = 0;
   #backoff = 250;
@@ -98,6 +103,18 @@ export class CodexAgent implements AgentConnector {
     return readCodexDefaults(this.#options.codexHome);
   }
 
+  describeQuota() {
+    return this.#quota;
+  }
+
+  describeSession(sessionId: string): AgentSessionInfo | undefined {
+    if (!this.#server) return;
+    const context = this.#threadContexts
+      .get(this.#server)
+      ?.get(nativeSessionId(sessionId));
+    if (context) return { serviceTier: context.serviceTier };
+  }
+
   async start() {
     this.#lifecycle ??= new AbortController();
     await this.#connect();
@@ -110,6 +127,7 @@ export class CodexAgent implements AgentConnector {
     this.#lifecycle?.abort();
     this.#lifecycle = undefined;
     this.#connection = undefined;
+    this.#quota = undefined;
     this.#server = undefined;
     this.#inspection = undefined;
     this.#restartAt = 0;
@@ -157,6 +175,7 @@ export class CodexAgent implements AgentConnector {
     this.#inspection ??= this.inspect(command, env, signal);
     const server = new AppServer(this.#deps.spawn, command, env);
     this.#server = server;
+    this.#quota = undefined;
     const stop = () => server.fail('Codex agent stopped');
     signal.addEventListener('abort', stop, { once: true });
     server.signal.addEventListener(
@@ -166,10 +185,16 @@ export class CodexAgent implements AgentConnector {
     );
     // Route server requests centrally so inactive threads never leave a prompt hanging.
     const listeners = new Map<string, (frame: ServerFrame) => void>();
-    const contexts = new Map<string, ThreadContext>();
     this.#listeners.set(server, listeners);
-    this.#threadContexts.set(server, contexts);
+    this.#threadContexts.set(server, new Map());
     server.on('frame', (frame) => {
+      if (
+        frame.method === 'account/rateLimits/updated' &&
+        frame.id === undefined
+      ) {
+        this.#quota = mergeQuota(this.#quota, frame.params.rateLimits);
+        return;
+      }
       const { threadId } = frame.params;
       if (
         typeof threadId === 'string' &&
@@ -179,17 +204,11 @@ export class CodexAgent implements AgentConnector {
         const window = contextWindow(
           asRecord(frame.params.tokenUsage).modelContextWindow,
         );
-        if (typeof totalTokens === 'number' || window !== undefined) {
-          const previous = contexts.get(threadId);
-          contexts.delete(threadId);
-          contexts.set(threadId, {
-            tokens:
-              typeof totalTokens === 'number' ? totalTokens : previous?.tokens,
-            window: window ?? previous?.window,
+        if (typeof totalTokens === 'number' || window !== undefined)
+          this.#updateThreadContext(server, threadId, {
+            ...(typeof totalTokens === 'number' && { tokens: totalTokens }),
+            ...(window !== undefined && { window }),
           });
-          if (contexts.size > 256)
-            contexts.delete(contexts.keys().next().value!);
-        }
       }
       const listener =
         typeof threadId === 'string' ? listeners.get(threadId) : undefined;
@@ -215,11 +234,39 @@ export class CodexAgent implements AgentConnector {
         15_000,
       );
       await server.notify('initialized');
+      void server
+        .request('account/rateLimits/read', {}, 5_000, { failOnTimeout: false })
+        .then(({ rateLimits }) => {
+          if (server.signal.aborted) return;
+          // Notifications received while the initial read was pending are newer.
+          this.#quota = mergeQuota(
+            mergeQuota(undefined, rateLimits),
+            this.#quota,
+          );
+        })
+        .catch((error: unknown) => {
+          debug('%j', {
+            event: 'codex.quota_read_failed',
+            code: error instanceof RpcError ? error.code : undefined,
+          });
+        });
       return server;
     } catch (error) {
       await server.close();
       throw error;
     }
+  }
+
+  #updateThreadContext(
+    server: AppServer,
+    threadId: string,
+    update: ThreadContext,
+  ) {
+    const contexts = this.#threadContexts.get(server)!;
+    const previous = contexts.get(threadId);
+    contexts.delete(threadId);
+    contexts.set(threadId, { ...previous, ...update });
+    if (contexts.size > 256) contexts.delete(contexts.keys().next().value!);
   }
 
   private async inspect(
@@ -395,11 +442,14 @@ export class CodexAgent implements AgentConnector {
       (resumeSessionId && threadId !== resumeSessionId)
     )
       throw new Error('Codex returned an invalid thread ID');
+    const { serviceTier } = result;
+    if (typeof serviceTier === 'string' || serviceTier === null)
+      this.#updateThreadContext(server, threadId, { serviceTier });
     return { server, signal, threadId, model, summarize, compaction, window };
   }
 
   async compact(request: AgentCompactRequest): Promise<AgentCompactResult> {
-    const nativeId = request.sessionId.replace(/^tools:[a-f0-9]{64}:/, '');
+    const nativeId = nativeSessionId(request.sessionId);
     const { server, signal, threadId } = await this.#thread(request, nativeId);
     const listeners = this.#listeners.get(server)!;
     if (listeners.has(threadId))
@@ -637,6 +687,10 @@ function sessionPrefix(tools: ReturnType<typeof describeTools>) {
   return tools.length
     ? `tools:${createHash('sha256').update(JSON.stringify(tools)).digest('hex')}:`
     : '';
+}
+
+function nativeSessionId(sessionId: string) {
+  return sessionId.replace(/^tools:[a-f0-9]{64}:/, '');
 }
 
 export default definePlugin({

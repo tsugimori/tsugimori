@@ -1,4 +1,8 @@
-import type { ChatRef, TextEntity } from '@tsugimori/plugin-sdk';
+import type {
+  AgentQuotaWindow,
+  ChatRef,
+  TextEntity,
+} from '@tsugimori/plugin-sdk';
 import type { ScheduleAddress, Store } from '@tsugimori/storage';
 import type { Tracer } from '@tsugimori/trace';
 
@@ -18,13 +22,28 @@ const messages = {
     chat: 'This chat',
     model: 'Model',
     effort: 'Effort',
+    fastOn: 'Fast on',
+    fastOff: 'Fast off',
+    fastDefault: 'Fast default',
+    speed: 'Speed',
     fieldSeparator: ' | ',
     default: (value: string) => `${value} (default)`,
     unset: 'default',
     context: 'Context',
+    quota: 'Quota',
+    quotaDaily: 'daily',
+    quotaWeekly: 'weekly',
+    quotaHours: (hours: number) => `${hours}h`,
+    quotaMinutes: (minutes: number) => `${minutes}m`,
+    quotaLeft: (percent: number) => `${percent}% left`,
+    quotaReset: (time: string) => ` (resets ${time})`,
+    quotaReached: 'limit reached',
     unknown: 'unknown',
     tokens: 'tokens',
     compaction: 'Last compaction',
+    compactionCount: (count: number) => `${count} total`,
+    session: 'Session',
+    sessionAge: (age: string) => `active for ${age}`,
     modes: {
       manual: 'manual',
       'post-turn': 'post-turn',
@@ -81,13 +100,28 @@ const messages = {
     chat: '此聊天室',
     model: '模型',
     effort: '推理強度',
+    fastOn: '快速模式 開',
+    fastOff: '快速模式 關',
+    fastDefault: '快速模式 預設',
+    speed: '速度',
     fieldSeparator: '｜',
     default: (value: string) => `${value}（預設）`,
     unset: '預設',
     context: '上下文',
+    quota: '額度',
+    quotaDaily: '每日',
+    quotaWeekly: '每週',
+    quotaHours: (hours: number) => `${hours} 小時`,
+    quotaMinutes: (minutes: number) => `${minutes} 分鐘`,
+    quotaLeft: (percent: number) => `剩 ${percent}%`,
+    quotaReset: (time: string) => `（${time} 重置）`,
+    quotaReached: '已達上限',
     unknown: '未知',
     tokens: 'tokens',
     compaction: '上次壓縮',
+    compactionCount: (count: number) => `共 ${count} 次`,
+    session: '對話',
+    sessionAge: (age: string) => `已持續 ${age}`,
     modes: {
       manual: '手動',
       'post-turn': '回合後',
@@ -145,7 +179,7 @@ interface StatusDependencies {
   startedAt: number;
   store: Pick<Store, 'approvalStatus' | 'getSummaryStatus' | 'scheduleStatus'>;
   tasks: Pick<Tasks, 'status'>;
-  trace: Pick<Tracer, 'latestSessionSpan'>;
+  trace: Pick<Tracer, 'latestSessionSpan' | 'sessionHistory'>;
 }
 
 export function statusCard(
@@ -207,7 +241,7 @@ export function statusCard(
   line(m.gateway, `v${gatewayVersion}`, `${m.uptime} ${elapsed(startedAt)}`);
   line(m.started, `${date(startedAt)} (${timezone})`);
   const work = tasks.status(chat);
-  const { agentId, defaults, thinking } = work;
+  const { agentId, defaults, quota, serviceTier, thinking } = work;
   if (agentId) {
     const model = work.model === 'default' ? undefined : work.model;
     const setting = (
@@ -225,6 +259,10 @@ export function statusCard(
         `Agent ${agentId}`,
         `${m.model} ${setting(model, defaults?.model, 80)}`,
         `${m.effort} ${setting(thinking, defaults?.effort, 30)}`,
+        fastMode(
+          serviceTier === undefined ? defaults?.serviceTier : serviceTier,
+          m,
+        ),
       ].join(m.fieldSeparator),
     );
     const scope = work.sessionScope;
@@ -237,9 +275,24 @@ export function statusCard(
         ? `${formatNumber(used)} / ${formatNumber(limit)} ${m.tokens} (${formatNumber(Math.round((100 * used) / limit))}%)`
         : m.unknown,
     );
+    if (quota) {
+      const details = [
+        quotaWindow(quota.primary, m, date, now),
+        quotaWindow(quota.secondary, m, date, now),
+        quota.rateLimitReachedType ? m.quotaReached : '',
+      ]
+        .filter(Boolean)
+        .join(' · ');
+      if (details)
+        line(
+          m.quota,
+          locale === 'zh-TW' ? details.replaceAll('） · ', '）· ') : details,
+        );
+    }
     const compacted = scope
       ? trace.latestSessionSpan(scope, 'compaction')
       : undefined;
+    const history = scope ? trace.sessionHistory(scope) : undefined;
     if (compacted) {
       const { trigger, tokensBefore, tokensAfter } = compacted.attrs;
       const mode =
@@ -251,6 +304,14 @@ export function statusCard(
         date(compacted.endedAt),
         mode,
         `${tokenCount(tokensBefore)} → ${tokenCount(tokensAfter)} ${m.tokens}`,
+        history?.compactions ? m.compactionCount(history.compactions) : '',
+      );
+    }
+    if (history) {
+      const since = history.createdAt ?? history.firstActivityAt;
+      line(
+        m.session,
+        since === undefined ? m.unknown : m.sessionAge(elapsed(since)),
       );
     }
   }
@@ -344,6 +405,53 @@ export function statusCard(
     );
   } else line(m.health, m.healthy);
   return { text, entities, parseTextMentions: false };
+}
+
+type StatusMessages = (typeof messages)[keyof typeof messages];
+
+function fastMode(tier: string | null | undefined, m: StatusMessages) {
+  switch (tier) {
+    case undefined:
+    case null:
+    case '':
+      return m.fastDefault;
+    case 'fast':
+    case 'priority':
+      return m.fastOn;
+    case 'default':
+      return m.fastOff;
+    default:
+      return `${m.speed} ${shortText(tier, 30)}`;
+  }
+}
+
+function quotaWindow(
+  window: AgentQuotaWindow | undefined,
+  m: StatusMessages,
+  date: (timestamp: number) => string,
+  now: number,
+) {
+  if (!window || window.usedPercent === undefined) return '';
+  const { windowDurationMins: minutes, resetsAt } = window;
+  let label = '';
+  if (minutes === 10_080) label = m.quotaWeekly;
+  else if (minutes === 1_440) label = m.quotaDaily;
+  else if (minutes !== undefined && minutes > 0)
+    label =
+      minutes % 60 === 0 ? m.quotaHours(minutes / 60) : m.quotaMinutes(minutes);
+
+  const left = Math.max(0, Math.min(100, Math.round(100 - window.usedPercent)));
+  let reset = '';
+  if (resetsAt !== undefined && Math.abs(resetsAt) <= 8.64e12) {
+    const [day, clock] = date(resetsAt * 1_000).split(' ');
+    const time = clock!.slice(0, 5);
+    const stamp =
+      day === date(now).slice(0, 10)
+        ? time
+        : `${day!.slice(5).replace('-', '/')} ${time}`;
+    reset = m.quotaReset(stamp);
+  }
+  return [label, m.quotaLeft(left) + reset].filter(Boolean).join(' ');
 }
 
 function duration(ms: number, units: string[]) {

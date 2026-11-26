@@ -14,9 +14,10 @@ import { test } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 
 import { CodexAgent } from '../src/index.ts';
+import { mergeQuota } from '../src/quota.ts';
 import { codexChecks } from '../src/setup.ts';
 
-test('describes only model and effort configured at the root of the Codex home', async (t) => {
+test('describes model, effort and service tier configured at the root of the Codex home', async (t) => {
   const home = await mkdtemp(join(tmpdir(), 'tsugimori-codex-defaults-'));
   t.after(() => rm(home, { recursive: true, force: true }));
   const agent = new CodexAgent({}, 'custom', { codexHome: home });
@@ -29,22 +30,26 @@ test('describes only model and effort configured at the root of the Codex home',
       'instructions = """',
       '[ignored]',
       'model = "also-ignored"',
+      'service_tier = "also-ignored"',
       '"""',
       'model = "gpt-6.2-sol" # selected model',
       '"model_reasoning_effort" = \'high\' # selected effort',
+      "service_tier = 'fast' # selected tier",
       '[profiles.other]',
       'model = "other-model"',
       'model_reasoning_effort = "low"',
+      'service_tier = "flex"',
     ].join('\r\n'),
   );
   assert.deepEqual(await agent.describeDefaults(), {
     model: 'gpt-6.2-sol',
     effort: 'high',
+    serviceTier: 'fast',
   });
 
   await writeFile(
     config,
-    'model_reasoning_effort = "medium"\n[profiles.other]\nmodel = "ignored"',
+    'model_reasoning_effort = "medium"\n[profiles.other]\nmodel = "ignored"\nservice_tier = "flex"',
   );
   assert.deepEqual(await agent.describeDefaults(), { effort: 'medium' });
 });
@@ -58,6 +63,9 @@ const threads = new Map();
 const approvals = new Map();
 let next = 0;
 let initialized = false;
+let quotaReads = 0;
+const quotaUpdate = (rateLimits) =>
+  write({ method: 'account/rateLimits/updated', params: { rateLimits } });
 for await (const line of createInterface({ input: process.stdin })) {
   const { id, method, params, result } = JSON.parse(line);
   const answer = (result) => write({ id, result });
@@ -66,6 +74,22 @@ for await (const line of createInterface({ input: process.stdin })) {
     answer({});
   } else if (method === 'initialized') {
     initialized = true;
+  } else if (method === 'account/rateLimits/read') {
+    assert.ok(initialized);
+    assert.equal(++quotaReads, 1);
+    if (process.env.TEST_CODEX_QUOTA) {
+      quotaUpdate({ primary: { usedPercent: 11 }, secondary: null, planType: null });
+      answer({
+        rateLimits: {
+          primary: { usedPercent: 8, windowDurationMins: 300, resetsAt: 101 },
+          secondary: { usedPercent: 23, windowDurationMins: 10080, resetsAt: 102 },
+          limitName: 'Codex', planType: 'pro', rateLimitReachedType: null,
+        },
+        accountEmail: 'private@example.invalid',
+      });
+    } else {
+      write({ id, error: { code: Number(process.env.TEST_CODEX_QUOTA_ERROR ?? -32601) } });
+    }
   } else if (method === 'config/read') {
     answer({ config: {} });
   } else if (method === 'model/list') {
@@ -95,7 +119,10 @@ for await (const line of createInterface({ input: process.stdin })) {
     const threadId = params.threadId ?? 'thread-' + ++next;
     threads.set(threadId, { scoped, resumed: method === 'thread/resume' });
     if (params.threadId) assert.equal(params.excludeTurns, true);
-    answer({ thread: { id: threadId } });
+    answer({
+      thread: { id: threadId },
+      serviceTier: method === 'thread/start' ? 'fast' : params.threadId === 'thread-null' ? null : 'default',
+    });
   } else if (method === 'thread/compact/start') {
     const { threadId } = params;
     assert.ok(threads.get(threadId)?.resumed);
@@ -128,6 +155,14 @@ for await (const line of createInterface({ input: process.stdin })) {
     const blocks = params.input[0].text.split('\n').map((line) => JSON.parse(line));
     assert.deepEqual(blocks.map(({ source }) => source), thread.resumed ? ['message'] : ['rule', 'message']);
     const input = blocks.at(-1).content;
+    if (input === 'quota update') {
+      quotaUpdate({
+        primary: { usedPercent: 17, windowDurationMins: null, resetsAt: 201 },
+        limitName: null,
+        rateLimitReachedType: 'rate_limit_reached',
+        accountEmail: 'private@example.invalid',
+      });
+    }
     const turnId = 'turn-' + ++next;
     const notify = (method, parameters) => write({
       method, params: { threadId, turnId, ...parameters },
@@ -518,6 +553,7 @@ test(
     );
     t.after(() => agent.stop());
     await agent.start();
+    assert.equal(agent.describeQuota(), undefined);
 
     const seen: string[] = [];
     const events = await collect(
@@ -558,6 +594,9 @@ test(
     );
     const native = events.find((event) => event.type === 'sessionId');
     assert.ok(native);
+    assert.deepEqual(agent.describeSession(native.sessionId), {
+      serviceTier: 'fast',
+    });
     const [resumed, separate] = await Promise.all([
       collect(agent.run(request('new turn', undefined, native.sessionId), io)),
       collect(agent.run(request('second conversation'), io)),
@@ -566,7 +605,89 @@ test(
     assert.notDeepEqual(separate[0], native);
     assert.deepEqual(resumed.at(-1), { type: 'text.final', text: 'pong' });
     assert.deepEqual(separate.at(-1), { type: 'text.final', text: 'pong' });
+    assert.deepEqual(agent.describeSession(native.sessionId), {
+      serviceTier: 'default',
+    });
+    const separateSession = separate.find(
+      (event) => event.type === 'sessionId',
+    );
+    assert.ok(separateSession);
+    assert.deepEqual(agent.describeSession(separateSession.sessionId), {
+      serviceTier: 'fast',
+    });
+    await collect(agent.run(request('new turn', undefined, 'thread-null'), io));
+    assert.deepEqual(agent.describeSession('thread-null'), {
+      serviceTier: null,
+    });
     assert.equal(spawns, 1);
+  },
+);
+
+test(
+  'seeds Codex quota once and merges sparse account notifications',
+  { timeout: 5_000 },
+  async (t) => {
+    const agent = new CodexAgent(
+      {
+        inspect: noInspection,
+        spawn: (_command, _args, options) =>
+          spawn(
+            process.execPath,
+            ['--input-type=module', '--eval', fakeServer],
+            {
+              ...options,
+              env: { ...options.env, TEST_CODEX_QUOTA: '1' },
+            },
+          ),
+      },
+      'codex',
+    );
+    t.after(() => agent.stop());
+    const events = await collect(agent.run(request('initial quota'), io));
+    const session = events.find((event) => event.type === 'sessionId');
+    assert.ok(session);
+    const initial = {
+      primary: { usedPercent: 11, windowDurationMins: 300, resetsAt: 101 },
+      secondary: { usedPercent: 23, windowDurationMins: 10_080, resetsAt: 102 },
+      limitName: 'Codex',
+      planType: 'pro',
+      rateLimitReachedType: undefined,
+    };
+    assert.deepEqual(agent.describeQuota(), initial);
+    await collect(
+      agent.run(request('quota update', undefined, session.sessionId), io),
+    );
+    assert.deepEqual(agent.describeQuota(), {
+      ...initial,
+      primary: { ...initial.primary, usedPercent: 17, resetsAt: 201 },
+      rateLimitReachedType: 'rate_limit_reached',
+    });
+  },
+);
+
+test(
+  'continues running after Codex quota read fails',
+  { timeout: 5_000 },
+  async (t) => {
+    const agent = new CodexAgent(
+      {
+        inspect: noInspection,
+        spawn: (_command, _args, options) =>
+          spawn(
+            process.execPath,
+            ['--input-type=module', '--eval', fakeServer],
+            {
+              ...options,
+              env: { ...options.env, TEST_CODEX_QUOTA_ERROR: '-32000' },
+            },
+          ),
+      },
+      'codex',
+    );
+    t.after(() => agent.stop());
+    const events = await collect(agent.run(request('work without quota'), io));
+    assert.deepEqual(events.at(-1), { type: 'text.final', text: 'pong' });
+    assert.equal(agent.describeQuota(), undefined);
   },
 );
 
@@ -676,3 +797,20 @@ test(
     assert.equal(calls, 2);
   },
 );
+
+test('clears the reached quota flag when an update sets it to null', () => {
+  const reached = mergeQuota(undefined, {
+    primary: { usedPercent: 100, windowDurationMins: 10_080, resetsAt: 1 },
+    rateLimitReachedType: 'rate_limit_reached',
+  });
+  assert.equal(reached?.rateLimitReachedType, 'rate_limit_reached');
+  const partial = mergeQuota(reached, { primary: { usedPercent: 99 } });
+  assert.equal(partial?.rateLimitReachedType, 'rate_limit_reached');
+  const recovered = mergeQuota(partial, {
+    primary: { usedPercent: 4 },
+    rateLimitReachedType: null,
+  });
+  assert.equal(recovered?.rateLimitReachedType, undefined);
+  assert.equal(recovered?.primary?.usedPercent, 4);
+  assert.equal(recovered?.primary?.windowDurationMins, 10_080);
+});
