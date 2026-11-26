@@ -461,6 +461,46 @@ test('prunes the oldest task transcript first and preserves outcomes and tool me
   assert.equal(store.getTaskExecution('task-2')?.outcome.kind, 'delivered');
 });
 
+test('ranks sticker search by matched keywords and keeps a stable order for ties', (t) => {
+  const store = new SqliteStore(':memory:');
+  t.after(() => store.close());
+  const chat = { adapterId: 'a', chatId: 'c' };
+  const botId = 'bot';
+  const puppy = {
+    description: 'Happy puppy smiling and waving a paw',
+    emoji: '🐶',
+    fileId: 'puppy-file',
+  };
+  const kitten = {
+    description: 'Waving kitten wearing an X badge',
+    emoji: undefined,
+    fileId: 'kitten-file',
+  };
+  assert.ok(
+    store.saveStickerSet('cats', botId, chat, [
+      { ...kitten, emoji: null, format: 'static', uniqueId: 'kitten' },
+    ]),
+  );
+  assert.ok(
+    store.saveStickerSet('puppies', botId, chat, [
+      { ...puppy, format: 'static', uniqueId: 'puppy' },
+    ]),
+  );
+
+  assert.deepEqual(store.searchStickers(botId, 'happy dog', 10), [puppy]);
+  assert.deepEqual(store.searchStickers(botId, 'HAPPY waving', 10), [
+    puppy,
+    kitten,
+  ]);
+  assert.deepEqual(store.searchStickers(botId, 'HAPPY waving', 1), [puppy]);
+  assert.deepEqual(store.searchStickers(botId, 'waving', 10), [kitten, puppy]);
+  assert.deepEqual(store.searchStickers(botId, '', 10), [kitten, puppy]);
+  assert.deepEqual(store.searchStickers(botId, '🐶', 10), [puppy]);
+  assert.deepEqual(store.searchStickers(botId, 'dolphin 🐶', 10), [puppy]);
+  assert.deepEqual(store.searchStickers(botId, 'x puppy', 10), [puppy]);
+  assert.deepEqual(store.searchStickers(botId, 'x', 10), [kitten]);
+});
+
 test('lists task summaries with indexed filters and stable pagination on timestamp ties', (t) => {
   const store = new SqliteStore(':memory:');
   t.after(() => store.close());

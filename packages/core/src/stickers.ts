@@ -206,7 +206,7 @@ export class StickerIndex {
       {
         name: 'sticker.search',
         description:
-          'Search sendable stickers by keyword, emoji, set name or description. Use a returned fileId with send.sticker.',
+          'Search sendable stickers. The index is in English, so translate the request into a few English keywords for the character, action, or emotion (e.g. "happy puppy"). An empty query lists stickers. Emoji also match the sticker\'s emoji. Use a returned fileId with send.sticker.',
         schema: {
           type: 'object',
           properties: {

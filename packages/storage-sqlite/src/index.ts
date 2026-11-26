@@ -1035,6 +1035,20 @@ export class SqliteStore implements Store {
 
   searchStickers(botId: string, query: string, limit: number) {
     const terms = query.toLowerCase().split(/\s+/u).filter(Boolean);
+    const keywords =
+      terms.length > 1
+        ? terms.filter(
+            (term) =>
+              [...term].length >= 2 || /[\p{Emoji}--\p{ASCII}]/v.test(term),
+          )
+        : terms;
+    const searchText = sql`lower(${indexedStickers.description} || ' ' || coalesce(${indexedStickers.emoji}, '') || ' ' || ${stickerSets.name})`;
+    const matchCount = keywords.length
+      ? sql.join(
+          keywords.map((term) => sql`(instr(${searchText}, ${term}) > 0)`),
+          sql` + `,
+        )
+      : undefined;
     return this.#db
       .select({
         fileId: stickerFiles.fileId,
@@ -1054,13 +1068,14 @@ export class SqliteStore implements Store {
         and(
           eq(stickerFiles.botId, botId),
           eq(stickerSets.blocked, false),
-          ...terms.map(
-            (term) =>
-              sql`instr(lower(${indexedStickers.description} || ' ' || coalesce(${indexedStickers.emoji}, '') || ' ' || ${stickerSets.name}), ${term}) > 0`,
-          ),
+          matchCount && sql`${matchCount} > 0`,
         ),
       )
-      .orderBy(stickerFiles.setName, stickerFiles.uniqueId)
+      .orderBy(
+        ...(matchCount ? [desc(matchCount)] : []),
+        stickerFiles.setName,
+        stickerFiles.uniqueId,
+      )
       .limit(limit)
       .all()
       .map(({ fileId, emoji, description }) => ({
