@@ -122,3 +122,44 @@ test('assembles ordered rules, marked recent messages, and scoped resume context
     ['owner message', 'member message'],
   );
 });
+
+test('includes the current Telegram table capability next to system guidance, including on resume', async (t) => {
+  const workspace = await mkdtemp(join(tmpdir(), 'tsugimori-context-'));
+  t.after(() => rm(workspace, { recursive: true, force: true }));
+  const context = new ContextAssembler({
+    store: { recentMessages: () => [] },
+    workspace,
+  });
+  const request = {
+    adapterId: 'main',
+    chatId: '1',
+    kind: 'telegram',
+    throughSeq: 1,
+    recentMessages: 2,
+  };
+  const content = async (
+    options: Partial<typeof request> & {
+      afterSeq?: number;
+      richText?: boolean;
+    },
+  ) =>
+    (await context.assemble({ ...request, ...options })).map(
+      ({ content }) => content,
+    );
+  assert.equal(
+    (await content({}))[1],
+    'Telegram shows Markdown tables as bullet lists; prefer short lists or sections over tables.',
+  );
+  assert.equal(
+    (await content({ richText: true }))[1],
+    'Telegram renders Markdown tables natively; keep tables to 20 columns or fewer.',
+  );
+  assert.deepEqual(await content({ richText: true, afterSeq: 1 }), [
+    'Telegram renders Markdown tables natively; keep tables to 20 columns or fewer.',
+  ]);
+  assert.ok(
+    !(await content({ kind: 'line', richText: true })).some((text) =>
+      text.includes('Telegram'),
+    ),
+  );
+});

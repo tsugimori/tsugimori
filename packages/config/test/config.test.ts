@@ -249,3 +249,31 @@ test(
     assert.equal(accepted.at(-1), 12);
   },
 );
+
+test('defaults rich messages to off and validates the setting for Telegram only', () => {
+  const parse = (entry: object) =>
+    parseConfig(
+      JSON.stringify({
+        platforms: [
+          { id: 'main', kind: 'telegram', tokenEnv: 'TEST_TOKEN', ...entry },
+        ],
+      }),
+      {
+        ...noPluginKinds,
+        platformKinds: new Set(['telegram', 'line', 'custom']),
+      },
+    ).platforms[0];
+  assert.equal(parse({})?.richMessages, false);
+  assert.equal(parse({ richMessages: true })?.richMessages, true);
+  assert.equal(
+    parse({ enabled: false, tokenEnv: undefined })?.richMessages,
+    false,
+  );
+  assert.equal(parse({ kind: 'line' })?.richMessages, undefined);
+  for (const entry of [
+    { richMessages: 'yes' },
+    { kind: 'line', richMessages: true },
+    { kind: 'custom', richMessages: false },
+  ])
+    assert.throws(() => parse(entry), /richMessages/);
+});

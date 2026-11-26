@@ -1,4 +1,8 @@
-import type { ChatRef, ContextBlock } from '@tsugimori/plugin-sdk';
+import type {
+  ChatRef,
+  ContextBlock,
+  TaskContextRef,
+} from '@tsugimori/plugin-sdk';
 import type { Store } from '@tsugimori/storage';
 
 import { constants } from 'node:fs';
@@ -28,6 +32,7 @@ export interface ContextRequest extends ChatRef {
   kind: string;
   ownerId?: string;
   recentMessages: number;
+  richText?: boolean;
   skipSeq?: readonly number[];
   throughSeq: number;
 }
@@ -71,6 +76,21 @@ export const guidelineBlock: ContextBlock = {
     'Older conversation history is available in storage. Workspace guideline files follow; AGENTS.md lists further guideline files that you can read with the guide.read tool when a task needs them. Apply rules in specificity order: workspace, platform, then conversation.\nIf the latest message does not need a reply from you, answer exactly `NO_REPLY: <short reason>` (one line, no other text).',
 };
 
+export const telegramTableBlocks = {
+  'telegram-tables-bullets': {
+    source: 'system',
+    trust: 'trusted',
+    content:
+      'Telegram shows Markdown tables as bullet lists; prefer short lists or sections over tables.',
+  },
+  'telegram-tables-rich': {
+    source: 'system',
+    trust: 'trusted',
+    content:
+      'Telegram renders Markdown tables natively; keep tables to 20 columns or fewer.',
+  },
+} satisfies Record<string, ContextBlock>;
+
 export function guidelineFileBlock(
   path: string,
   content: string,
@@ -93,7 +113,7 @@ type RuleEntry = {
 export type AssembledEntry =
   | RuleEntry
   | ({ block: ContextBlock } & (
-      | { kind: 'system'; name: 'guidelines' | 'schedule-style' }
+      | Extract<TaskContextRef, { kind: 'system' }>
       | { chatId?: string; kind: 'summary'; revision?: number }
       | { kind: 'history' | 'new'; revision?: number; seq?: number }
     ));
@@ -138,6 +158,14 @@ export class ContextAssembler {
         name: 'guidelines',
         block: guidelineBlock,
       });
+    }
+    if (request.kind === 'telegram') {
+      const name = request.richText
+        ? 'telegram-tables-rich'
+        : 'telegram-tables-bullets';
+      entries.push({ kind: 'system', name, block: telegramTableBlocks[name] });
+    }
+    if (request.afterSeq === undefined) {
       entries.push(...(await this.#loadRules(request)));
       const summary = await this.#summary.get(request);
       if (summary && summary.throughSeq < request.throughSeq) {

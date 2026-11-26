@@ -6,6 +6,7 @@
     {
       "id": "telegram:main",
       "kind": "telegram",
+      "richMessages": false,
       "tokenEnv": "TELEGRAM_BOT_TOKEN"
     }
   ],

@@ -77,6 +77,8 @@ const messages = {
     failed: 'failed',
     due: (time: string) => `, next ${time}`,
     system: 'System',
+    richMessages: (enabled: boolean) =>
+      `rich messages ${enabled ? 'on' : 'off'}`,
     componentSeparator: ', ',
     disabled: 'disabled',
     unavailable: 'unavailable',
@@ -149,6 +151,7 @@ const messages = {
     failed: '失敗',
     due: (time: string) => `，下次 ${time}`,
     system: '系統',
+    richMessages: (enabled: boolean) => `富文字訊息：${enabled ? '開' : '關'}`,
     componentSeparator: '、',
     disabled: '已停用',
     unavailable: '無法使用',
@@ -421,6 +424,10 @@ export function statusCard(
   for (const { name, entry } of components) {
     if (entry.state !== 'running')
       text += `\n${name} ${attachmentState(entry, m, locale, date, now)}`;
+  }
+  for (const platform of runtime.config.platforms) {
+    if (platform.kind === 'telegram')
+      text += `\n${platform.id}${separator}${m.richMessages(platform.richMessages === true)}`;
   }
   text += `\n${m.sandbox(sandboxEnabled)}${separator}${failures ? m.failing(failures) : m.healthy}`;
 

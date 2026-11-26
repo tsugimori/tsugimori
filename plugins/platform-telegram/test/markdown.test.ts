@@ -1,3 +1,4 @@
+import { renderMarkdown } from '@tsugimori/plugin-sdk';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
@@ -80,11 +81,6 @@ const examples = [
       { type: 'blockquote', offset: 0, length: 8 },
       { type: 'bold', offset: 0, length: 2 },
     ],
-  ],
-  [
-    '| Time | Rain |\n| --- | ---: |\n| Morning | **70%** |',
-    '| Time | Rain |\n| --- | ---: |\n| Morning | **70%** |',
-    [{ type: 'pre', offset: 0, length: 52 }],
   ],
 ] as const;
 
@@ -322,4 +318,85 @@ test('uses plain text for a non-pre entity that cannot fit in a single chunk', (
     { text: text.slice(0, 4096), entities: undefined },
     { text: text.slice(4096), entities: undefined },
   ]);
+});
+
+test('keeps Markdown tables preformatted by default in the SDK', () => {
+  const text = '| Time | Rain |\n| --- | ---: |\n| Morning | **70%** |';
+  assert.deepEqual(renderMarkdown(text, new Map(), true), {
+    text,
+    entities: [{ type: 'pre', offset: 0, length: text.length }],
+  });
+});
+
+test('renders bullet groups with cell formatting, mentions, and empty cells', () => {
+  const source = [
+    '| Item | *Cost* | Owner | Notes |',
+    '| --- | ---: | --- | --- |',
+    '| **Plan** | `$400-600K` | [Alex](tg://user?id=79) | |',
+    '| Next | | | [more](https://example.test) |',
+    '| Last | | | A \\| B |',
+  ].join('\n');
+  const text =
+    'Plan\n• Cost: $400-600K\n• Owner: Alex\n\nNext\n• Notes: more\n\nLast\n• Notes: A | B';
+  assert.deepEqual(
+    renderMarkdown(source, new Map(), true, true, { tables: 'bullets' }),
+    {
+      text,
+      entities: [
+        { type: 'bold', offset: 0, length: 4 },
+        { type: 'italic', offset: text.indexOf('Cost'), length: 4 },
+        { type: 'code', offset: text.indexOf('$'), length: 9 },
+        {
+          type: 'mention',
+          offset: text.indexOf('Alex'),
+          length: 4,
+          userId: '79',
+        },
+        { type: 'bold', offset: text.indexOf('Next'), length: 4 },
+        {
+          type: 'text_link',
+          offset: text.indexOf('more'),
+          length: 4,
+          url: 'https://example.test',
+        },
+        { type: 'bold', offset: text.indexOf('Last'), length: 4 },
+      ],
+    },
+  );
+});
+
+test('renders single-column tables next to lists, quotes, and fenced code', () => {
+  const source = [
+    '- Before',
+    '| Item |',
+    '| --- |',
+    '| **One** |',
+    '| |',
+    '| `A|B` |',
+    '> Quoted | text',
+    '```ts',
+    '| a | b |',
+    '| --- | --- |',
+    '```',
+    'After',
+  ].join('\n');
+  const code = '| a | b |\n| --- | --- |';
+  const text = '• Before\n• One\n• A|B\nQuoted | text\n' + code + '\nAfter';
+  assert.deepEqual(
+    renderMarkdown(source, new Map(), true, true, { tables: 'bullets' }),
+    {
+      text,
+      entities: [
+        { type: 'bold', offset: text.indexOf('One'), length: 3 },
+        { type: 'code', offset: text.indexOf('A|B'), length: 3 },
+        { type: 'blockquote', offset: text.indexOf('Quoted'), length: 13 },
+        {
+          type: 'pre',
+          offset: text.indexOf(code),
+          length: code.length,
+          language: 'ts',
+        },
+      ],
+    },
+  );
 });

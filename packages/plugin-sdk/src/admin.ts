@@ -155,7 +155,14 @@ export interface TaskAgent {
 }
 
 export type TaskContextRef =
-  | { kind: 'system'; name: 'guidelines' | 'schedule-style' }
+  | {
+      kind: 'system';
+      name:
+        | 'guidelines'
+        | 'schedule-style'
+        | 'telegram-tables-bullets'
+        | 'telegram-tables-rich';
+    }
   | { index: number; kind: 'rule' }
   | { kind: 'summary' }
   | {

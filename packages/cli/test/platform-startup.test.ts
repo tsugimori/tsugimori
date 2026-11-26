@@ -110,14 +110,14 @@ async function fixture(
     store,
     workspace,
   });
-  const configure = (enabled: boolean) =>
+  const configure = (enabled: boolean, richMessages?: boolean) =>
     writeFile(
       join(workspace, 'tsugimori.json'),
       JSON.stringify({
         locale,
         owner: { [adapterId]: owner, [fallbackId]: owner },
         platforms: [
-          { id: adapterId, kind: 'telegram', tokenEnv, enabled },
+          { id: adapterId, kind: 'telegram', tokenEnv, enabled, richMessages },
           { id: fallbackId, kind: 'fake' },
         ],
       }),
@@ -336,6 +336,31 @@ test(
     assert.match(
       (await f.status())!,
       /^fake:owner running\ntelegram:test disabled$/m,
+    );
+  },
+);
+
+test(
+  'reloads the Telegram rich message setting without restarting the gateway',
+  { timeout: 4_000 },
+  async (t) => {
+    const f = await fixture(t, identity);
+    await f.gateway.start();
+    assert.match(
+      (await f.status()) ?? '',
+      /^telegram:test · rich messages off$/m,
+    );
+    await f.configure(true, true);
+    while (f.requests < 2 && !t.signal.aborted) await f.advance(75);
+    assert.match(
+      (await f.status()) ?? '',
+      /^telegram:test · rich messages on$/m,
+    );
+    await f.configure(true, false);
+    while (f.requests < 3 && !t.signal.aborted) await f.advance(75);
+    assert.match(
+      (await f.status()) ?? '',
+      /^telegram:test · rich messages off$/m,
     );
   },
 );

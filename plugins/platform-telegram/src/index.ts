@@ -5,6 +5,7 @@ import type {
   InboundMessage,
   OutboundMessage,
   PlatformAdapter,
+  PlatformCapabilities,
   PlatformCommand,
   PlatformCommandErrorDetails,
   PlatformCommandScope,
@@ -22,7 +23,13 @@ import { setTimeout as delay } from 'node:timers/promises';
 import type { BotIdentity } from './updates.ts';
 
 import { BotApi, BotApiError, nativeId, record } from './api.ts';
-import { maxMessage, splitText, telegramMessageParts } from './message-text.ts';
+import {
+  maxMessage,
+  parseTelegramMarkdown,
+  splitText,
+  telegramMessageParts,
+} from './message-text.ts';
+import { telegramRichMessage } from './rich-message.ts';
 import {
   telegramChecks,
   telegramIdentity,
@@ -68,12 +75,7 @@ function commandScope(scope: PlatformCommandScope) {
 export class TelegramAdapter implements PlatformAdapter {
   readonly id: string;
   readonly kind = 'telegram';
-  readonly capabilities = {
-    deleteEvents: false,
-    inlineButtons: true,
-    outboundPush: 'free' as const,
-    richText: true,
-  };
+  readonly capabilities: PlatformCapabilities;
   readonly #api: BotApi;
   readonly #fetch: typeof globalThis.fetch;
   readonly #token: string;
@@ -96,8 +98,15 @@ export class TelegramAdapter implements PlatformAdapter {
     },
     id: string,
     token: string,
+    { richMessages = false }: { richMessages?: boolean } = {},
   ) {
     this.id = id;
+    this.capabilities = {
+      deleteEvents: false,
+      inlineButtons: true,
+      outboundPush: 'free',
+      richText: richMessages,
+    };
     this.#api = new BotApi(fetch, token);
     this.#fetch = fetch;
     this.#token = token;
@@ -292,9 +301,91 @@ export class TelegramAdapter implements PlatformAdapter {
     const parts: SendPart[] = [];
     let chatId = this.#ctx?.resolveChatId?.(message.chatId) ?? message.chatId;
     let migrated = false;
+    const send = async (
+      method: 'sendMessage' | 'sendRichMessage',
+      body: object,
+      retries?: number,
+    ) => {
+      const post = (retries?: number) =>
+        this.#api.call(
+          method,
+          {
+            ...body,
+            ...destination(chatId === message.chatId ? message : { chatId }),
+            reply_parameters:
+              chatId === message.chatId && message.replyTo
+                ? {
+                    message_id: Number(message.replyTo),
+                    allow_sending_without_reply: true,
+                  }
+                : undefined,
+          },
+          signal,
+          retries,
+        );
+      let result;
+      try {
+        result = await post(retries);
+      } catch (error) {
+        if (migrated) throw error;
+        const next = await this.#recordMigration(chatId, error);
+        if (!next) throw error;
+        chatId = next;
+        migrated = true;
+        result = await post(0);
+      }
+      const sent = record(result);
+      const messageId = nativeId(sent?.message_id);
+      if (!messageId) throw new BotApiError(method, undefined);
+      return {
+        ...(chatId === message.chatId ? {} : { chatId }),
+        messageId,
+        raw: { message_id: sent?.message_id },
+      };
+    };
+
     let messages: ReturnType<typeof telegramMessageParts>;
+    let markdown: ReturnType<typeof parseTelegramMarkdown> | undefined;
+    let rich: ReturnType<typeof telegramRichMessage> | undefined;
+    const getUser = this.#ctx?.getUser;
     try {
-      messages = telegramMessageParts(message, this.#ctx?.getUser);
+      if (message.format === 'markdown' && !message.approval)
+        markdown = parseTelegramMarkdown(message);
+      if (
+        this.capabilities.richText &&
+        markdown?.hasTable &&
+        !message.buttons?.length
+      )
+        rich = telegramRichMessage(message, markdown.blocks, getUser);
+    } catch (error) {
+      throw new SendFailure({ parts, deliveryUnknown: false }, error);
+    }
+    if (rich) {
+      let reason: string | undefined = rich.reason;
+      if (rich.reason === undefined) {
+        try {
+          const part = await send('sendRichMessage', {
+            rich_message: { blocks: rich.blocks },
+          });
+          parts.push({ ...part, text: rich.text });
+          return { messageId: part.messageId, parts };
+        } catch (error) {
+          if (!(error instanceof BotApiError) || error.code !== 400)
+            throw new SendFailure(
+              {
+                parts,
+                deliveryUnknown:
+                  !(error instanceof BotApiError) || error.unknownDelivery,
+              },
+              error,
+            );
+          reason = 'api_400';
+        }
+      }
+      this.#ctx?.logWarning?.('telegram.rich_fallback', reason);
+    }
+    try {
+      messages = telegramMessageParts(message, getUser, markdown?.blocks);
     } catch (error) {
       throw new SendFailure({ parts, deliveryUnknown: false }, error);
     }
@@ -318,43 +409,8 @@ export class TelegramAdapter implements PlatformAdapter {
               ? { inline_keyboard: keyboard }
               : undefined,
         };
-        const post = (entities: typeof part.entities, retries?: number) => {
-          const address = chatId === message.chatId ? message : { chatId };
-          return this.#api.call(
-            'sendMessage',
-            {
-              ...body,
-              ...destination(address),
-              entities,
-              reply_parameters:
-                chatId === message.chatId && message.replyTo
-                  ? {
-                      message_id: Number(message.replyTo),
-                      allow_sending_without_reply: true,
-                    }
-                  : undefined,
-            },
-            signal,
-            retries,
-          );
-        };
-        const send = async (
-          entities: typeof part.entities,
-          retries?: number,
-        ) => {
-          try {
-            return await post(entities, retries);
-          } catch (error) {
-            if (migrated) throw error;
-            const next = await this.#recordMigration(chatId, error);
-            if (!next) throw error;
-            chatId = next;
-            migrated = true;
-            return post(entities, 0);
-          }
-        };
-        const sent = record(
-          await send(entities).catch((error: unknown) => {
+        const sent = await send('sendMessage', { ...body, entities }).catch(
+          (error: unknown) => {
             if (
               message.format !== 'markdown' ||
               message.approval ||
@@ -364,17 +420,10 @@ export class TelegramAdapter implements PlatformAdapter {
             )
               throw error;
             this.#ctx?.logWarning?.('telegram.entities_rejected');
-            return send(undefined, 0);
-          }),
+            return send('sendMessage', body, 0);
+          },
         );
-        const messageId = nativeId(sent?.message_id);
-        if (!messageId) throw new BotApiError('sendMessage', undefined);
-        parts.push({
-          ...(chatId === message.chatId ? {} : { chatId }),
-          messageId,
-          text,
-          raw: { message_id: sent?.message_id },
-        });
+        parts.push({ ...sent, text });
       }
     } catch (error) {
       throw new SendFailure(
@@ -574,7 +623,9 @@ export default definePlugin({
         throw new Error(
           'Telegram requires tokenEnv with a configured credential',
         );
-      return new TelegramAdapter({ fetch: ctx.fetch }, config.id, token);
+      return new TelegramAdapter({ fetch: ctx.fetch }, config.id, token, {
+        richMessages: config.richMessages,
+      });
     },
   },
 });

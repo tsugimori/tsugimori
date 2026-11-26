@@ -2,7 +2,7 @@ import type { AdapterCursor, InboundEvent } from '@tsugimori/plugin-sdk';
 
 import { SendFailure } from '@tsugimori/plugin-sdk';
 import assert from 'node:assert/strict';
-import { test } from 'node:test';
+import { test, type TestContext } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 
 import { splitText, TelegramAdapter } from '../src/index.ts';
@@ -782,3 +782,398 @@ test(
     assert.deepEqual(logged, ['telegram.poll_retry']);
   },
 );
+
+const priceTable = '| Item | Cost |\n| --- | --- |\n| **Plan** | $400-600K |';
+const tableReply = {
+  chatId: '-1001',
+  format: 'markdown',
+  replyTo: '21',
+  text: priceTable,
+  threadId: '17',
+} as const;
+
+async function tableAdapter(
+  t: TestContext,
+  richMessages = false,
+  post?: (method: string, count: number) => Promise<Response>,
+) {
+  const calls: { body: Record<string, unknown>; method: string }[] = [];
+  const warnings: { event: string; reason?: string }[] = [];
+  const fetch: typeof globalThis.fetch = async (input, init) => {
+    const method = new URL(String(input)).pathname.split('/').at(-1)!;
+    switch (method) {
+      case 'getMe':
+        return ok(me);
+      case 'getUpdates':
+        return longPoll(init);
+      default:
+        assert.equal(typeof init?.body, 'string');
+        calls.push({ method, body: JSON.parse(String(init?.body)) });
+        return post?.(method, calls.length) ?? ok({ message_id: calls.length });
+    }
+  };
+  const adapter = new TelegramAdapter({ fetch }, 'tg', '1:fake', {
+    richMessages,
+  });
+  t.after(() => adapter.stop());
+  await adapter.start({
+    emit: async () => {},
+    getUser: (id) =>
+      id === '79' ? { display: null, username: 'example_user' } : undefined,
+    logWarning: (event, reason) => warnings.push({ event, reason }),
+  });
+  return { adapter, calls, warnings };
+}
+
+test('Telegram without rich messages sends tables as formatted bullet groups', async (t) => {
+  const { adapter, calls } = await tableAdapter(t);
+  assert.equal(adapter.capabilities.richText, false);
+  const receipt = await adapter.send(tableReply);
+  assert.deepEqual(calls, [
+    {
+      method: 'sendMessage',
+      body: {
+        chat_id: '-1001',
+        message_thread_id: 17,
+        reply_parameters: { message_id: 21, allow_sending_without_reply: true },
+        text: 'Plan\n• Cost: $400-600K',
+        entities: [{ type: 'bold', offset: 0, length: 4 }],
+      },
+    },
+  ]);
+  assert.equal(receipt.messageId, '1');
+});
+
+test('Telegram sends native tables with explicit blocks, thread and reply parameters', async (t) => {
+  const { adapter, calls } = await tableAdapter(t, true);
+  assert.equal(adapter.capabilities.richText, true);
+  const receipt = await adapter.send(tableReply);
+  assert.deepEqual(calls, [
+    {
+      method: 'sendRichMessage',
+      body: {
+        chat_id: '-1001',
+        message_thread_id: 17,
+        reply_parameters: { message_id: 21, allow_sending_without_reply: true },
+        rich_message: {
+          blocks: [
+            {
+              type: 'table',
+              cells: [
+                [
+                  {
+                    text: 'Item',
+                    is_header: true,
+                    align: 'left',
+                    valign: 'top',
+                  },
+                  {
+                    text: 'Cost',
+                    is_header: true,
+                    align: 'left',
+                    valign: 'top',
+                  },
+                ],
+                [
+                  {
+                    text: { type: 'bold', text: 'Plan' },
+                    align: 'left',
+                    valign: 'top',
+                  },
+                  { text: '$400-600K', align: 'left', valign: 'top' },
+                ],
+              ],
+              is_bordered: true,
+            },
+          ],
+        },
+      },
+    },
+  ]);
+  assert.deepEqual(receipt, {
+    messageId: '1',
+    parts: [
+      {
+        messageId: '1',
+        text: 'Item\tCost\nPlan\t$400-600K',
+        raw: { message_id: 1 },
+      },
+    ],
+  });
+});
+
+test('assembles rich paragraphs, lists, headings, quotes, code and inline mentions', async (t) => {
+  const { adapter, calls } = await tableAdapter(t, true);
+  await adapter.send({
+    ...tableReply,
+    mentions: ['79', '81'],
+    text: [
+      '## Heading',
+      '*intro* and ~~old~~',
+      '- [link](https://example.test)',
+      '  2. nested',
+      '> Quote',
+      '```ts',
+      'const cost = "$400-600K";',
+      '```',
+      '| Item | Owner |',
+      '| --- | --- |',
+      '| `key` | [Alex](tg://user?id=79) and [Pat](tg://user?id=80) |',
+    ].join('\n'),
+  });
+  assert.equal(calls[0]?.method, 'sendRichMessage');
+  assert.deepEqual(calls[0]?.body.rich_message, {
+    blocks: [
+      { type: 'heading', size: 2, text: 'Heading' },
+      {
+        type: 'paragraph',
+        text: [
+          { type: 'italic', text: 'intro' },
+          ' and ',
+          { type: 'strikethrough', text: 'old' },
+        ],
+      },
+      {
+        type: 'list',
+        items: [
+          {
+            blocks: [
+              {
+                type: 'paragraph',
+                text: {
+                  type: 'url',
+                  text: 'link',
+                  url: 'https://example.test',
+                },
+              },
+              {
+                type: 'list',
+                items: [
+                  {
+                    type: '1',
+                    value: 2,
+                    blocks: [{ type: 'paragraph', text: 'nested' }],
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+      { type: 'blockquote', blocks: [{ type: 'paragraph', text: 'Quote' }] },
+      { type: 'pre', text: 'const cost = "$400-600K";', language: 'ts' },
+      {
+        type: 'table',
+        is_bordered: true,
+        cells: [
+          [
+            { text: 'Item', is_header: true, align: 'left', valign: 'top' },
+            { text: 'Owner', is_header: true, align: 'left', valign: 'top' },
+          ],
+          [
+            {
+              text: { type: 'code', text: 'key' },
+              align: 'left',
+              valign: 'top',
+            },
+            {
+              text: [
+                {
+                  type: 'mention',
+                  text: '@example_user',
+                  username: 'example_user',
+                },
+                ' and ',
+                { type: 'text_mention', text: 'Pat', user: { id: 80 } },
+              ],
+              align: 'left',
+              valign: 'top',
+            },
+          ],
+        ],
+      },
+      {
+        type: 'paragraph',
+        text: { type: 'text_mention', text: 'user 81', user: { id: 81 } },
+      },
+    ],
+  });
+});
+
+test('keeps non-table, approval, and button messages on sendMessage with rich messages enabled', async (t) => {
+  const { adapter, calls } = await tableAdapter(t, true);
+  const buttons = [{ label: 'Approve', id: 'approval:once:1' }];
+  await adapter.send({ ...tableReply, text: 'Hello **world**' });
+  await adapter.send({ ...tableReply, text: '```\n' + priceTable + '\n```' });
+  await adapter.send({ ...tableReply, approval: true, buttons });
+  await adapter.send({ ...tableReply, buttons });
+  assert.deepEqual(
+    calls.map(({ method }) => method),
+    Array(4).fill('sendMessage'),
+  );
+  assert.deepEqual(
+    calls.map(({ body }) => body.text),
+    ['Hello world', priceTable, priceTable, 'Plan\n• Cost: $400-600K'],
+  );
+  for (const { body } of calls.slice(2))
+    assert.deepEqual(body.reply_markup, {
+      inline_keyboard: [
+        [{ text: 'Approve', callback_data: 'approval:once:1' }],
+      ],
+    });
+});
+
+test('applies the scheduled mention guard to rich text and still adds approved recipients', async (t) => {
+  const { adapter, calls } = await tableAdapter(t, true);
+  for (const mention of [
+    '[Alex](tg://user?id=79)',
+    '@[Alex](https://example.test)',
+    '[@someone](https://example.test)',
+    '[Alex](https://t.me/example_user)',
+  ])
+    await assert.rejects(
+      adapter.send({
+        ...tableReply,
+        allowTextMentions: false,
+        text: priceTable.replace('**Plan**', mention),
+      }),
+      (error) =>
+        error instanceof SendFailure &&
+        error.cause instanceof Error &&
+        /unapproved mention/.test(error.cause.message) &&
+        !error.deliveryUnknown,
+    );
+  assert.equal(calls.length, 0);
+  await adapter.send({
+    ...tableReply,
+    allowTextMentions: false,
+    mentions: ['79'],
+  });
+  assert.equal(calls[0]?.method, 'sendRichMessage');
+});
+
+test('falls back to bullets for rich limits and logs only the reason', async (t) => {
+  const { adapter, calls, warnings } = await tableAdapter(t, true);
+  const row = (f: (index: number) => string) =>
+    '| ' + Array.from({ length: 21 }, (_, i) => f(i)).join(' | ') + ' |';
+  const wide = [
+    row((i) => 'Col' + i),
+    row(() => '---'),
+    row((i) => 'value' + i),
+  ].join('\n');
+  const cases = [
+    { text: wide, reason: 'table_columns', start: 'value0\n• Col1: value1' },
+    {
+      text: priceTable + '\n\n' + 'a'.repeat(32_768),
+      reason: 'character_limit',
+      start: 'Plan\n• Cost: $400-600K',
+    },
+    {
+      text: priceTable + '\n' + '| x | y |\n'.repeat(498),
+      reason: 'block_limit',
+      start: 'Plan\n• Cost: $400-600K',
+    },
+    {
+      text: priceTable + '\n\n' + '> '.repeat(17) + 'deep',
+      reason: 'nesting_limit',
+      start: 'Plan\n• Cost: $400-600K',
+    },
+    {
+      text: priceTable
+        .split('\n')
+        .map((line) => '> '.repeat(22) + line)
+        .join('\n'),
+      reason: 'nesting_limit',
+      start: 'Plan\n• Cost: $400-600K',
+    },
+  ];
+  for (const { text, reason, start } of cases) {
+    const first = calls.length;
+    await adapter.send({ ...tableReply, text });
+    assert.ok(
+      calls.slice(first).every(({ method }) => method === 'sendMessage'),
+    );
+    assert.ok(String(calls[first]?.body.text).startsWith(start));
+    assert.deepEqual(warnings.at(-1), {
+      event: 'telegram.rich_fallback',
+      reason,
+    });
+  }
+  assert.equal(warnings.length, cases.length);
+});
+
+test('falls back to bullets after a rich 400 and preserves the send receipt', async (t) => {
+  const { adapter, calls, warnings } = await tableAdapter(
+    t,
+    true,
+    async (method) =>
+      method === 'sendRichMessage'
+        ? Response.json(
+            {
+              ok: false,
+              error_code: 400,
+              description: 'Rejected message content',
+            },
+            { status: 400 },
+          )
+        : ok({ message_id: 68 }),
+  );
+  const receipt = await adapter.send(tableReply);
+  assert.deepEqual(
+    calls.map(({ method }) => method),
+    ['sendRichMessage', 'sendMessage'],
+  );
+  assert.deepEqual(calls[1]?.body, {
+    chat_id: '-1001',
+    message_thread_id: 17,
+    reply_parameters: { message_id: 21, allow_sending_without_reply: true },
+    text: 'Plan\n• Cost: $400-600K',
+    entities: [{ type: 'bold', offset: 0, length: 4 }],
+  });
+  assert.equal(receipt.messageId, '68');
+  assert.deepEqual(warnings, [
+    { event: 'telegram.rich_fallback', reason: 'api_400' },
+  ]);
+});
+
+test('does not send another message after an uncertain rich delivery', async (t) => {
+  for (const status of [null, 503]) {
+    const { adapter, calls, warnings } = await tableAdapter(
+      t,
+      true,
+      async () => {
+        if (status === null) throw new Error('Connection closed');
+        return Response.json({ ok: false }, { status });
+      },
+    );
+    await assert.rejects(
+      adapter.send(tableReply),
+      (error) => error instanceof SendFailure && error.deliveryUnknown,
+    );
+    assert.deepEqual(
+      calls.map(({ method }) => method),
+      ['sendRichMessage'],
+    );
+    assert.deepEqual(warnings, []);
+  }
+});
+
+test('retries a rate-limited rich message as a rich message', async (t) => {
+  const { adapter, calls, warnings } = await tableAdapter(
+    t,
+    true,
+    async (_method, count) =>
+      count === 1
+        ? Response.json(
+            { ok: false, error_code: 429, parameters: { retry_after: 0 } },
+            { status: 429 },
+          )
+        : ok({ message_id: 79 }),
+  );
+  assert.equal((await adapter.send(tableReply)).messageId, '79');
+  assert.deepEqual(
+    calls.map(({ method }) => method),
+    ['sendRichMessage', 'sendRichMessage'],
+  );
+  assert.deepEqual(warnings, []);
+});

@@ -76,14 +76,31 @@
               "properties": {
                 "kind": {
                   "const": "telegram"
-                },
-                "enabled": {
-                  "const": true
                 }
               }
             },
             "then": {
-              "required": ["tokenEnv"]
+              "properties": {
+                "richMessages": {
+                  "type": "boolean",
+                  "default": false
+                }
+              },
+              "if": {
+                "properties": {
+                  "enabled": {
+                    "const": true
+                  }
+                }
+              },
+              "then": {
+                "required": ["tokenEnv"]
+              }
+            },
+            "else": {
+              "properties": {
+                "richMessages": false
+              }
             }
           },
           {

@@ -898,6 +898,7 @@ export class Tasks {
         const entries = await context.assembleWithRefs({
           ...chat,
           kind: adapter.kind,
+          richText: adapter.capabilities.richText,
           ownerId: auth.owner(chat.adapterId),
           recentMessages: runtime.config.context.recentMessages,
           throughSeq: input.seq,

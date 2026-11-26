@@ -122,6 +122,8 @@ export class BotApi {
     signal: AbortSignal,
     retries = 2,
   ): Promise<unknown> {
+    const sendsMessage =
+      method === 'sendMessage' || method === 'sendRichMessage';
     for (let attempt = 0; ; attempt++) {
       try {
         return await this.#post(method, body, signal);
@@ -129,8 +131,7 @@ export class BotApi {
         if (
           !(error instanceof BotApiError) ||
           attempt >= retries ||
-          (error.code !== 429 &&
-            (method === 'sendMessage' || !error.unknownDelivery))
+          (error.code !== 429 && (sendsMessage || !error.unknownDelivery))
         )
           throw error;
         await delay(error.retryAfter ?? 250 * 2 ** attempt, undefined, {

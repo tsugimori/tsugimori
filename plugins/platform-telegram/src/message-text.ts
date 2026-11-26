@@ -1,22 +1,26 @@
 import type {
   AdapterContext,
+  MarkdownBlock,
   MarkdownEntity,
+  MarkdownText,
   OutboundMessage,
   TextRange,
 } from '@tsugimori/plugin-sdk';
 
 import {
   containsMention,
-  renderMarkdown,
+  parseMarkdown,
+  renderMarkdownBlocks,
   userMentionLinks,
 } from '@tsugimori/plugin-sdk';
 
 export const maxMessage = 4096;
+export const maxRichNesting = 16;
 
 type TelegramEntity =
   | Exclude<MarkdownEntity, { type: 'mention' }>
   | (TextRange & { type: 'text_mention'; user: { id: number } });
-type TelegramSpan = TelegramEntity | (TextRange & { type: 'mention' });
+export type TelegramSpan = TelegramEntity | (TextRange & { type: 'mention' });
 
 function splitMessage(text: string, spans: TelegramSpan[], limit = maxMessage) {
   const parts: { entities?: TelegramEntity[]; text: string }[] = [];
@@ -104,117 +108,199 @@ function sourceEntities({ entities, text }: OutboundMessage) {
   return ordered;
 }
 
+export type TelegramText = { entities: TelegramSpan[]; text: string };
+
+function containsTable(blocks: MarkdownBlock[]): boolean {
+  return blocks.some(
+    (block) =>
+      block.type === 'table' ||
+      (block.type === 'quote' && containsTable(block.blocks)),
+  );
+}
+
+export function parseTelegramMarkdown(message: OutboundMessage) {
+  const explicit = new Map(
+    sourceEntities(message).map((entity) => [entity.offset, entity]),
+  );
+  const parse = (nesting: number) =>
+    parseMarkdown(message.text, explicit, message.parseTextMentions !== false, {
+      tables: 'bullets',
+      nesting,
+      foldQuotes: nesting > 1,
+    });
+  if (
+    message.text.includes('|') &&
+    /^ {0,3}>[ \t]? {0,3}>/mu.test(message.text)
+  ) {
+    // Keep deeper quotes for table replies and retain the existing handling for other messages.
+    const blocks = parse(maxRichNesting + 1);
+    if (containsTable(blocks)) return { blocks, hasTable: true };
+  }
+  const blocks = parse(1);
+  return { blocks, hasTable: containsTable(blocks) };
+}
+
+export function appendRemainingMentions(
+  output: TelegramText,
+  mentions: ReadonlySet<string>,
+  getUser?: AdapterContext['getUser'],
+) {
+  let separator = '';
+  for (const userId of mentions) {
+    output.text += separator;
+    appendMention(output, getUser, userId);
+    separator = ' ';
+  }
+}
+
+function appendMention(
+  output: TelegramText,
+  getUser: AdapterContext['getUser'],
+  userId: string,
+  label?: string,
+  following = '',
+) {
+  const id = Number(userId);
+  if (!/^[1-9]\d{0,15}$/.test(userId) || id > 2 ** 52 - 1)
+    throw new Error('Expected a native user ID for Telegram mention');
+  const user = getUser?.(userId);
+  const username =
+    user?.username && /^[a-z0-9_]{2,32}$/i.test(user.username)
+      ? user.username
+      : undefined;
+  const name = username
+    ? '@' + username
+    : label || user?.display || 'user ' + userId;
+  // Telegram ignores @usernames adjacent to letters or numbers, including CJK.
+  if (username && /[\p{L}\p{N}_]$/u.test(output.text)) output.text += ' ';
+  const range = { offset: output.text.length, length: name.length };
+  output.entities.push(
+    username
+      ? { ...range, type: 'mention' }
+      : { ...range, type: 'text_mention', user: { id } },
+  );
+  output.text += name;
+  if (username && /^[\p{L}\p{N}_]/u.test(following)) output.text += ' ';
+}
+
+export function telegramMarkdownText(
+  rendered: MarkdownText,
+  message: OutboundMessage,
+  mentions: Set<string>,
+  getUser?: AdapterContext['getUser'],
+): TelegramText {
+  const output: TelegramText = { text: '', entities: [] };
+  let end = 0;
+  if (
+    message.allowTextMentions === false &&
+    (containsMention(rendered.text) ||
+      rendered.entities.some(
+        (entity) =>
+          entity.type === 'mention' ||
+          (entity.type === 'text_link' && containsMention(entity.url)),
+      ))
+  )
+    throw new Error('Scheduled response contains an unapproved mention');
+  const replacements: { end: number; shift: number }[] = [];
+  for (const entity of rendered.entities
+    .filter((entity) => entity.type === 'mention')
+    .sort((a, b) => a.offset - b.offset)) {
+    const { offset, length, userId } = entity;
+    output.text += rendered.text.slice(end, offset);
+    end = offset + length;
+    appendMention(
+      output,
+      getUser,
+      userId,
+      rendered.text.slice(offset, end),
+      rendered.text.slice(end, end + 2),
+    );
+    mentions.delete(userId);
+    replacements.push({ end, shift: output.text.length - end });
+  }
+  output.text += rendered.text.slice(end);
+  for (const entity of rendered.entities) {
+    if (entity.type === 'mention') continue;
+    const offset = shiftedOffset(entity.offset, replacements);
+    const length =
+      shiftedOffset(entity.offset + entity.length, replacements) - offset;
+    output.entities.push({ ...entity, offset, length });
+  }
+  return output;
+}
+
 export function telegramMessageParts(
   message: OutboundMessage,
   getUser?: AdapterContext['getUser'],
+  markdown?: MarkdownBlock[],
 ) {
   // Leave room to append the localized decision without replacing preview text.
   const limit = message.approval ? maxMessage - 64 : maxMessage;
-  const spans: TelegramSpan[] = [];
-  let text = '';
-  const mention = (userId: string, label?: string, following = '') => {
-    const id = Number(userId);
-    if (!/^[1-9]\d{0,15}$/.test(userId) || id > 2 ** 52 - 1)
-      throw new Error('Expected a native user ID for Telegram mention');
-    const user = getUser?.(userId);
-    const username =
-      user?.username && /^[a-z0-9_]{2,32}$/i.test(user.username)
-        ? user.username
-        : undefined;
-    const name = username
-      ? '@' + username
-      : label || user?.display || 'user ' + userId;
-    // Telegram ignores @usernames adjacent to letters or numbers, including CJK.
-    if (username && /[\p{L}\p{N}_]$/u.test(text)) text += ' ';
-    const range = { offset: text.length, length: name.length };
-    spans.push(
-      username
-        ? { ...range, type: 'mention' }
-        : { ...range, type: 'text_mention', user: { id } },
-    );
-    text += name;
-    if (username && /^[\p{L}\p{N}_]/u.test(following)) text += ' ';
-  };
+  let output: TelegramText = { text: '', entities: [] };
   let end = 0;
   const mentions = new Set(message.mentions);
-  const explicit = sourceEntities(message);
   if (message.format === 'markdown' && !message.approval) {
-    const rendered = renderMarkdown(
-      message.text,
-      new Map(explicit.map((entity) => [entity.offset, entity])),
-      message.parseTextMentions !== false,
+    const rendered = renderMarkdownBlocks(
+      markdown ?? parseTelegramMarkdown(message).blocks,
     );
-    if (
-      message.allowTextMentions === false &&
-      (containsMention(rendered.text) ||
-        rendered.entities.some(
-          (entity) =>
-            entity.type === 'mention' ||
-            (entity.type === 'text_link' && containsMention(entity.url)),
-        ))
-    )
-      throw new Error('Scheduled response contains an unapproved mention');
-    const replacements: { end: number; shift: number }[] = [];
-    for (const entity of rendered.entities
-      .filter((entity) => entity.type === 'mention')
-      .sort((a, b) => a.offset - b.offset)) {
-      const { offset, length, userId } = entity;
-      text += rendered.text.slice(end, offset);
-      end = offset + length;
-      mention(
-        userId,
-        rendered.text.slice(offset, end),
-        rendered.text.slice(end, end + 2),
-      );
-      mentions.delete(userId);
-      replacements.push({ end, shift: text.length - end });
-    }
-    text += rendered.text.slice(end);
-    for (const entity of rendered.entities) {
-      if (entity.type === 'mention') continue;
-      const offset = shiftedOffset(entity.offset, replacements);
-      const length =
-        shiftedOffset(entity.offset + entity.length, replacements) - offset;
-      spans.push({ ...entity, offset, length });
-    }
+    output = telegramMarkdownText(rendered, message, mentions, getUser);
   } else if (message.entities) {
+    const explicit = sourceEntities(message);
     if (!message.text) throw new Error('Empty Telegram message');
     for (const entity of explicit) {
       const { offset, length } = entity;
-      text += message.text.slice(end, offset);
+      output.text += message.text.slice(end, offset);
       end = offset + length;
       const label = message.text.slice(offset, end);
       if (entity.type === 'mention') {
-        mention(entity.userId, label, message.text.slice(end, end + 2));
+        appendMention(
+          output,
+          getUser,
+          entity.userId,
+          label,
+          message.text.slice(end, end + 2),
+        );
       } else {
-        spans.push({ type: entity.type, offset: text.length, length });
-        text += label;
+        output.entities.push({
+          type: entity.type,
+          offset: output.text.length,
+          length,
+        });
+        output.text += label;
       }
     }
-    return splitMessage(text + message.text.slice(end), spans, limit);
+    return splitMessage(
+      output.text + message.text.slice(end),
+      output.entities,
+      limit,
+    );
   } else {
     if (message.parseTextMentions !== false) {
       for (const { start, end: next, label, userId } of userMentionLinks(
         message.text,
       )) {
-        text += message.text.slice(end, start);
-        mention(userId, label, message.text.slice(next, next + 2));
+        output.text += message.text.slice(end, start);
+        appendMention(
+          output,
+          getUser,
+          userId,
+          label,
+          message.text.slice(next, next + 2),
+        );
         mentions.delete(userId);
         end = next;
       }
     }
-    text += message.text.slice(end);
+    output.text += message.text.slice(end);
   }
-  if (mentions.size && text) text += '\n\n';
-  for (const [index, userId] of [...mentions].entries()) {
-    if (index) text += ' ';
-    mention(userId);
-  }
+  if (mentions.size && output.text) output.text += '\n\n';
+  appendRemainingMentions(output, mentions, getUser);
+  const { text } = output;
   // Telegram rejects messages containing only whitespace.
   if (message.format === 'markdown' && !text.trim() && message.text.trim())
     return splitMessage(message.text, [], limit);
   if (!text) throw new Error('Empty Telegram message');
-  return splitMessage(text, spans, limit);
+  return splitMessage(text, output.entities, limit);
 }
 
 function shiftedOffset(

@@ -1,5 +1,13 @@
-export type { MarkdownEntity } from './markdown.ts';
-export { renderMarkdown } from './markdown.ts';
+export type {
+  MarkdownBlock,
+  MarkdownEntity,
+  MarkdownText,
+} from './markdown.ts';
+export {
+  parseMarkdown,
+  renderMarkdown,
+  renderMarkdownBlocks,
+} from './markdown.ts';
 
 import type { TriggerReason } from './admin.ts';
 import type {
@@ -200,7 +208,7 @@ export interface AdapterContext {
   loadCursor?(stream: string): AdapterCursor | undefined;
   logDebug?(event: string): void;
   logError?(event: string, error?: unknown): void;
-  logWarning?(event: string): void;
+  logWarning?(event: string, reason?: string): void;
   ready?: Promise<void>;
   resolveChatId?(chatId: string): string;
   saveCursor?(stream: string, cursor: AdapterCursor): void;
@@ -583,6 +591,7 @@ export interface PluginInstanceConfig {
 
 export interface PlatformInstanceConfig extends PluginInstanceConfig {
   [option: string]: unknown;
+  richMessages?: boolean;
   tokenEnv?: string;
 }
 

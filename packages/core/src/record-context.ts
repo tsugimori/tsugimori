@@ -6,7 +6,11 @@ import type {
 } from '@tsugimori/plugin-sdk';
 import type { Store, TaskRecord } from '@tsugimori/storage';
 
-import { guidelineBlock, guidelineFileBlock } from '@tsugimori/context';
+import {
+  guidelineBlock,
+  guidelineFileBlock,
+  telegramTableBlocks,
+} from '@tsugimori/context';
 import { scheduleReplyStyle } from '@tsugimori/scheduler';
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -106,21 +110,29 @@ export async function reconstructContext(
   );
   return refs.order.flatMap((entry): AdminTaskRecord['context'] => {
     switch (entry.kind) {
-      case 'system':
-        return [
-          {
-            kind: 'fixed',
-            title:
-              entry.name === 'guidelines'
-                ? 'System guidelines'
-                : 'Scheduled reply style',
-            ref: refs.tsugimori.commit,
-            text:
-              entry.name === 'guidelines'
-                ? guidelineBlock.content
-                : scheduleReplyStyle,
+      case 'system': {
+        const system = {
+          guidelines: {
+            title: 'System guidelines',
+            text: guidelineBlock.content,
           },
+          'schedule-style': {
+            title: 'Scheduled reply style',
+            text: scheduleReplyStyle,
+          },
+          'telegram-tables-bullets': {
+            title: 'Telegram table formatting',
+            text: telegramTableBlocks['telegram-tables-bullets'].content,
+          },
+          'telegram-tables-rich': {
+            title: 'Telegram table formatting',
+            text: telegramTableBlocks['telegram-tables-rich'].content,
+          },
+        };
+        return [
+          { kind: 'fixed', ref: refs.tsugimori.commit, ...system[entry.name] },
         ];
+      }
       case 'rule': {
         const section = fixed[entry.index];
         return section ? [section] : [];

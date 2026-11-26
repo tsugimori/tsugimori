@@ -94,6 +94,23 @@ test('reconstructs rules from Git and deduplicated dirty snapshots', async (t) =
     ),
     entries.map(({ block }) => block.content),
   );
+  const telegram = await reconstructContext(store, workspace, task, {
+    ...record,
+    refs: {
+      ...record.refs,
+      order: [
+        { kind: 'system', name: 'telegram-tables-bullets' },
+        { kind: 'system', name: 'telegram-tables-rich' },
+      ],
+    },
+  });
+  assert.deepEqual(
+    telegram.map(({ text }) => text),
+    [
+      'Telegram shows Markdown tables as bullet lists; prefer short lists or sections over tables.',
+      'Telegram renders Markdown tables natively; keep tables to 20 columns or fewer.',
+    ],
+  );
   const noRepo = await mkdtemp(join(tmpdir(), 'tsm-records-'));
   t.after(() => rm(noRepo, { recursive: true, force: true }));
   const nonGit = await ruleReferences(noRepo, entries, store);

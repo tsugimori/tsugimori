@@ -39,6 +39,8 @@ Keep the deployment workspace separate from the framework checkout. Chat rules t
 
 The deployment workspace can be a Git checkout. Use its `.gitignore` to whitelist guideline files only. The `memory.propose` tool requests linked owner approval to add, replace, or remove a bullet in `MEMORY.md`. If the workspace checkout has an `origin`, the gateway commits and pushes the approved edit. The approval result reports any Git failure, and the file edit stays in place.
 
+Telegram platform entries can set `richMessages` to `true` for native Markdown tables on supported clients. The default shows tables as bullet groups. The setting reloads while the gateway is running. [Telegram configuration](plugins/platform-telegram/README.md#configuration)
+
 An agent can stay silent by returning `NO_REPLY: <short reason>` on a single line. A bare `NO_REPLY` also works. The console shows the reason, and any required approval notice still goes out.
 
 ### Execution records
@@ -96,7 +98,7 @@ Agents can use `history.search` to find matching text in the current conversatio
 | `/previews`                                 | Owner                                                     | Lists open previews on this adapter.                                                                        |
 | `/preview close <id>`                       | Owner                                                     | Closes a preview on this adapter.                                                                           |
 
-`/status` uses the workspace locale and time zone. The header shows health, build information when available, and uptime. **This chat** shows the agent implementation and effective model, effort, and speed. When available, it adds context usage, session age, cached quota, last compaction and count, summary coverage, running or queued work, approvals, and schedules. **System** lists platform and agent states, sandbox availability, and the count of failed environment checks. The card uses cached provider information and local state, and shows today's timestamps without a date.
+`/status` uses the workspace locale and time zone. The header shows health, build information when available, and uptime. **This chat** shows the agent implementation and effective model, effort, and speed. When available, it adds context usage, session age, cached quota, last compaction and count, summary coverage, running or queued work, approvals, and schedules. **System** lists platform and agent states, the rich message setting for each Telegram instance, sandbox availability, and the count of failed environment checks. The card uses cached provider information and local state, and shows today's timestamps without a date.
 
 ### Approvals and schedules
 

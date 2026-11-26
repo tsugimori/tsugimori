@@ -11,7 +11,28 @@ export type MarkdownEntity = TextRange &
     | { type: 'text_link'; url: string }
   );
 
-type Formatted = { entities: MarkdownEntity[]; text: string };
+export type MarkdownText = { entities: MarkdownEntity[]; text: string };
+type Formatted = MarkdownText;
+
+export type MarkdownBlock = { lineBreak: boolean } & (
+  | { type: 'blank' | 'literal' | 'paragraph' | 'rule'; value: MarkdownText }
+  | { size: number; type: 'heading'; value: MarkdownText }
+  | { language?: string; type: 'pre'; value: MarkdownText }
+  | {
+      indent: number;
+      marker: string;
+      number?: number;
+      pre?: string;
+      type: 'item';
+      value: MarkdownText;
+    }
+  | { blocks: MarkdownBlock[]; type: 'quote' }
+  | { rows: MarkdownText[][]; type: 'table'; value: MarkdownText }
+);
+
+interface MarkdownOptions {
+  tables?: 'bullets' | 'pre';
+}
 type Delimiter = { marker: string; token: number; width: number };
 type StylePair = { first: number; last: number; type: Style };
 
@@ -20,6 +41,7 @@ const tableRow = /\|/u;
 const tableDivider =
   /^ {0,3}\|?[ \t]*:?-+:?[ \t]*(?:\|[ \t]*:?-+:?[ \t]*)*\|?[ \t]*$/u;
 const quote = /^ {0,3}>[ \t]?/u;
+const nestedQuotes = /^(?: {0,3}>[ \t]?)+/u;
 const heading = /^ {0,3}#{1,6}(?:[ \t]+|$)/u;
 const bullet = /^( *?)[*-][ \t]+/u;
 const numbered = /^ *\d{1,9}[.)][ \t]+/u;
@@ -109,12 +131,7 @@ function renderInline(
     }
     if (char === '`') {
       const end = runEnd(source, pos);
-      let close = source.indexOf(source.slice(pos, end), end);
-      while (
-        close >= 0 &&
-        (source[close - 1] === '`' || source[close + end - pos] === '`')
-      )
-        close = source.indexOf(source.slice(pos, end), runEnd(source, close));
+      const close = codeClosing(source, pos, end);
       if (close >= 0) {
         let text = source.slice(end, close).replace(/\r?\n/g, ' ');
         if (text.startsWith(' ') && text.endsWith(' ') && /[^ ]/u.test(text))
@@ -292,12 +309,68 @@ function runEnd(text: string, start: number) {
   return end;
 }
 
-export function renderMarkdown(
+function codeClosing(source: string, start: number, end: number) {
+  const marker = source.slice(start, end);
+  let close = source.indexOf(marker, end);
+  while (
+    close >= 0 &&
+    (source[close - 1] === '`' || source[close + marker.length] === '`')
+  )
+    close = source.indexOf(marker, runEnd(source, close));
+  return close;
+}
+
+function tableCells(line: string) {
+  const cells: { start: number; text: string }[] = [];
+  const add = (start: number, end: number) => {
+    const raw = line.slice(start, end);
+    const trimmed = raw.trimStart();
+    cells.push({
+      start: start + raw.length - trimmed.length,
+      text: trimmed.trimEnd(),
+    });
+  };
+  let start = 0;
+  for (let i = 0; i < line.length; i++) {
+    const char = line[i];
+    if (char === '\\' && /[!-\/:-@[-`{-~]/u.test(line[i + 1] ?? '')) {
+      i++;
+    } else if (char === '`') {
+      const end = runEnd(line, i);
+      const close = codeClosing(line, i, end);
+      i = close < 0 ? end - 1 : close + end - i - 1;
+    } else if (char === '|') {
+      if (cells.length || start || line.slice(0, i).trim()) add(start, i);
+      start = i + 1;
+    }
+  }
+  if (!start) return;
+  if (!cells.length || line.slice(start).trim()) add(start, line.length);
+  return cells;
+}
+
+function startsBlock(line: string, allowQuotes: boolean) {
+  const item = bullet.exec(line)?.[0] ?? numbered.exec(line)?.[0];
+  return (
+    !line.trim() ||
+    fence.test(line.slice(item?.length ?? 0)) ||
+    (allowQuotes && quote.test(line)) ||
+    heading.test(line) ||
+    item !== undefined ||
+    rule.test(line)
+  );
+}
+
+export function parseMarkdown(
   source: string,
   explicit: ReadonlyMap<number, TextEntity>,
   parseMentions: boolean,
-  allowQuotes = true,
-) {
+  {
+    tables = 'pre',
+    nesting = 1,
+    foldQuotes = false,
+  }: MarkdownOptions & { foldQuotes?: boolean; nesting?: number } = {},
+): MarkdownBlock[] {
   const offsets: number[] = [];
   let offset = 0;
   const lines = source.split('\n').map((raw) => {
@@ -305,13 +378,22 @@ export function renderMarkdown(
     offset += raw.length + 1;
     return raw.replace(/\r$/u, '');
   });
-  const output = literal('');
+  const blocks: MarkdownBlock[] = [];
   const inline = (text: string, start: number) =>
     renderInline(text, start, explicit, parseMentions);
-  const isTable = (index: number) =>
-    tableRow.test(lines[index] ?? '') &&
-    tableRow.test(lines[index + 1] ?? '') &&
-    tableDivider.test(lines[index + 1]!);
+  const isTable = (index: number) => {
+    const line = lines[index] ?? '';
+    const divider = lines[index + 1] ?? '';
+    if (!tableDivider.test(divider)) return false;
+    if (tables === 'pre') return tableRow.test(line) && tableRow.test(divider);
+    if (startsBlock(line, true)) return false;
+    const headerCells = tableCells(line);
+    const dividerCells = tableCells(divider);
+    return (
+      (headerCells !== undefined || dividerCells !== undefined) &&
+      (headerCells?.length ?? 1) === (dividerCells?.length ?? 1)
+    );
+  };
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]!;
     const start = offsets[i]!;
@@ -319,15 +401,21 @@ export function renderMarkdown(
     const number = numbered.exec(line)?.[0];
     const prefix = item?.[0] ?? number ?? '';
     const listMarker = item ? item[1] + '• ' : number;
+    const list = {
+      indent: prefix.length - prefix.trimStart().length,
+      marker: listMarker ?? '',
+      number: number === undefined ? undefined : Number.parseInt(number, 10),
+    };
     const fenced = fence.exec(line.slice(prefix.length));
     const headingPrefix = heading.exec(line)?.[0];
+    let block: MarkdownBlock;
     if (fenced) {
       const marker = (fenced[1] ?? fenced[3])!;
       const language = (fenced[2] ?? fenced[4])
         ?.trim()
         .match(/^[\w+#.-]+/u)?.[0];
       const closing = new RegExp(
-        '^ {0,3}' + marker[0] + '{' + marker.length + ',}[ \\t]*$',
+        '^ {0,3}' + marker[0] + '{' + marker.length + ',}[ \t]*$',
         'u',
       );
       const indent = ' '.repeat(prefix.length);
@@ -337,42 +425,66 @@ export function renderMarkdown(
       while (last < lines.length && !closing.test(content(lines[last]!)))
         last++;
       if (last === lines.length) {
-        output.text += source.slice(start);
+        blocks.push({
+          type: 'literal',
+          value: literal(source.slice(start)),
+          lineBreak: false,
+        });
         break;
       }
       const text = lines
         .slice(i + 1, last)
         .map(content)
         .join('\n');
-      if (listMarker) output.text += listMarker.trimEnd() + '\n';
-      if (text.trim())
-        append(output, {
-          text,
-          entities: [
-            {
-              type: 'pre',
-              offset: 0,
-              length: text.length,
-              ...(language ? { language } : {}),
-            },
-          ],
-        });
+      const value = literal(text.trim() ? text : '');
+      block = listMarker
+        ? {
+            ...list,
+            type: 'item',
+            value,
+            pre: language ?? '',
+            lineBreak: false,
+          }
+        : { type: 'pre', value, language, lineBreak: false };
       i = last;
     } else if (isTable(i)) {
       let last = i + 2;
-      while (last < lines.length && tableRow.test(lines[last]!)) last++;
-      const text = lines.slice(i, last).join('\n');
-      append(output, {
-        text,
-        entities: [{ type: 'pre', offset: 0, length: text.length }],
-      });
+      const rows: MarkdownText[][] = [];
+      if (tables === 'pre') {
+        while (last < lines.length && tableRow.test(lines[last]!)) last++;
+      } else {
+        const row = (index: number) => tableCells(lines[index]!);
+        const singleCell = (text: string) => [
+          { start: text.length - text.trimStart().length, text: text.trim() },
+        ];
+        const renderRow = (
+          cells: NonNullable<ReturnType<typeof tableCells>>,
+          index: number,
+        ) =>
+          cells.map(({ text, start }) => inline(text, offsets[index]! + start));
+        const headers = row(i) ?? singleCell(line);
+        rows.push(renderRow(headers, i));
+        while (last < lines.length && !startsBlock(lines[last]!, true)) {
+          const cells = row(last);
+          if (!cells && headers.length !== 1) break;
+          rows.push(renderRow(cells ?? singleCell(lines[last]!), last));
+          last++;
+        }
+      }
+      block = {
+        type: 'table',
+        rows,
+        value: literal(lines.slice(i, last).join('\n')),
+        lineBreak: false,
+      };
       i = last - 1;
-    } else if (allowQuotes && quote.test(line)) {
+    } else if (nesting > 0 && quote.test(line)) {
       const quoted: string[] = [];
       const entities = new Map<number, TextEntity>();
       let offset = 0;
       do {
-        const prefix = quote.exec(lines[i]!)![0];
+        const marker = foldQuotes && nesting === 1 ? nestedQuotes : quote;
+        const prefix = marker.exec(lines[i]!)![0];
         const text = lines[i]!.slice(prefix.length);
         const start = offsets[i]! + prefix.length;
         for (let j = 0; explicit.size && j < text.length; j++) {
@@ -384,58 +496,166 @@ export function renderMarkdown(
         if (!quote.test(lines[i + 1] ?? '')) break;
         i++;
       } while (true);
-      const part = renderMarkdown(
-        quoted.join('\n'),
-        entities,
-        parseMentions,
-        false,
-      );
-      if (part.text.trim())
-        part.entities.unshift({
-          type: 'blockquote',
-          offset: 0,
-          length: part.text.length,
-        });
-      append(output, part);
+      block = {
+        type: 'quote',
+        blocks: parseMarkdown(quoted.join('\n'), entities, parseMentions, {
+          tables,
+          nesting: nesting - 1,
+          foldQuotes,
+        }),
+        lineBreak: false,
+      };
     } else if (headingPrefix !== undefined) {
       const title = line
         .slice(headingPrefix.length)
         .replace(/[ \t]+#+[ \t]*$/u, '')
         .trimEnd();
-      const part = inline(title, start + headingPrefix.length);
-      part.entities = part.entities.filter(({ type }) => type !== 'bold');
-      style(part, 'bold', 0, part.text.length, codeRanges(part));
-      append(output, part);
+      block = {
+        type: 'heading',
+        size: headingPrefix.trim().length,
+        value: inline(title, start + headingPrefix.length),
+        lineBreak: false,
+      };
     } else if (rule.test(line)) {
-      output.text += line;
+      block = { type: 'rule', value: literal(line), lineBreak: false };
     } else if (listMarker) {
-      output.text += listMarker;
-      append(output, inline(line.slice(prefix.length), start + prefix.length));
+      block = {
+        ...list,
+        type: 'item',
+        value: inline(line.slice(prefix.length), start + prefix.length),
+        lineBreak: false,
+      };
     } else {
       let last = i + 1;
       while (line.trim() && last < lines.length) {
-        const next = lines[last]!;
-        if (
-          !next.trim() ||
-          fence.test(next) ||
-          (allowQuotes && quote.test(next)) ||
-          heading.test(next) ||
-          bullet.test(next) ||
-          numbered.test(next) ||
-          rule.test(next) ||
-          isTable(last)
-        )
-          break;
+        if (startsBlock(lines[last]!, nesting > 0) || isTable(last)) break;
         last++;
       }
       const end = last < lines.length ? offsets[last]! - 1 : source.length;
-      append(
-        output,
-        inline(source.slice(start, end).replace(/\r$/u, ''), start),
-      );
+      block = {
+        type: line.trim() ? 'paragraph' : 'blank',
+        value: inline(source.slice(start, end).replace(/\r$/u, ''), start),
+        lineBreak: false,
+      };
       i = last - 1;
     }
-    if (i < lines.length - 1) output.text += '\n';
+    block.lineBreak = i < lines.length - 1;
+    blocks.push(block);
+  }
+  return blocks;
+}
+
+function bold(part: Formatted): Formatted {
+  const output = {
+    ...part,
+    entities: part.entities.filter(({ type }) => type !== 'bold'),
+  };
+  style(output, 'bold', 0, part.text.length, codeRanges(part));
+  return output;
+}
+
+function pre(value: Formatted, language?: string): Formatted {
+  return value.text
+    ? {
+        text: value.text,
+        entities: [
+          {
+            type: 'pre',
+            offset: 0,
+            length: value.text.length,
+            ...(language ? { language } : {}),
+          },
+        ],
+      }
+    : value;
+}
+
+function tableBullets([headers = [], ...rows]: MarkdownText[][]): Formatted {
+  const output = literal('');
+  const single = headers.length === 1 && rows.every((row) => row.length === 1);
+  for (const [first, ...cells] of rows) {
+    const group = literal('');
+    if (first?.text.trim()) {
+      if (single) {
+        group.text = '• ';
+        append(group, first);
+      } else {
+        append(group, bold(first));
+      }
+    }
+    for (const [index, cell] of cells.entries()) {
+      if (!cell.text.trim()) continue;
+      if (group.text) group.text += '\n';
+      group.text += '• ';
+      const header = headers[index + 1];
+      if (header?.text) {
+        append(group, header);
+        group.text += ': ';
+      }
+      append(group, cell);
+    }
+    if (!group.text) continue;
+    if (output.text) output.text += single ? '\n' : '\n\n';
+    append(output, group);
   }
   return output;
+}
+
+export function renderMarkdownBlocks(blocks: MarkdownBlock[]): MarkdownText {
+  const output = literal('');
+  for (const block of blocks) {
+    switch (block.type) {
+      case 'heading':
+        append(output, bold(block.value));
+        break;
+      case 'item':
+        if (block.pre !== undefined) {
+          output.text += block.marker.trimEnd() + '\n';
+          append(output, pre(block.value, block.pre));
+        } else {
+          output.text += block.marker;
+          append(output, block.value);
+        }
+        break;
+      case 'pre':
+        append(output, pre(block.value, block.language));
+        break;
+      case 'quote': {
+        const part = renderMarkdownBlocks(block.blocks);
+        if (part.text.trim())
+          part.entities.unshift({
+            type: 'blockquote',
+            offset: 0,
+            length: part.text.length,
+          });
+        append(output, part);
+        break;
+      }
+      case 'table':
+        append(
+          output,
+          block.rows.length ? tableBullets(block.rows) : pre(block.value),
+        );
+        break;
+      default:
+        append(output, block.value);
+    }
+    if (block.lineBreak) output.text += '\n';
+  }
+  return output;
+}
+
+export function renderMarkdown(
+  source: string,
+  explicit: ReadonlyMap<number, TextEntity>,
+  parseMentions: boolean,
+  allowQuotes = true,
+  options: MarkdownOptions = {},
+) {
+  return renderMarkdownBlocks(
+    parseMarkdown(source, explicit, parseMentions, {
+      ...options,
+      nesting: allowQuotes ? 1 : 0,
+    }),
+  );
 }
