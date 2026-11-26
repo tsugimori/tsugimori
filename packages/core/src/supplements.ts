@@ -32,7 +32,10 @@ export class Supplements {
     return batch;
   }
 
-  async *stream(signal: AbortSignal): AsyncIterable<InboundMessage> {
+  async *stream(
+    signal: AbortSignal,
+    onDelivery?: (message: InboundMessage) => void,
+  ): AsyncIterable<InboundMessage> {
     const wake = () => this.#wake();
     signal.addEventListener('abort', wake);
     try {
@@ -40,6 +43,7 @@ export class Supplements {
         const input = this.#queue.shift();
         if (input) {
           this.delivered.add(input.seq);
+          onDelivery?.(input.message);
           yield input.message;
         } else {
           await this.#available.promise;

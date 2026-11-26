@@ -8,6 +8,7 @@
   import { i18n } from '../lib/i18n.ts';
   import Message from './Message.svelte';
   import TaskLanes from './TaskLanes.svelte';
+  import TaskRecord from './TaskRecord.svelte';
   import ToolRow from './ToolRow.svelte';
 
   type MessageItem = AdminConversation['messages'][number];
@@ -100,6 +101,7 @@
           {task.error || m.taskError}
         </p>{/if}
       <TaskLanes {task} start={started} {end} locale={ctx.locale} />
+      {#if !preview}<TaskRecord taskId={task.id} {ctx} />{/if}
     {/if}
     {#if messages.length || (open && task.tools.length)}
       <ol class="tools">

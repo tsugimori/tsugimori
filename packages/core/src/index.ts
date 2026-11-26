@@ -12,6 +12,7 @@ import type {
   PromptChoice,
   ScheduledInboundEvent,
   SetupDependencies,
+  TriggerDecision,
   TunnelProvider,
   WebhookStatus,
 } from '@tsugimori/plugin-sdk';
@@ -29,6 +30,7 @@ import { approvalCallbackId, Auth } from '@tsugimori/auth';
 import {
   ConfigError,
   configuredOwner,
+  defaultRecordsMaxBytes,
   loadConfig,
   watch,
 } from '@tsugimori/config';
@@ -77,10 +79,13 @@ import { BackgroundSummaries } from './summary.ts';
 import { systemMessages } from './system-messages.ts';
 import { reply, Tasks } from './tasks.ts';
 import { ToolDetails } from './tool-details.ts';
-import { shouldTrigger } from './trigger.ts';
+import {
+  shouldTrigger as decideTrigger,
+  canTrigger as shouldTrigger,
+} from './trigger.ts';
 import { Webhooks } from './webhooks.ts';
 
-export { EnvironmentChecks, PluginRegistry, shouldTrigger };
+export { decideTrigger, EnvironmentChecks, PluginRegistry, shouldTrigger };
 export { runCommand } from './commands.ts';
 export type { CheckReport } from './checks.ts';
 export type { Logger };
@@ -164,6 +169,7 @@ export class Gateway {
   #reloadPending = false;
   #activeRemoval?: { plan: RemovalPlan; work: Promise<string> };
   #applyingConfig = false;
+  #recordsTimer?: NodeJS.Timeout;
   #closeWatch?: ReturnType<typeof watch>;
   #environmentNotification?: Promise<void>;
   #expiry?: Promise<void>;
@@ -189,6 +195,7 @@ export class Gateway {
     this.#memory = new Memory(workspace);
     this.admin = adminReader({
       store,
+      workspace,
       config: () => this.#runtime.config,
       agentInfo: (id) => this.#runtime.adminAgentInfo(id),
       reloadListeners: this.#adminReload,
@@ -275,7 +282,13 @@ export class Gateway {
       log,
       trace: this.#trace,
     });
+    const toolDetails = new ToolDetails({
+      log,
+      snapshot: () => this.#runtime.snapshot,
+      store,
+    });
     this.#chatSetup = new ChatSetup({
+      redact: (text) => toolDetails.redactor()(text),
       choices: this.#chatChoices,
       setup: new GuidedSetup({
         ...setup,
@@ -328,11 +341,6 @@ export class Gateway {
       invalidateSession: (chat) => this.#tasks.invalidateSession(chat),
       recordWorkspace: () => !this.#runtime.disabled('workspace.record'),
       workdir: (chat) => context.workdir(chat),
-    });
-    const toolDetails = new ToolDetails({
-      log,
-      snapshot: () => this.#runtime.snapshot,
-      store,
     });
     this.#summaries = new BackgroundSummaries({
       toolDetails,
@@ -412,6 +420,7 @@ export class Gateway {
         maxTtlMinutes: () => this.#runtime.config.preview?.maxTtlMinutes ?? 60,
       });
     this.#tasks = new Tasks({
+      workspace,
       toolDetails,
       store,
       auth: this.#auth,
@@ -478,6 +487,7 @@ export class Gateway {
         }),
     });
     this.#state = 'running';
+    this.#scheduleRecordPrune(60_000);
     this.#scheduler.start();
     this.#webhooks.start();
     if (this.#previews) this.#previews.start();
@@ -485,6 +495,26 @@ export class Gateway {
     log({ level: 'info', event: 'gateway.started' });
     this.#reportPlatformNotices();
     await this.#reportFailures();
+  }
+
+  #scheduleRecordPrune(delay: number) {
+    this.#recordsTimer = setTimeout(() => {
+      const { log, store } = this.#deps;
+      try {
+        const result = store.pruneRecords(
+          this.#runtime.config.records?.maxBytes ?? defaultRecordsMaxBytes,
+          this.#tasks.activeRecordRefs(),
+        );
+        if (result.bytes > 0) {
+          log({ level: 'info', event: 'records.pruned', ...result });
+          this.#notifyAdminReload();
+        }
+      } catch {
+        log({ level: 'warn', event: 'records.prune_failed' });
+      } finally {
+        if (this.#state === 'running') this.#scheduleRecordPrune(60 * 60_000);
+      }
+    }, delay).unref();
   }
 
   #reload(removal?: { current: Config; next: Config; plan: RemovalPlan }) {
@@ -741,6 +771,7 @@ export class Gateway {
 
   async #stop() {
     this.#state = 'stopping';
+    clearTimeout(this.#recordsTimer);
     await Promise.allSettled(
       this.#activeRemoval ? [this.#activeRemoval.work] : [],
     );
@@ -853,7 +884,33 @@ export class Gateway {
     }
   }
 
+  #recordTrigger(decision: TriggerDecision, seq?: number) {
+    const { store, log } = this.#deps;
+    const { adapterId, chatId, messageId, triggered, reason, taskId } =
+      decision;
+    this.#trace.record('trigger.decided', {
+      adapterId,
+      chatId,
+      messageId,
+      triggered,
+      reason,
+      taskId: taskId ?? null,
+    });
+    try {
+      store.saveTrigger(decision, seq);
+    } catch {
+      log({
+        level: 'warn',
+        event: 'task.record_failed',
+        adapterId,
+        chatId,
+        taskId: taskId ?? undefined,
+      });
+    }
+  }
+
   async #process(adapter: PlatformAdapter, inbound: PlatformInboundEvent) {
+    const at = Date.now();
     const { store } = this.#deps;
     if (inbound.type === 'chat-migrated')
       this.#commandMenus.migrateChat(adapter, inbound);
@@ -884,9 +941,24 @@ export class Gateway {
       adapterId: adapter.id,
       chatId: conversationId(event),
     };
+    const recordDecision = (
+      reason: TriggerDecision['reason'],
+      triggered: boolean,
+      seq?: number,
+      taskId?: string,
+    ) =>
+      this.#recordTrigger(
+        { ...chat, messageId: event.messageId, at, triggered, reason, taskId },
+        seq,
+      );
     if (event.type === 'delete') {
       this.#trace.span('inbound.deleted', { ...chat }, () => {
         store.markDeleted(chat, event.messageId, migratedFrom);
+        recordDecision(
+          'deleted',
+          false,
+          store.getMessage(chat, event.messageId, migratedFrom ?? '')?.seq,
+        );
         this.#tasks.cancelSource(chat, event.messageId, migratedFrom);
       });
       return;
@@ -942,12 +1014,16 @@ export class Gateway {
     const parsed = parseCommand(event.text, adapter.botIdentity?.username);
     const command = parsed === 'other-bot' ? undefined : parsed;
     if (
+      !event.botMessage &&
       inbound.type !== 'chat-migrated' &&
       command?.name === 'cancel' &&
       (await this.#chatRemoval.receive(adapter, chat, event, true))
-    )
+    ) {
+      recordDecision('command', true);
       return;
+    }
     if (
+      !event.botMessage &&
       inbound.type !== 'chat-migrated' &&
       (await this.#chatSetup.receive(
         adapter,
@@ -957,14 +1033,18 @@ export class Gateway {
       ))
     ) {
       store.recordUser(user);
+      recordDecision('command', true);
       return;
     }
     if (
+      !event.botMessage &&
       inbound.type !== 'chat-migrated' &&
       parsed !== 'other-bot' &&
       (await this.#chatRemoval.receive(adapter, chat, event, false))
-    )
+    ) {
+      if (this.#runtime.getAdapter(adapter.id)) recordDecision('command', true);
       return;
+    }
     const privateCommand =
       command?.name === 'pair' ||
       command?.name === 'login' ||
@@ -995,14 +1075,35 @@ export class Gateway {
         event.edited,
       ),
     );
-    if (!stored || inbound.type === 'chat-migrated') return;
+    if (!stored) {
+      recordDecision('duplicate', false);
+      return;
+    }
+    if (inbound.type === 'chat-migrated') {
+      recordDecision('not-addressed', false, stored.seq);
+      return;
+    }
     this.#commandMenus.observeChat(adapter, event);
-    if (event.edited) return;
+    if (event.edited) {
+      recordDecision('duplicate', false, stored.seq);
+      return;
+    }
     const message = privateCommand
       ? { ...event, raw: undefined, text: stored.text }
       : event;
     await this.#hooks.emit('inbound.received', { chat, message });
-    if (this.#isStopping() || parsed === 'other-bot') return;
+    if (event.botMessage || this.#isStopping() || parsed === 'other-bot') {
+      recordDecision(
+        event.botMessage
+          ? 'bot-message'
+          : parsed === 'other-bot'
+            ? 'addressed-to-other'
+            : 'not-addressed',
+        false,
+        stored.seq,
+      );
+      return;
+    }
 
     if (event.replyTo) {
       const result = this.#resolveApproval(adapter, {
@@ -1012,6 +1113,7 @@ export class Gateway {
         text: event.text,
       });
       if (result) {
+        recordDecision('command', true, stored.seq);
         if ('record' in result) {
           await this.#approvalFeedback(adapter, chat, {
             chatId: event.chatId,
@@ -1033,6 +1135,12 @@ export class Gateway {
       const finish = owner
         ? this.#chatChoices.claimReply(adapter, message, command)
         : undefined;
+      let recorded = false;
+      const commandDecision = (taskId?: string) => {
+        if (recorded) return;
+        recorded = true;
+        recordDecision('command', true, stored.seq, taskId);
+      };
       await this.#trace.span(
         'trigger.command',
         { ...chat, command: command.name },
@@ -1046,22 +1154,32 @@ export class Gateway {
               owner,
               command,
               finish,
+              commandDecision,
             );
           } catch (error) {
             await finish?.(
               systemMessages(this.#runtime.config.locale).choices.failed,
             );
             throw error;
+          } finally {
+            commandDecision();
           }
         },
       );
       return;
     }
 
-    const triggered = this.#trace.span('trigger.decided', { ...chat }, () =>
-      shouldTrigger(event, owner, this.#auth.isAllowlisted(chat)),
+    const { triggered, reason } = decideTrigger(
+      event,
+      owner,
+      this.#auth.isAllowlisted(chat),
     );
-    await this.#hooks.emit('trigger.decided', { chat, message, triggered });
+    await this.#hooks.emit('trigger.decided', {
+      chat,
+      message,
+      triggered,
+      reason,
+    });
     if (
       triggered &&
       !this.#isStopping() &&
@@ -1069,9 +1187,14 @@ export class Gateway {
       !this.#removingAgentRoute(chat)
     ) {
       this.#trace.span('task.dispatch', { ...chat }, () =>
-        this.#tasks.dispatch(adapter, chat, { message, seq: stored.seq }),
+        this.#tasks.dispatch(
+          adapter,
+          chat,
+          { message, seq: stored.seq },
+          (taskId) => recordDecision(reason, triggered, stored.seq, taskId),
+        ),
       );
-    }
+    } else recordDecision(reason, triggered, stored.seq);
   }
 
   async #fireSchedule(
@@ -1176,19 +1299,44 @@ export class Gateway {
           },
         ),
       );
-      if (!stored) return 'skipped';
-      const status = await this.#tasks.dispatch(adapter, chat, {
-        message,
-        seq: stored.seq,
-        scheduled: {
-          model: action.model,
-          target,
-          delayNote,
-          allowTextMentions:
-            schedule.deliveryApprovedBy !== null &&
-            schedule.deliveryApprovedBy === this.#auth.owner(adapterId),
+      if (!stored) {
+        this.#recordTrigger({
+          ...chat,
+          messageId: message.messageId,
+          at: Date.now(),
+          triggered: false,
+          reason: 'duplicate',
+        });
+        return 'skipped';
+      }
+      const status = await this.#tasks.dispatch(
+        adapter,
+        chat,
+        {
+          message,
+          seq: stored.seq,
+          scheduled: {
+            model: action.model,
+            target,
+            delayNote,
+            allowTextMentions:
+              schedule.deliveryApprovedBy !== null &&
+              schedule.deliveryApprovedBy === this.#auth.owner(adapterId),
+          },
         },
-      });
+        (taskId) =>
+          this.#recordTrigger(
+            {
+              ...chat,
+              messageId: message.messageId,
+              at: Date.now(),
+              triggered: true,
+              reason: 'scheduled',
+              taskId,
+            },
+            stored.seq,
+          ),
+      );
       if (
         status === 'sent' ||
         status === 'completed' ||
@@ -1604,6 +1752,7 @@ export class Gateway {
     owner: boolean,
     { name, args }: Command,
     finish?: (text: string) => Promise<void>,
+    onTask?: (taskId: string) => void,
   ) {
     const { store } = this.#deps;
     const { locale } = this.#runtime.config;
@@ -1989,7 +2138,12 @@ export class Gateway {
           break;
         if (args) await send(m.compactUsage);
         else
-          this.#tasks.dispatch(adapter, chat, { message, seq, compact: true });
+          this.#tasks.dispatch(
+            adapter,
+            chat,
+            { message, seq, compact: true },
+            onTask,
+          );
         break;
       case 'previews': {
         const open = this.#previews?.list(chat.adapterId) ?? [];

@@ -1,4 +1,8 @@
-import type { ResourceRef } from '@tsugimori/plugin-sdk';
+import type {
+  ResourceRef,
+  TaskEvent,
+  TriggerReason,
+} from '@tsugimori/plugin-sdk';
 import type {
   ApprovalRecord,
   ChatRecord,
@@ -18,6 +22,8 @@ import type { AnySQLiteColumn } from 'drizzle-orm/sqlite-core';
 
 import { sql } from 'drizzle-orm';
 import {
+  blob,
+  customType,
   index,
   integer,
   primaryKey,
@@ -95,6 +101,8 @@ export const messages = sqliteTable(
     threadId: text('thread_id'),
     text: text('text').notNull(),
     raw: text('raw', { mode: 'json' }).$type<unknown>(),
+    rawZ: blob('raw_z', { mode: 'buffer' }),
+    revision: integer('revision').notNull().default(0),
     deleted: integer('deleted', { mode: 'boolean' }).notNull().default(false),
     recordedAt: integer('recorded_at'),
   },
@@ -408,5 +416,101 @@ export const setupSecrets = sqliteTable(
   },
   (table) => [
     primaryKey({ columns: [table.adapterId, table.chatId, table.messageId] }),
+  ],
+);
+
+const encoded = customType<{ data: string | Buffer }>({
+  dataType: () => 'blob',
+});
+
+export const taskRecords = sqliteTable(
+  'task_records',
+  {
+    taskId: text('task_id')
+      .primaryKey()
+      .notNull()
+      .references(() => tasks.id, { onDelete: 'cascade' }),
+    agent: encoded('agent'),
+    input: encoded('input'),
+    refs: encoded('refs').notNull(),
+    output: encoded('output'),
+    outcome: encoded('outcome').notNull(),
+    timing: encoded('timing').notNull(),
+    supplements: encoded('supplements').notNull(),
+    bytes: integer('bytes').notNull(),
+    createdAt: integer('created_at').notNull(),
+    pruned: integer('pruned', { mode: 'boolean' }).notNull().default(false),
+  },
+  (table) => [
+    index('task_records_pruned_created').on(table.pruned, table.createdAt),
+  ],
+);
+
+export const taskEvents = sqliteTable(
+  'task_events',
+  {
+    taskId: text('task_id')
+      .notNull()
+      .references(() => tasks.id, { onDelete: 'cascade' }),
+    seq: integer('seq').notNull(),
+    kind: text('kind').$type<TaskEvent['kind']>().notNull(),
+    at: integer('at').notNull(),
+    data: encoded('data').notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.taskId, table.seq] })],
+);
+
+export const contextBlobs = sqliteTable('context_blobs', {
+  sha256: text('sha256').primaryKey().notNull(),
+  content: encoded('content').notNull(),
+  createdAt: integer('created_at').notNull(),
+});
+
+export const chatSummaryVersions = sqliteTable(
+  'chat_summary_versions',
+  {
+    ...chatScope(),
+    revision: integer('revision').notNull(),
+    text: encoded('text').notNull(),
+    throughSeq: integer('through_seq').notNull(),
+    createdAt: integer('created_at').notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.adapterId, table.chatId, table.revision] }),
+  ],
+);
+
+export const messageEdits = sqliteTable(
+  'message_edits',
+  {
+    seq: integer('seq')
+      .notNull()
+      .references(() => messages.seq, { onDelete: 'cascade' }),
+    revision: integer('revision').notNull(),
+    text: text('text').notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.seq, table.revision] })],
+);
+
+export const triggerDecisions = sqliteTable(
+  'trigger_decisions',
+  {
+    ...chatScope(),
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    messageId: text('message_id').notNull(),
+    messageSeq: integer('message_seq').references(() => messages.seq, {
+      onDelete: 'cascade',
+    }),
+    at: integer('at').notNull(),
+    triggered: integer('triggered', { mode: 'boolean' }).notNull(),
+    reason: text('reason').$type<TriggerReason>().notNull(),
+    taskId: text('task_id').references(() => tasks.id, {
+      onDelete: 'set null',
+    }),
+  },
+  (table) => [
+    index('trigger_decisions_message').on(table.messageSeq, table.id),
+    index('trigger_decisions_task').on(table.taskId),
+    index('trigger_decisions_adapter').on(table.adapterId),
   ],
 );

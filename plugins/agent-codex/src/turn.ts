@@ -149,6 +149,8 @@ function toolData(item: Record<string, unknown>) {
 
 export class TurnOutput {
   readonly #items = new Map<string, Record<string, unknown>>();
+  readonly #summaries = new Map<string, Set<number>>();
+  readonly #streamedText = new Set<string>();
   #final: string | undefined;
   #fallback: string | undefined;
 
@@ -166,8 +168,24 @@ export class TurnOutput {
     if (
       method === 'item/agentMessage/delta' &&
       typeof params.delta === 'string'
-    )
+    ) {
+      if (typeof params.itemId === 'string')
+        this.#streamedText.add(params.itemId);
       return [{ type: 'text.delta', text: params.delta }];
+    }
+    if (
+      method === 'item/reasoning/summaryTextDelta' &&
+      typeof params.itemId === 'string' &&
+      typeof params.summaryIndex === 'number' &&
+      typeof params.delta === 'string'
+    ) {
+      const parts = this.#summaries.get(params.itemId) ?? new Set<number>();
+      const separator =
+        parts.size > 0 && !parts.has(params.summaryIndex) ? '\n\n' : '';
+      parts.add(params.summaryIndex);
+      this.#summaries.set(params.itemId, parts);
+      return [{ type: 'reasoning', text: separator + params.delta }];
+    }
     if (method === 'thread/tokenUsage/updated') {
       const usage = lastUsage(params);
       return [
@@ -211,6 +229,34 @@ export class TurnOutput {
     }
     this.#items.delete(callId);
     this.#message(item);
+    if (item.type === 'reasoning') {
+      const streamed = this.#summaries.get(callId);
+      this.#summaries.delete(callId);
+      const summary = Array.isArray(item.summary)
+        ? item.summary
+            .filter(
+              (text, index) =>
+                typeof text === 'string' && !streamed?.has(index),
+            )
+            .join('\n\n')
+        : '';
+      return summary
+        ? [
+            {
+              type: 'reasoning',
+              text: (streamed?.size ? '\n\n' : '') + summary,
+            },
+          ]
+        : [];
+    }
+    if (
+      item.type === 'agentMessage' &&
+      item.phase === 'commentary' &&
+      !this.#streamedText.delete(callId) &&
+      typeof item.text === 'string'
+    )
+      return [{ type: 'text.delta', text: item.text }];
+    this.#streamedText.delete(callId);
     if (!name || framework) return [];
     const failed =
       item.status === 'failed' ||

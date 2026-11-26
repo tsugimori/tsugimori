@@ -180,7 +180,7 @@ export class AdminServer {
       return;
     }
     const url = new URL(raw, 'http://127.0.0.1');
-    if (api) return this.#api(url, request, response);
+    if (api) return await this.#api(url, request, response);
     if (path === '/assets' || path.startsWith('/assets/')) {
       const asset = await this.#assets.get(path.slice(1));
       if (!asset) return respond(response, 404, 'Not found.');
@@ -255,7 +255,7 @@ export class AdminServer {
         );
   }
 
-  #api(url: URL, request: IncomingMessage, response: ServerResponse) {
+  async #api(url: URL, request: IncomingMessage, response: ServerResponse) {
     const { reader } = this.#deps;
     const query = url.searchParams;
     const now = this.#deps.now?.() ?? Date.now();
@@ -297,6 +297,22 @@ export class AdminServer {
           return apiError(response, 400, 'invalidChat');
         const data = reader.chat({ adapterId, chatId }, before);
         if (data) return json(data);
+        break;
+      }
+      case '/api/task': {
+        const id = query.get('id');
+        const data = id ? await reader.task(id) : undefined;
+        if (data) return json(data);
+        break;
+      }
+      case '/api/message-raw': {
+        const adapterId = query.get('adapter');
+        const chatId = query.get('chat');
+        const seq = positiveInt(query.get('seq'));
+        if (!adapterId || !chatId || !seq)
+          return apiError(response, 400, 'invalidChat');
+        const data = reader.messageRaw({ adapterId, chatId }, seq);
+        if (data !== undefined) return json(data);
         break;
       }
       case '/api/trace': {

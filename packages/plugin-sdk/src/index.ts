@@ -1,6 +1,7 @@
 export type { MarkdownEntity } from './markdown.ts';
 export { renderMarkdown } from './markdown.ts';
 
+import type { TriggerReason } from './admin.ts';
 import type {
   CheckContext,
   CheckItem,
@@ -72,6 +73,8 @@ interface InboundBase {
 }
 
 export interface InboundMessage extends InboundBase {
+  addressedToOther?: boolean;
+  botMessage?: boolean;
   chatKind: 'dm' | 'group' | 'supergroup';
   chatTitle?: string;
   edited?: boolean;
@@ -477,6 +480,10 @@ export function nativeCompactionLimit(
 }
 
 export type AgentEvent =
+  // Only visible reasoning text and provider-supplied summaries.
+  | { text: string; type: 'reasoning' }
+  // Report once per run when the backend identifies the active model.
+  | { model: string; reasoning?: string; type: 'model' }
   | { text: string; type: 'text.delta' }
   | { text: string; type: 'text.final' }
   | { args?: unknown; callId: string; name: string; type: 'tool.started' }
@@ -630,6 +637,7 @@ export interface HookEvents {
   'trigger.decided': {
     chat: ChatRef;
     message: InboundMessage;
+    reason?: TriggerReason;
     triggered: boolean;
   };
 }
@@ -682,10 +690,21 @@ export type {
   AdminReader,
   AdminSchedules,
   AdminTask,
+  AdminTaskRecord,
   AdminToolCall,
   AdminTrace,
   AdminWorkspace,
+  TaskAgent,
+  TaskContextRef,
+  TaskEvent,
+  TaskExecution,
+  TaskOutcome,
+  TaskRefs,
+  TaskSupplement,
+  TaskTiming,
   ToolCallStatus,
+  TriggerDecision,
+  TriggerReason,
   VerifyAccess,
 } from './admin.ts';
 

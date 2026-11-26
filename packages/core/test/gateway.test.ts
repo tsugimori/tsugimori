@@ -34,7 +34,12 @@ import { setTimeout as delay, setImmediate } from 'node:timers/promises';
 
 import type { Logger } from '../src/index.ts';
 
-import { Gateway, PluginRegistry, shouldTrigger } from '../src/index.ts';
+import {
+  decideTrigger,
+  Gateway,
+  PluginRegistry,
+  shouldTrigger,
+} from '../src/index.ts';
 
 const adapterId = 'fake:main';
 const chat = { adapterId, chatId: 'room' };
@@ -768,6 +773,7 @@ for (const outboundPush of ['free', 'metered', 'none'] as const) {
         async function* (request) {
           const tool = request.tools.find(({ name }) => name === 'scoped_tool');
           assert.ok(tool);
+          yield { type: 'text.final', text: 'NO_REPLY: Approval is pending' };
           await tool.run({ id: 'pending' });
         },
         true,
@@ -787,6 +793,24 @@ for (const outboundPush of ['free', 'metered', 'none'] as const) {
         [{ replyTo: 'pending', text: '會確認是否能排入，確認後生效。' }],
       );
       assert.deepEqual(f.platform.reactions, []);
+      const task = f.store
+        .listChatTasks(chat)
+        .find(({ sourceMessageId }) => sourceMessageId === 'pending')!;
+      assert.equal(
+        f.store.getTaskExecution(task.id)?.outcome.kind,
+        'delivered',
+      );
+      assert.equal(
+        f.store.getTaskExecution(task.id)?.outcome.silentReason,
+        'Approval is pending',
+      );
+      assert.deepEqual(
+        f.store.getTaskExecution(task.id)?.outcome.delivery?.parts,
+        [
+          { messageId: prompt!.messageId, ok: true },
+          { messageId: replies[0]!.messageId, ok: true },
+        ],
+      );
     },
   );
 }
@@ -2574,6 +2598,12 @@ test(
         ?.format,
       'markdown',
     );
+    await f.gateway.idle();
+    const scheduledTask = f.store
+      .listChatTasks(chat)
+      .find(({ sourceMessageId }) => sourceMessageId.startsWith('schedule:'));
+    assert.ok(scheduledTask);
+    assert.equal(f.store.triggerForTask(scheduledTask)?.reason, 'scheduled');
     const scheduled = f.platform.sent.find(
       ({ text }) => text === 'Agent job delivered',
     );
@@ -2885,7 +2915,7 @@ test(
     assert.equal(calls[0]?.name, 'guide.read');
     assert.match(calls[0]?.result ?? '', /\[redacted\]/);
     assert.doesNotMatch(calls[0]?.result ?? '', /fixture-credential/);
-    assert.match(calls.at(-1)?.result ?? '', /omitted/);
+    assert.match(calls.at(-1)?.result ?? '', /truncated \d+ bytes/);
   },
 );
 
@@ -3155,7 +3185,7 @@ test(
 );
 
 test(
-  'only an exact trimmed NO_REPLY completes silently, including split text deltas',
+  'records single-line NO_REPLY reasons and delivers other replies',
   { timeout: 5_000 },
   async (t) => {
     const f = await fixture(t, async function* (request) {
@@ -3183,9 +3213,27 @@ test(
         .every(({ direction }) => direction === 'inbound'),
     );
 
+    assert.equal(
+      (await f.gateway.admin.task(task!.id))?.outcome?.silentReason,
+      '',
+    );
+    await f.platform.emit(
+      inbound('reason', 'NO_REPLY:  Addressed to a human   '),
+    );
+    await f.gateway.idle();
+    const reasonTask = f.store
+      .listChatTasks(chat)
+      .find(({ sourceMessageId }) => sourceMessageId === 'reason');
+    assert.ok(reasonTask);
+    const reasonRecord = await f.gateway.admin.task(reasonTask.id);
+    assert.equal(reasonRecord?.outcome?.silentReason, 'Addressed to a human');
+    assert.equal(reasonRecord?.output, 'NO_REPLY:  Addressed to a human   ');
+    assert.equal(f.platform.sent.length, 0);
+
     for (const [id, text] of [
       ['punctuated', 'NO_REPLY.'],
       ['longer', 'NO_REPLY is a marker'],
+      ['multiline', 'NO_REPLY: first\nsecond'],
     ]) {
       await f.platform.emit(inbound(id!, text!));
       await f.gateway.idle();
@@ -3193,12 +3241,12 @@ test(
     }
     assert.deepEqual(
       f.platform.sent.map(({ text }) => text),
-      ['NO_REPLY.', 'NO_REPLY is a marker'],
+      ['NO_REPLY.', 'NO_REPLY is a marker', 'NO_REPLY: first\nsecond'],
     );
     assert.ok(
       f.gateway.admin
         .chat(chat)
-        ?.tasks.filter(({ id }) => id !== task?.id)
+        ?.tasks.filter(({ id }) => id !== task?.id && id !== reasonTask.id)
         .every(({ silent }) => silent === false),
     );
   },
@@ -3674,11 +3722,12 @@ test('records and redacts framework and external tool details without changing a
   assert.match(invalid!.result!, /Invalid tool arguments/);
   assert.match(native!.args!, /"authorization": "\[redacted\]"/);
   assert.match(
-    native!.result!,
+    f.gateway.admin.toolCall(task.id, native!.seq)!.result!,
     /^head-before-cap .*…\[omitted \d+ chars\]….*\[redacted\] tail-after-cap$/,
   );
   for (const { args, result } of calls) {
-    assert.ok((args?.length ?? 0) <= 200 && (result?.length ?? 0) <= 200);
+    assert.ok(Buffer.byteLength(args ?? '') <= 64 * 1024);
+    assert.ok(Buffer.byteLength(result ?? '') <= 64 * 1024);
     for (const secret of secrets) {
       assert.ok(!args?.includes(secret));
       assert.ok(!result?.includes(secret));
@@ -3998,3 +4047,274 @@ test('admin subscriptions receive committed activity with no message or tool con
   f.store.setChatRoute(chat, { thinking: 'low' });
   assert.equal(events.length, afterReload);
 });
+
+test(
+  'records the input, transcript, resolved model and delivery, including a supplement',
+  { timeout: 5_000 },
+  async (t) => {
+    const waiting = Promise.withResolvers<void>();
+    const f = await fixture(
+      t,
+      async function* (request, io) {
+        if (request.purpose) return;
+        yield { type: 'sessionId', sessionId: 'session-demo' };
+        yield { type: 'model', model: 'resolved-test', reasoning: 'high' };
+        yield { type: 'reasoning', text: 'Consider ' };
+        yield { type: 'reasoning', text: 'sk-fixture-reasoning' };
+        yield { type: 'text.delta', text: 'Checking ' };
+        yield { type: 'text.delta', text: 'the request' };
+        yield {
+          type: 'tool.started',
+          name: 'fake.tool',
+          callId: 'call',
+          args: 'sk-args-secret ' + '界'.repeat(23_000),
+        };
+        yield {
+          type: 'tool.finished',
+          name: 'fake.tool',
+          callId: 'call',
+          status: 'ok',
+          result: 'sk-result-secret ' + '界'.repeat(23_000),
+        };
+        waiting.resolve();
+        for await (const addition of io.supplements) {
+          assert.equal(addition.text, 'One more detail');
+          break;
+        }
+        yield { type: 'text.final', text: 'Done sk-fixture-output' };
+      },
+      true,
+      { durable: true },
+    );
+    const group = { chatKind: 'group', userId: 'member' } as const;
+    await f.platform.emit(inbound('summarized', 'Summarized message', group));
+    await f.platform.emit(inbound('history', 'Historical message', group));
+    const historical = f.store.getMessage(chat, 'history')!;
+    const first = f.store.beginSummary(chat);
+    assert.ok(
+      f.store.saveSummary({
+        ...first,
+        text: 'Earlier summary',
+        throughSeq: historical.seq - 1,
+      }),
+    );
+    const summary = f.store.getSummary(chat)!;
+    f.store.setChatRoute(chat, { model: 'default' });
+    await f.platform.emit(
+      inbound('request', 'Check this', {
+        chatKind: 'group',
+        mentionsBot: true,
+      }),
+    );
+    await waiting.promise;
+
+    const task = f.store.listChatTasks(chat)[0]!;
+    assert.equal(task.model, 'resolved-test');
+    await until(t, () => f.store.getTaskEvents(task.id).length === 3);
+    const reopened = new SqliteStore(f.dbPath);
+    try {
+      assert.equal(reopened.getTaskExecution(task.id), undefined);
+      assert.deepEqual(
+        reopened.getTaskEvents(task.id).map(({ kind }) => kind),
+        ['reasoning', 'text', 'tool'],
+      );
+    } finally {
+      reopened.close();
+    }
+
+    await f.platform.emit(
+      inbound('history', 'Edited later', { ...group, edited: true }),
+    );
+    await f.platform.emit(
+      inbound('extra', 'One more detail', {
+        chatKind: 'group',
+        mentionsBot: true,
+        replyTo: 'request',
+      }),
+    );
+    await f.gateway.idle();
+    const execution = await f.gateway.admin.task(task.id);
+    assert.ok(execution);
+    assert.equal(execution.task.model, 'resolved-test');
+    assert.deepEqual(execution.agent, {
+      agentId: 'test',
+      kind: 'fake',
+      model: 'resolved-test',
+      requestedModel: 'default',
+      reasoning: 'high',
+    });
+    assert.deepEqual(
+      execution.input?.map(({ content }) => content),
+      ['Check this', 'One more detail'],
+    );
+    assert.equal(execution.refs?.summary?.revision, summary.revision);
+    assert.deepEqual(execution.refs?.history.seqs, [historical.seq]);
+    assert.equal(execution.refs?.session.sessionId, 'session-demo');
+    assert.equal(
+      execution.context.find(({ kind }) => kind === 'history')?.text,
+      'Historical message',
+    );
+    assert.equal(
+      execution.context.find(({ kind }) => kind === 'summary')?.text,
+      'Earlier summary',
+    );
+    assert.equal(execution.trigger?.reason, 'mention');
+    assert.deepEqual(
+      execution.events.map(({ kind }) => kind),
+      ['reasoning', 'text', 'tool', 'supplement', 'text'],
+    );
+    assert.deepEqual(execution.events[0]?.data, {
+      text: 'Consider [redacted]',
+    });
+    assert.deepEqual(execution.events[1]?.data, {
+      text: 'Checking the request',
+    });
+    const event = execution.events.find(({ kind }) => kind === 'tool');
+    assert.ok(event?.kind === 'tool');
+    assert.ok(event.tool?.args?.includes('[redacted]'));
+    assert.ok((event.tool?.result?.length ?? 0) <= 4000);
+    const call = f.store.taskToolCalls([task.id])[0]!;
+    for (const detail of [call.args!, call.result!]) {
+      assert.ok(Buffer.byteLength(detail) <= 64 * 1024);
+      assert.match(detail, /^\[redacted\] 界+…\[truncated \d+ bytes\]$/);
+    }
+    assert.equal(execution.output, 'Done [redacted]');
+    assert.deepEqual(execution.supplements, [
+      { messageId: 'extra', at: execution.events[3]!.at, afterEventSeq: 3 },
+    ]);
+    assert.deepEqual(execution.outcome?.delivery?.parts, [
+      { messageId: f.platform.sent.at(-1)!.messageId, ok: true },
+    ]);
+    assert.equal(execution.outcome?.kind, 'delivered');
+    assert.ok(execution.timing?.firstTokenMs !== undefined);
+  },
+);
+
+test('stores trigger reasons for skipped messages, duplicates, deletions and commands without private raw data', async (t) => {
+  const f = await fixture(t, async function* () {});
+  const dm = inbound('normal', 'text');
+  const group = { ...dm, chatKind: 'group' as const };
+  for (const [message, owner, allowlisted, reason, triggered] of [
+    [dm, true, false, 'dm-owner', true],
+    [{ ...group, mentionsBot: true }, false, true, 'mention', true],
+    [{ ...group, repliesToBot: true }, false, true, 'reply-to-bot', true],
+    [{ ...group, mentionsBot: true }, false, false, 'not-allowlisted', false],
+    [group, false, true, 'not-addressed', false],
+    [
+      { ...group, addressedToOther: true },
+      true,
+      true,
+      'addressed-to-other',
+      false,
+    ],
+    [{ ...dm, botMessage: true }, true, true, 'bot-message', false],
+  ] as const) {
+    assert.deepEqual(decideTrigger(message, owner, allowlisted), {
+      triggered,
+      reason,
+    });
+    assert.equal(shouldTrigger(message, owner, allowlisted), triggered);
+  }
+  const raw = { text: 'standby', attachments: '界'.repeat(1000) };
+  const skipped = inbound('skip', 'standby', {
+    chatKind: 'group',
+    userId: 'member',
+    raw,
+  });
+  await f.platform.emit(skipped);
+  await f.platform.emit(skipped);
+  const saved = f.store.getMessage(chat, 'skip')!;
+  assert.deepEqual(f.gateway.admin.messageRaw(chat, saved.seq), raw);
+  assert.equal(
+    f.gateway.admin.chat(chat)?.messages[0]?.trigger?.reason,
+    'not-addressed',
+  );
+  await f.platform.emit({
+    type: 'delete',
+    chatId: chat.chatId,
+    messageId: 'skip',
+  });
+  await f.platform.emit(
+    inbound('private', '/pair fixture-code', {
+      raw: { text: '/pair fixture-code' },
+    }),
+  );
+  await f.gateway.idle();
+  const command = f.store.getMessage(chat, 'private')!;
+  assert.equal(command.text, '/pair [redacted]');
+  assert.equal(f.gateway.admin.messageRaw(chat, command.seq), null);
+  assert.deepEqual(
+    f.gateway.admin
+      .chat(chat)
+      ?.messages.filter(({ direction }) => direction === 'inbound')
+      .map(({ trigger }) => trigger?.reason),
+    ['command', 'deleted'],
+  );
+  assert.deepEqual(
+    f.trace.recent
+      .filter(({ name }) => name === 'trigger.decided')
+      .map(({ attrs }) => [attrs.reason, attrs.triggered]),
+    [
+      ['not-addressed', false],
+      ['duplicate', false],
+      ['deleted', false],
+      ['command', true],
+    ],
+  );
+  assert.equal(f.store.listChatTasks(chat).length, 0);
+});
+
+test(
+  'guided chat setup logs a redacted unexpected error and keeps the generic reply',
+  { timeout: 5_000 },
+  async (t) => {
+    const f = await fixture(t, async function* () {}, true, {
+      plugins: [
+        {
+          name: 'failing-setup',
+          agents: {
+            broken: ({ id }) => ({
+              id,
+              kind: 'broken',
+              loop: 'external',
+              async *run() {},
+            }),
+          },
+          setupSteps: [
+            {
+              id: 'check',
+              title: 'Check the connector',
+              run() {
+                throw new Error('Connector broke with sk-fixture-secret');
+              },
+            },
+          ],
+        },
+      ],
+    });
+    await f.platform.emit(
+      inbound('setup', '/add agent broken --id demo-broken'),
+    );
+    await until(t, () =>
+      f.platform.sent.some(({ text }) =>
+        text.startsWith('Setup could not complete.'),
+      ),
+    );
+    assert.deepEqual(
+      f.logs.find(({ event }) => event === 'setup.failed'),
+      {
+        level: 'error',
+        event: 'setup.failed',
+        adapterId,
+        category: 'agent',
+        kind: 'broken',
+        step: 'check',
+        error: 'Error: Connector broke with [redacted]',
+      },
+    );
+    const span = f.trace.recent.find(
+      ({ name, status }) => name === 'setup.step' && status === 'error',
+    );
+    assert.equal(span?.attrs.error, 'Error: Connector broke with [redacted]');
+  },
+);

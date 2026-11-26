@@ -5,15 +5,20 @@ import type {
   AgentRequest,
   ApprovalRequest,
   ChatRef,
+  ContextBlock,
   ExecBackend,
   ExecScope,
+  InboundMessage,
+  OutboundMessage,
   PlatformAdapter,
   ScheduleApproval,
   ScheduleApprovalRequest,
+  TaskOutcome,
   ToolContext,
   ToolDefinition,
 } from '@tsugimori/plugin-sdk';
 import type {
+  ActiveTaskRefs,
   ApprovalContinuation,
   ApprovalRecord,
   ChatRecord,
@@ -45,7 +50,8 @@ import { memoryAction } from './memory.ts';
 import { conversationId, DeliveryError, Outbound } from './outbound.ts';
 import { Supplements } from './supplements.ts';
 import { systemMessages } from './system-messages.ts';
-import { shouldTrigger } from './trigger.ts';
+import { silentReason, TaskRecorder } from './task-recorder.ts';
+import { canTrigger } from './trigger.ts';
 import { prepareWorkspace, recordWorkspace } from './workspace-files.ts';
 
 interface TaskDependencies {
@@ -62,6 +68,7 @@ interface TaskDependencies {
   toolDetails: ToolDetails;
   tools: readonly ToolDefinition[];
   trace: Tracer;
+  workspace: string;
 }
 
 type Work = {
@@ -69,6 +76,7 @@ type Work = {
   acceptsSupplements: boolean;
   adapter: PlatformAdapter;
   chat: ChatRef;
+  createdAt: number;
   endForApproval: AbortController;
   execution?: Promise<void>;
   id: string;
@@ -76,6 +84,7 @@ type Work = {
   messageIds: Set<string>;
   pendingApprovalFallback?: string;
   progress: { stage: TaskStage; startedAt: number };
+  recorder?: TaskRecorder;
   route?: { agentId: string; model: string };
   sessionId?: string;
   sessionScopeChatId?: string | null;
@@ -247,7 +256,12 @@ export class Tasks {
     };
   }
 
-  dispatch(adapter: PlatformAdapter, chat: ChatRef, input: TaskInput) {
+  dispatch(
+    adapter: PlatformAdapter,
+    chat: ChatRef,
+    input: TaskInput,
+    onTask?: (id: string) => void,
+  ) {
     const { store, trace, log } = this.#deps;
     chat = store.resolveChat(chat);
     const key = chatKey(chat);
@@ -265,6 +279,7 @@ export class Tasks {
     ) {
       running.messageIds.add(messageId);
       running.supplements.push(input);
+      onTask?.(running.id);
       return;
     }
     const createdAt = Date.now();
@@ -272,6 +287,7 @@ export class Tasks {
       adapter,
       chat,
       input,
+      createdAt,
       id: randomUUID(),
       abort: new AbortController(),
       endForApproval: new AbortController(),
@@ -294,6 +310,7 @@ export class Tasks {
       finishedAt: null,
     });
     this.#work.add(work);
+    onTask?.(work.id);
     const dequeued = trace.begin('task.queue', { ...chat, taskId: work.id });
     const previous = this.#queues.get(key) ?? Promise.resolve();
     const tail = previous
@@ -319,6 +336,14 @@ export class Tasks {
       });
     this.#queues.set(key, tail);
     if (input.scheduled) return tail.then(() => store.getTask(work.id)?.status);
+  }
+
+  activeRecordRefs(): readonly ActiveTaskRefs[] {
+    const active: ActiveTaskRefs[] = [];
+    for (const { chat, id, recorder } of this.#work)
+      if (recorder)
+        active.push({ ...chat, taskId: id, refs: recorder.references });
+    return active;
   }
 
   async idle() {
@@ -431,12 +456,19 @@ export class Tasks {
   }
 
   async #execute(work: Work) {
-    const { store, auth, runtime, outbound, log } = this.#deps;
+    const { store, auth, runtime, log, toolDetails, workspace } = this.#deps;
     const { adapter, input, abort, id } = work;
     const { message } = input;
     const activity = new AbortController();
     const finish = (status: TaskRecord['status']) =>
       store.updateTask(id, { status, finishedAt: Date.now() });
+    const redactor = toolDetails.redactor();
+    const recorder = new TaskRecorder(
+      { store, log, redact: redactor, taskId: id, workspace },
+      Math.max(0, work.progress.startedAt - work.createdAt),
+    );
+    work.recorder = recorder;
+    let outcome: TaskOutcome = { kind: 'cancelled' };
     let ranAgent = false;
     let delivered = false;
     try {
@@ -461,7 +493,7 @@ export class Tasks {
           ? !owner
           : input.scheduled
             ? !owner && !allowlisted
-            : !shouldTrigger(message, owner, allowlisted)
+            : !canTrigger(message, owner, allowlisted)
       ) {
         finish('cancelled');
         return;
@@ -490,20 +522,16 @@ export class Tasks {
         );
       }
       if (!selected || model === null) {
+        outcome = { kind: 'no-agent' };
         if (input.scheduled) finish('failed');
         else if (owner) {
-          work.progress.stage = 'delivery';
-          await outbound.send(
-            adapter,
+          await this.#deliver(
+            work,
             reply(
               message,
               route.unavailable ||
                 systemMessages(runtime.config.locale).noAgent,
             ),
-            {
-              taskId: id,
-              signal: abort.signal,
-            },
           );
         } else finish('completed');
         return;
@@ -514,35 +542,53 @@ export class Tasks {
         thinking: route.thinking.value,
       };
 
+      recorder.agent({
+        agentId: selected.agent.id,
+        kind: selected.agent.kind,
+        model,
+        requestedModel: model,
+        reasoning: settings.thinking,
+        serviceTier: settings.serviceTier,
+      });
       if (input.compact) {
         work.progress.stage = 'compaction';
-        const text = await this.#compact(work, selected.agent, settings);
+        const timed = recorder.timing('agentMs');
+        let text: string;
+        try {
+          text = await this.#compact(work, selected.agent, settings);
+        } finally {
+          timed();
+        }
         abort.signal.throwIfAborted();
-        work.progress.stage = 'delivery';
-        await outbound.send(adapter, reply(message, text), {
-          taskId: id,
-          signal: abort.signal,
-        });
+        await this.#deliver(work, reply(message, text));
+        outcome = { kind: 'delivered' };
         return;
       }
 
       ranAgent = true;
       work.progress.stage = 'context';
-      const result = await this.#run(work, selected.agent, settings);
+      const result = await this.#run(work, selected.agent, settings, recorder);
+      recorder.output(result.text);
       work.acceptsSupplements = false;
       abort.signal.throwIfAborted();
       const fallback = work.pendingApprovalFallback;
-      // An exact NO_REPLY stays silent, but a pending-approval notice is still sent.
-      const silent = result.text.trim() === 'NO_REPLY';
+      const reason = silentReason(result.text, redactor);
+      const silent = reason !== undefined;
       const text = [silent ? '' : result.text, fallback]
         .filter(Boolean)
         .join('\n\n');
-      if (silent && !text) {
+      if (silent) {
+        outcome.silentReason = reason;
         this.#deps.trace.record('outbound.silent', {
           ...chat,
           taskId: id,
           reply: 'silent',
+          silentReason: outcome.silentReason,
+          fallback: Boolean(fallback),
         });
+      }
+      if (silent && !text) {
+        outcome.kind = 'silent';
         await this.#deps.trace.flush().catch(() => {
           log({ level: 'error', event: 'trace.flush_failed', taskId: id });
         });
@@ -557,27 +603,17 @@ export class Tasks {
               text: scheduled.delayNote + text,
             }
           : reply(message, text);
-        if (
-          scheduled &&
-          !scheduled.allowTextMentions &&
-          containsMention(result.text)
-        )
+        if (scheduled && !scheduled.allowTextMentions && containsMention(text))
           throw new Error('Scheduled response contains an unapproved mention');
-        await outbound.send(
-          adapter,
-          {
-            ...output,
-            format: result.text ? 'markdown' : undefined,
-            parseTextMentions: result.text ? undefined : false,
-          },
-          {
-            taskId: id,
-            scheduled: scheduled !== undefined,
-            signal: abort.signal,
-          },
-        );
+        await this.#deliver(work, {
+          ...output,
+          format: !silent && result.text ? 'markdown' : undefined,
+          parseTextMentions: !silent && result.text ? undefined : false,
+        });
         delivered = true;
+        outcome.kind = 'delivered';
       } else {
+        outcome.kind = 'silent';
         finish('completed');
       }
 
@@ -610,6 +646,23 @@ export class Tasks {
           workdir: result.workdir,
         });
     } catch (error) {
+      const stage = work.progress.stage;
+      outcome.kind =
+        abort.signal.aborted && !(error instanceof DeliveryError)
+          ? 'cancelled'
+          : 'failed';
+      outcome.error = recorder.error(
+        error,
+        stage === 'preparing'
+          ? 'queue'
+          : stage === 'compaction'
+            ? 'agent'
+            : stage === 'recording'
+              ? 'record'
+              : stage === 'approval'
+                ? 'other'
+                : stage,
+      );
       if (ranAgent) store.clearSession(work.chat);
       if (!delivered && !(error instanceof DeliveryError))
         finish(abort.signal.aborted ? 'cancelled' : 'failed');
@@ -627,11 +680,12 @@ export class Tasks {
           level: 'error',
           event: 'task.failed',
           taskId: id,
-          error: describeError(error),
+          error: describeError(error, redactor),
         });
       }
     } finally {
       activity.abort();
+      recorder.finish(outcome);
       if (work.workdir && !runtime.disabled('workspace.record')) {
         work.progress.stage = 'recording';
         try {
@@ -653,6 +707,28 @@ export class Tasks {
     }
   }
 
+  async #deliver(work: Work, message: OutboundMessage) {
+    work.progress.stage = 'delivery';
+    const timed = work.recorder?.timing('deliveryMs');
+    let recorded = false;
+    try {
+      return await this.#deps.outbound.send(work.adapter, message, {
+        taskId: work.id,
+        scheduled: work.input.scheduled !== undefined,
+        signal: work.abort.signal,
+        onDelivery: (ids, error) => {
+          recorded = true;
+          work.recorder?.delivery(work.adapter.id, ids, error);
+        },
+      });
+    } catch (error) {
+      if (!recorded) work.recorder?.delivery(work.adapter.id, [], error);
+      throw error;
+    } finally {
+      timed?.();
+    }
+  }
+
   #toolDefinitions(adapter: PlatformAdapter) {
     return [
       ...this.#deps.tools.filter(
@@ -664,7 +740,7 @@ export class Tasks {
   }
 
   async #compact(
-    { abort, adapter, chat, id }: Work,
+    { abort, adapter, chat, id, recorder }: Work,
     agent: AgentConnector,
     settings: Pick<AgentRequest, 'model' | 'serviceTier' | 'thinking'>,
   ) {
@@ -686,6 +762,7 @@ export class Tasks {
     )
       return m.compactNoSession;
 
+    recorder?.session({ mode: 'resumed', sessionId: session.sessionId });
     const attrs = {
       ...chat,
       taskId: id,
@@ -713,6 +790,17 @@ export class Tasks {
         sandbox: this.#deps.scope(workdir),
       });
       signal.throwIfAborted();
+      recorder?.event({
+        kind: 'compaction',
+        data: {
+          trigger: 'manual',
+          status: result.status,
+          ...(result.status === 'compacted' && {
+            tokensBefore: result.tokensBefore,
+            tokensAfter: result.tokensAfter,
+          }),
+        },
+      });
       if (result.status !== 'compacted') {
         end('error');
         return result.status === 'unsupported'
@@ -731,7 +819,8 @@ export class Tasks {
       attrs.contextTokens = attrs.tokensAfter;
       end();
       return m.compactSuccess;
-    } catch {
+    } catch (error) {
+      recorder?.error(error, 'agent');
       end('error');
       abort.signal.throwIfAborted();
       log({
@@ -748,6 +837,7 @@ export class Tasks {
     work: Work,
     agent: AgentConnector,
     settings: Pick<AgentRequest, 'model' | 'serviceTier' | 'thinking'>,
+    recorder: TaskRecorder,
   ) {
     const { store, auth, context, runtime, trace, hooks } = this.#deps;
     const { chat, input, id, abort, supplements, adapter } = work;
@@ -762,55 +852,96 @@ export class Tasks {
     };
     const attrs = { ...chat, taskId: id };
     const definitions = this.#toolDefinitions(adapter);
-    const storedSession = input.scheduled
-      ? undefined
-      : store.getSession(
-          chat,
-          agent.id,
-          agent.settings?.perTurn?.includes('model') ? undefined : model,
-        );
+    const current = store.getChat(chat);
+    const previousSession = current?.sessionAgentId
+      ? store.getSession(chat, current.sessionAgentId)
+      : store.getSession(chat, agent.id);
+    const storedSession =
+      !input.scheduled &&
+      previousSession?.agentId === agent.id &&
+      (agent.settings?.perTurn?.includes('model') ||
+        previousSession.model === model)
+        ? previousSession
+        : undefined;
     const session =
       storedSession &&
       agent.acceptsSession?.(storedSession.sessionId, definitions) !== false
         ? storedSession
         : undefined;
+    recorder.session(
+      session
+        ? {
+            mode: 'resumed',
+            sessionId: session.sessionId,
+            previousSessionId: session.sessionId,
+          }
+        : {
+            mode: 'new',
+            previousSessionId: previousSession?.sessionId,
+            reason: input.scheduled
+              ? 'scheduled'
+              : storedSession
+                ? 'connector-rejected-session'
+                : previousSession
+                  ? 'agent-or-model-changed'
+                  : 'no-session',
+          },
+    );
     if (!session && !input.scheduled) store.clearSession(chat);
     work.sessionId = session?.sessionId;
     work.sessionScopeChatId = session?.scopeChatId;
     work.sessionScopeModel = session?.model;
     work.acceptsSupplements = true;
-    const assembled = await trace.span('context.assembled', attrs, async () => {
-      const blocks = await context.assemble({
-        ...chat,
-        kind: adapter.kind,
-        ownerId: auth.owner(chat.adapterId),
-        recentMessages: runtime.config.context.recentMessages,
-        throughSeq: input.seq,
-        afterSeq: session?.throughSeq,
-        skipSeq: session?.seenAfter,
-      });
-      if (definitions.some(({ name }) => name === 'schedule.create'))
-        blocks.unshift({
-          source: 'system',
-          trust: 'trusted',
-          content: scheduleReplyStyle,
+    const endContext = recorder.timing('contextMs');
+    const assembled = await trace
+      .span('context.assembled', attrs, async () => {
+        const entries = await context.assembleWithRefs({
+          ...chat,
+          kind: adapter.kind,
+          ownerId: auth.owner(chat.adapterId),
+          recentMessages: runtime.config.context.recentMessages,
+          throughSeq: input.seq,
+          afterSeq: session?.throughSeq,
+          skipSeq: session?.seenAfter,
         });
-      if (input.scheduled && !input.scheduled.allowTextMentions)
-        blocks.push({
-          source: 'system',
-          trust: 'trusted',
-          content:
-            'Return the scheduled response without textual mentions. The platform adds any approved recipients separately.',
-        });
-      const workdir = await context.workdir(chat);
-      await prepareWorkspace(workdir, !runtime.disabled('workspace.record'));
-      work.workdir = workdir;
-      return { blocks, workdir };
-    });
+        if (definitions.some(({ name }) => name === 'schedule.create'))
+          entries.unshift({
+            kind: 'system',
+            name: 'schedule-style',
+            block: {
+              source: 'system',
+              trust: 'trusted',
+              content: scheduleReplyStyle,
+            },
+          });
+        if (input.scheduled && !input.scheduled.allowTextMentions)
+          entries.push({
+            kind: 'new',
+            block: {
+              source: 'system',
+              trust: 'trusted',
+              content:
+                'Return the scheduled response without textual mentions. The platform adds any approved recipients separately.',
+            },
+          });
+        await recorder.context(entries);
+        const workdir = await context.workdir(chat);
+        await prepareWorkspace(workdir, !runtime.disabled('workspace.record'));
+        work.workdir = workdir;
+        return { blocks: entries.map(({ block }) => block), workdir };
+      })
+      .finally(endContext);
 
     let blocks = assembled.blocks;
     let sessionId = session?.sessionId;
     const answers: string[] = [];
+    const supplementBlock = (message: InboundMessage): ContextBlock => ({
+      source: 'message',
+      trust: auth.isOwner({ adapterId: chat.adapterId, userId: message.userId })
+        ? 'owner'
+        : 'member',
+      content: message.text,
+    });
     for (;;) {
       signal.throwIfAborted();
       await hooks.emit('context.assembled', { task, context: blocks });
@@ -847,6 +978,7 @@ export class Tasks {
           trace,
           hooks,
           toolDetails: this.#deps.toolDetails,
+          recorder,
           onResult(result) {
             if (
               approvalPending.aborted &&
@@ -862,12 +994,14 @@ export class Tasks {
         },
         definitions,
       );
+      const endAgent = recorder.timing('agentMs');
       try {
         work.progress.stage = 'agent';
         const result = await runAgent(
           {
             ...this.#deps,
             task,
+            recorder,
             approvalPending,
             scopeChatId:
               sessionId === session?.sessionId
@@ -912,7 +1046,9 @@ export class Tasks {
               }
               return result === true;
             },
-            supplements: supplements.stream(passSignal),
+            supplements: supplements.stream(passSignal, (message) =>
+              recorder.supplement(message.messageId, supplementBlock(message)),
+            ),
           },
         );
         if (result.text.trim()) answers.push(result.text);
@@ -920,6 +1056,7 @@ export class Tasks {
       } finally {
         pass.abort();
         await Promise.allSettled(pending);
+        endAgent();
       }
       if (approvalPending.aborted) {
         sessionId = undefined;
@@ -930,16 +1067,11 @@ export class Tasks {
         work.acceptsSupplements = false;
         break;
       }
-      blocks = next.map(({ message }) => ({
-        source: 'message',
-        trust: auth.isOwner({
-          adapterId: chat.adapterId,
-          userId: message.userId,
-        })
-          ? 'owner'
-          : 'member',
-        content: message.text,
-      }));
+      blocks = next.map(({ message }) => {
+        const block = supplementBlock(message);
+        recorder.supplement(message.messageId, block);
+        return block;
+      });
     }
     const seenAfter = [
       ...new Set([...(session?.seenAfter ?? []), ...supplements.delivered]),
@@ -1162,6 +1294,8 @@ export class Tasks {
           },
           {
             signal,
+            onDelivery: (ids, error) =>
+              work.recorder?.delivery(adapter.id, ids, error),
             onReceipt: ({ messageId, parts, approvalEntities }) => {
               if (approvalEntities) {
                 format.entities = approvalEntities;

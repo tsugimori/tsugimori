@@ -326,6 +326,10 @@ test('redeliveries dedupe and group, room, DM, media, mentions and profiles map 
   );
   await f.waitFor(4);
   assert.deepEqual(
+    f.events.find(({ messageId }) => messageId === 'mg')?.raw,
+    redelivery,
+  );
+  assert.deepEqual(
     [...f.events]
       .sort((a, b) => a.messageId.localeCompare(b.messageId))
       .map(

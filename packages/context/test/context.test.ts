@@ -73,7 +73,10 @@ test('assembles ordered rules, marked recent messages, and scoped resume context
   const blocks = await context.assemble(input);
   assert.equal(blocks[0]?.source, 'system');
   assert.match(blocks[0]!.content, /with the guide\.read tool/);
-  assert.match(blocks[0]!.content, /answer exactly NO_REPLY\.$/);
+  assert.match(
+    blocks[0]!.content,
+    /answer exactly `NO_REPLY: <short reason>` \(one line, no other text\)\.$/,
+  );
   assert.deepEqual(
     blocks
       .slice(1)

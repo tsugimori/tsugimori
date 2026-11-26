@@ -2,10 +2,15 @@ import type {
   AdapterCursor,
   AdminEvent,
   ChatRef,
+  ContextBlock,
   PreviewCloseReason,
   PrincipalRef,
+  TaskEvent,
+  TaskExecution,
+  TriggerDecision,
 } from '@tsugimori/plugin-sdk';
 import type {
+  ActiveTaskRefs,
   AgentSession,
   ApprovalRecord,
   ChatRecord,
@@ -62,12 +67,22 @@ import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 
 import {
+  decodeRecord,
+  decodeText,
+  encodeRecord,
+  encodeText,
+} from './record-codec.ts';
+import { pruneRecords, recordUsage } from './record-retention.ts';
+import {
   adapterCursors,
   agentSessions,
   approvals,
   chats,
   chatSummaries,
+  chatSummaryVersions,
+  contextBlobs,
   grants,
+  messageEdits,
   messages,
   owners,
   pairingCodes,
@@ -77,9 +92,12 @@ import {
   sessionScope,
   setupRuns,
   setupSecrets,
+  taskEvents,
+  taskRecords,
   tasks,
   toolCalls,
   traceSpans,
+  triggerDecisions,
   unavailableCommandScopes,
   users,
   workspaceSettings,
@@ -127,12 +145,35 @@ function currentApproval(now: number) {
   );
 }
 
-function summaryRepair(seq: number) {
-  return {
-    revision: sql`${chatSummaries.revision} + 1`,
-    text: sql`case when ${chatSummaries.throughSeq} >= ${seq} then '' else ${chatSummaries.text} end`,
-    throughSeq: sql`case when ${chatSummaries.throughSeq} >= ${seq} then 0 else ${chatSummaries.throughSeq} end`,
-  };
+function saveSummaryVersion(tx: Transaction, summary: ChatSummary) {
+  tx.insert(chatSummaryVersions)
+    .values({
+      adapterId: summary.adapterId,
+      chatId: summary.chatId,
+      text: encodeRecord(summary.text),
+      revision: summary.revision,
+      throughSeq: summary.throughSeq,
+      createdAt: summary.updatedAt ?? Date.now(),
+    })
+    .run();
+}
+
+function repairSummary(tx: Transaction, ref: ChatRef, seq: number) {
+  const summary = tx
+    .update(chatSummaries)
+    .set({
+      revision: sql`${chatSummaries.revision} + 1`,
+      text: sql`case when ${chatSummaries.throughSeq} >= ${seq} then '' else ${chatSummaries.text} end`,
+      throughSeq: sql`case when ${chatSummaries.throughSeq} >= ${seq} then 0 else ${chatSummaries.throughSeq} end`,
+    })
+    .where(chatScope(chatSummaries, ref))
+    .returning()
+    .get();
+  if (summary?.text) saveSummaryVersion(tx, summary);
+}
+
+function readMessage({ rawZ, ...row }: typeof messages.$inferSelect) {
+  return { ...row, raw: rawZ === null ? row.raw : decodeRecord(rawZ) };
 }
 
 // Children precede their parents so platform cleanup can keep foreign keys on.
@@ -293,6 +334,7 @@ function moveSummary(tx: Transaction, previous: ChatRef, next: ChatRef) {
       set: merged,
     })
     .run();
+  if (merged.text) saveSummaryVersion(tx, { ...next, ...merged });
   tx.delete(chatSummaries).where(chatScope(chatSummaries, previous)).run();
 }
 
@@ -779,6 +821,14 @@ export class SqliteStore implements Store {
           };
           return updates;
         }
+        // These records follow the platform's messages and summaries. They do not
+        // participate in the confirmation fingerprint, which can itself record a decision.
+        tx.delete(triggerDecisions)
+          .where(eq(triggerDecisions.adapterId, id))
+          .run();
+        tx.delete(chatSummaryVersions)
+          .where(eq(chatSummaryVersions.adapterId, id))
+          .run();
         const { calls, runs, spans } = platformDependents(tx, id);
         const deleted = {
           schedule_runs: changed(tx.delete(scheduleRuns).where(runs).run()),
@@ -2051,9 +2101,30 @@ export class SqliteStore implements Store {
     if (chatId !== chat.chatId)
       chat = { ...chat, chatId, kind: 'supergroup', title: null };
     const recorded = this.#db.transaction((tx) => {
+      const rawZ = message.raw == null ? null : encodeRecord(message.raw, true);
+      if (edited) {
+        const previous = tx
+          .select({
+            seq: messages.seq,
+            revision: messages.revision,
+            text: messages.text,
+          })
+          .from(messages)
+          .where(
+            and(
+              chatScope(messages, message),
+              eq(messages.direction, 'inbound'),
+              eq(messages.messageId, message.messageId),
+              eq(messages.migratedFromChatId, message.migratedFromChatId ?? ''),
+            ),
+          )
+          .get();
+        if (previous && previous.text !== message.text)
+          tx.insert(messageEdits).values(previous).run();
+      }
       const insert = tx
         .insert(messages)
-        .values({ ...message, recordedAt: Date.now() });
+        .values({ ...message, raw: null, rawZ, recordedAt: Date.now() });
       const result = (
         edited
           ? insert.onConflictDoUpdate({
@@ -2064,18 +2135,19 @@ export class SqliteStore implements Store {
                 messages.messageId,
                 messages.migratedFromChatId,
               ],
-              set: { text: message.text, raw: message.raw },
+              set: {
+                text: message.text,
+                raw: null,
+                rawZ,
+                revision: sql`${messages.revision} + (${messages.text} <> ${message.text})`,
+              },
             })
           : insert.onConflictDoNothing()
       )
         .returning()
         .get();
       if (!result) return;
-      if (edited)
-        tx.update(chatSummaries)
-          .set(summaryRepair(result.seq))
-          .where(chatScope(chatSummaries, chat))
-          .run();
+      if (edited) repairSummary(tx, chat, result.seq);
       tx.insert(chats)
         .values(chat)
         .onConflictDoUpdate({
@@ -2090,7 +2162,7 @@ export class SqliteStore implements Store {
       const { adapterId, chatId, seq, direction } = recorded;
       this.#publish({ kind: 'message', adapterId, chatId, seq, direction });
     }
-    return recorded;
+    return recorded && readMessage(recorded);
   }
 
   recordOutbound(message: NewMessage, taskId?: string) {
@@ -2100,7 +2172,12 @@ export class SqliteStore implements Store {
     const { recorded, task } = this.#db.transaction((tx) => {
       const recorded = tx
         .insert(messages)
-        .values({ ...message, recordedAt: Date.now() })
+        .values({
+          ...message,
+          raw: null,
+          rawZ: message.raw == null ? null : encodeRecord(message.raw, true),
+          recordedAt: Date.now(),
+        })
         .onConflictDoNothing()
         .returning({ seq: messages.seq })
         .get();
@@ -2126,7 +2203,7 @@ export class SqliteStore implements Store {
   }
 
   getMessage(ref: ChatRef, messageId: string, migratedFromChatId?: string) {
-    return this.#db
+    const row = this.#db
       .select()
       .from(messages)
       .where(
@@ -2140,6 +2217,7 @@ export class SqliteStore implements Store {
       )
       .orderBy(messages.migratedFromChatId, messages.direction)
       .get();
+    return row && readMessage(row);
   }
 
   markDeleted(ref: ChatRef, messageId: string, migratedFromChatId = '') {
@@ -2158,10 +2236,7 @@ export class SqliteStore implements Store {
         .returning({ seq: messages.seq, direction: messages.direction })
         .all();
       if (deleted.length)
-        tx.update(chatSummaries)
-          .set(summaryRepair(Math.min(...deleted.map(({ seq }) => seq))))
-          .where(chatScope(chatSummaries, ref))
-          .run();
+        repairSummary(tx, ref, Math.min(...deleted.map(({ seq }) => seq)));
       return deleted;
     });
     for (const { seq, direction } of changed)
@@ -2220,22 +2295,27 @@ export class SqliteStore implements Store {
   }
 
   saveSummary(summary: ChatSummary) {
-    const changed = !!this.#db
-      .update(chatSummaries)
-      .set({
-        text: summary.text,
-        throughSeq: summary.throughSeq,
-        updatedAt: Date.now(),
-      })
-      .where(
-        and(
-          chatScope(chatSummaries, summary),
-          eq(chatSummaries.revision, summary.revision),
-          gt(sql`${summary.throughSeq}`, chatSummaries.throughSeq),
-        ),
-      )
-      .returning({ revision: chatSummaries.revision })
-      .get();
+    const changed = this.#db.transaction((tx) => {
+      const row = tx
+        .update(chatSummaries)
+        .set({
+          revision: sql`${chatSummaries.revision} + 1`,
+          text: summary.text,
+          throughSeq: summary.throughSeq,
+          updatedAt: Date.now(),
+        })
+        .where(
+          and(
+            chatScope(chatSummaries, summary),
+            eq(chatSummaries.revision, summary.revision),
+            gt(sql`${summary.throughSeq}`, chatSummaries.throughSeq),
+          ),
+        )
+        .returning()
+        .get();
+      if (row) saveSummaryVersion(tx, row);
+      return Boolean(row);
+    });
     if (changed) {
       const { adapterId, chatId, throughSeq } = summary;
       this.#publish({ kind: 'summary', adapterId, chatId, throughSeq });
@@ -2264,7 +2344,8 @@ export class SqliteStore implements Store {
       .orderBy(messages.seq)
       .limit(limit)
       .offset(offset)
-      .all();
+      .all()
+      .map(readMessage);
   }
 
   recentMessages(
@@ -2287,8 +2368,13 @@ export class SqliteStore implements Store {
         : undefined,
       resumed ? eq(messages.direction, 'inbound') : undefined,
     );
+    const fields = getColumns(messages);
     const query = this.#db
-      .select()
+      .select(
+        options.includeRaw === false
+          ? { ...fields, raw: sql<null>`null`, rawZ: sql<null>`null` }
+          : fields,
+      )
       .from(messages)
       .where(filter)
       .orderBy(desc(messages.seq));
@@ -2296,7 +2382,9 @@ export class SqliteStore implements Store {
       resumed || options.limit === undefined
         ? query.all()
         : query.limit(options.limit).all()
-    ).reverse();
+    )
+      .reverse()
+      .map(readMessage);
   }
 
   historyMessages(ref: ChatRef, options: HistoryQuery) {
@@ -2438,6 +2526,245 @@ export class SqliteStore implements Store {
       .set({ sessionAgentId: null, sessionModel: null })
       .where(eq(chats.sessionAgentId, agentId))
       .run();
+  }
+
+  appendTaskEvents(
+    taskId: string,
+    events: readonly TaskEvent[],
+    replaceAfterSeq?: number,
+  ) {
+    const write = (
+      db: Transaction | ReturnType<typeof createDatabase>['db'],
+    ) => {
+      const record = db
+        .select({ pruned: taskRecords.pruned })
+        .from(taskRecords)
+        .where(eq(taskRecords.taskId, taskId))
+        .get();
+      if (record?.pruned) return;
+      if (replaceAfterSeq !== undefined)
+        db.delete(taskEvents)
+          .where(
+            and(
+              eq(taskEvents.taskId, taskId),
+              gt(taskEvents.seq, replaceAfterSeq),
+            ),
+          )
+          .run();
+      for (let index = 0; index < events.length; index += 100)
+        db.insert(taskEvents)
+          .values(
+            events.slice(index, index + 100).map(({ seq, kind, at, data }) => ({
+              taskId,
+              seq,
+              kind,
+              at,
+              data: encodeRecord(data),
+            })),
+          )
+          .onConflictDoUpdate({
+            target: [taskEvents.taskId, taskEvents.seq],
+            set: { data: sql`excluded.data` },
+          })
+          .run();
+    };
+    if (replaceAfterSeq === undefined && events.length <= 100) write(this.#db);
+    else this.#db.transaction(write);
+  }
+
+  getTaskEvents(taskId: string) {
+    return this.#db
+      .select()
+      .from(taskEvents)
+      .where(eq(taskEvents.taskId, taskId))
+      .orderBy(taskEvents.seq)
+      .all()
+      .map(
+        ({ seq, kind, at, data }) =>
+          ({ seq, kind, at, data: decodeRecord(data) }) as TaskEvent,
+      );
+  }
+
+  saveTaskExecution(taskId: string, record: TaskExecution) {
+    const task = this.getTask(taskId);
+    if (!task) return;
+    const data = {
+      agent: record.agent === null ? null : encodeRecord(record.agent),
+      input:
+        record.input === null
+          ? null
+          : encodeText(
+              record.input.map((block) => JSON.stringify(block)).join('\n'),
+            ),
+      output: record.output === null ? null : encodeRecord(record.output),
+      refs: encodeRecord(record.refs),
+      outcome: encodeRecord(record.outcome),
+      timing: encodeRecord(record.timing),
+      supplements: encodeRecord(record.supplements),
+    };
+    const bytes = Object.values(data).reduce(
+      (sum, value) => sum + (value === null ? 0 : Buffer.byteLength(value)),
+      0,
+    );
+    this.#db
+      .insert(taskRecords)
+      .values({ taskId, ...data, bytes, createdAt: task.createdAt })
+      .run();
+  }
+
+  getTaskExecution(taskId: string): TaskExecution | undefined {
+    const row = this.#db
+      .select()
+      .from(taskRecords)
+      .where(eq(taskRecords.taskId, taskId))
+      .get();
+    if (!row) return;
+    const input = row.input === null ? null : decodeText(row.input);
+    return {
+      input:
+        input === null
+          ? null
+          : input
+            ? input.split('\n').map((line) => JSON.parse(line) as ContextBlock)
+            : [],
+      output: row.output === null ? null : decodeRecord(row.output),
+      agent: row.agent === null ? null : decodeRecord(row.agent),
+      refs: decodeRecord(row.refs),
+      outcome: decodeRecord(row.outcome),
+      timing: decodeRecord(row.timing),
+      supplements: decodeRecord(row.supplements),
+    };
+  }
+
+  saveContextBlob(sha256: string, content: string) {
+    this.#db
+      .insert(contextBlobs)
+      .values({
+        sha256,
+        content: encodeRecord(content),
+        createdAt: Date.now(),
+      })
+      .onConflictDoNothing()
+      .run();
+  }
+
+  contextBlob(sha256: string) {
+    const row = this.#db
+      .select({ content: contextBlobs.content })
+      .from(contextBlobs)
+      .where(eq(contextBlobs.sha256, sha256))
+      .get();
+    return row && decodeRecord<string>(row.content);
+  }
+
+  getSummaryVersion({ adapterId, chatId }: ChatRef, revision: number) {
+    const row = this.#db
+      .select({ text: chatSummaryVersions.text })
+      .from(chatSummaryVersions)
+      .where(
+        and(
+          eq(chatSummaryVersions.adapterId, adapterId),
+          eq(chatSummaryVersions.chatId, chatId),
+          eq(chatSummaryVersions.revision, revision),
+        ),
+      )
+      .get();
+    return row && decodeRecord<string>(row.text);
+  }
+
+  messageRaw(ref: ChatRef, seq: number) {
+    const row = this.#db
+      .select({ raw: messages.raw, rawZ: messages.rawZ })
+      .from(messages)
+      .where(
+        and(chatScope(messages, this.resolveChat(ref)), eq(messages.seq, seq)),
+      )
+      .get();
+    return row && (row.rawZ === null ? row.raw : decodeRecord(row.rawZ));
+  }
+
+  contextMessage(ref: ChatRef, seq: number, revision = 0) {
+    const row = this.#db
+      .select({ text: messages.text, revision: messages.revision })
+      .from(messages)
+      .where(
+        and(chatScope(messages, this.resolveChat(ref)), eq(messages.seq, seq)),
+      )
+      .get();
+    if (!row || row.revision === revision) return row?.text;
+    return this.#db
+      .select({ text: messageEdits.text })
+      .from(messageEdits)
+      .where(
+        and(eq(messageEdits.seq, seq), eq(messageEdits.revision, revision)),
+      )
+      .get()?.text;
+  }
+
+  saveTrigger(decision: TriggerDecision, messageSeq?: number) {
+    this.#db
+      .insert(triggerDecisions)
+      .values({ ...decision, messageSeq })
+      .run();
+  }
+
+  triggerForTask({
+    id,
+    sourceMessageId,
+    sourceChatId,
+    ...ref
+  }: TaskRecord): TriggerDecision | undefined {
+    const columns = getColumns(triggerDecisions);
+    const fields = {
+      adapterId: columns.adapterId,
+      chatId: columns.chatId,
+      messageId: columns.messageId,
+      at: columns.at,
+      triggered: columns.triggered,
+      reason: columns.reason,
+      taskId: columns.taskId,
+    };
+    const decision = this.#db
+      .select(fields)
+      .from(triggerDecisions)
+      .where(eq(triggerDecisions.taskId, id))
+      .orderBy(triggerDecisions.id)
+      .get();
+    if (decision) return decision;
+    const message = this.getMessage(ref, sourceMessageId, sourceChatId ?? '');
+    return message && this.triggersForMessages([message.seq]).get(message.seq);
+  }
+
+  triggersForMessages(
+    seqs: readonly number[],
+  ): ReadonlyMap<number, TriggerDecision> {
+    const result = new Map<number, TriggerDecision>();
+    if (!seqs.length) return result;
+    const { id, ...fields } = getColumns(triggerDecisions);
+    const rows = this.#db
+      .select(fields)
+      .from(triggerDecisions)
+      .where(
+        and(
+          inArray(triggerDecisions.messageSeq, [...seqs]),
+          sql`${triggerDecisions.reason} <> 'duplicate'`,
+        ),
+      )
+      .orderBy(desc(id))
+      .all();
+    for (const { messageSeq, ...row } of rows)
+      if (messageSeq !== null && !result.has(messageSeq))
+        result.set(messageSeq, row);
+    return result;
+  }
+
+  recordUsage() {
+    const { bytes, oldestFullTaskAt } = recordUsage(this.#db);
+    return { bytes, oldestFullTaskAt: oldestFullTaskAt ?? undefined };
+  }
+
+  pruneRecords(maxBytes: number, active?: readonly ActiveTaskRefs[]) {
+    return pruneRecords(this.#db, maxBytes, active);
   }
 
   getTask(id: string) {

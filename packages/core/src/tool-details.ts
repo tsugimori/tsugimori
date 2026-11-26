@@ -21,6 +21,7 @@ function envReferences(value: unknown, names: Set<string>) {
 
 function redactText(text: string) {
   return text
+    .replace(/\bbot\d+:[\w-]+/g, redacted)
     .replace(/\bBearer[ \t]+[a-z0-9._~+/=-]+/gi, 'Bearer ' + redacted)
     .replace(
       /\b(?:sk-[\w-]+|gh[pousr]_[\w-]+|github_pat_[\w-]+|xox[\w]*-[\w-]+)/gi,
@@ -37,7 +38,7 @@ function redactText(text: string) {
     );
 }
 
-function cap(text: string, limit: number) {
+export function capToolDetail(text: string, limit: number) {
   if (text.length <= limit) return text;
   const marker = (omitted: number) =>
     `…[omitted ${formatOmitted.format(omitted)} chars]…`;
@@ -50,7 +51,16 @@ function cap(text: string, limit: number) {
   return head + marker(text.length - head.length - tail.length) + tail;
 }
 
-function serializer({ config, env }: WorkspaceConfig, limit: number) {
+function capBytes(text: string, limit: number) {
+  const bytes = Buffer.from(text);
+  if (bytes.length <= limit) return text;
+  const marker = (omitted: number) => `…[truncated ${omitted} bytes]`;
+  let length = limit - Buffer.byteLength(marker(bytes.length));
+  while ((bytes[length]! & 0xc0) === 0x80) length--;
+  return bytes.subarray(0, length).toString() + marker(bytes.length - length);
+}
+
+function serializer({ config, env }: WorkspaceConfig) {
   const names = new Set<string>();
   envReferences(config, names);
   const values = new Set(
@@ -80,7 +90,7 @@ function serializer({ config, env }: WorkspaceConfig, limit: number) {
     redactText(pattern ? text.replace(pattern, redacted) : text);
   const field = (value: unknown) => {
     if (value === undefined) return null;
-    if (typeof value === 'string') return cap(redact(value), limit);
+    if (typeof value === 'string') return capBytes(redact(value), 64 * 1024);
     try {
       const objects = new WeakMap<object, object>();
       const text = JSON.stringify(
@@ -110,12 +120,12 @@ function serializer({ config, env }: WorkspaceConfig, limit: number) {
         },
         2,
       );
-      return text === undefined ? null : cap(text, limit);
+      return text === undefined ? null : capBytes(text, 64 * 1024);
     } catch {
       return '[unserializable tool data]';
     }
   };
-  return { field, label: (text: string) => cap(redact(text), limit) };
+  return { field, redact };
 }
 
 export interface ToolDetail {
@@ -151,11 +161,18 @@ export class ToolDetails {
     return this.#invocations.get(task);
   }
 
+  redactor() {
+    return serializer(this.#deps.snapshot()).redact;
+  }
+
   error(error: unknown) {
     const snapshot = this.#deps.snapshot();
     if (snapshot.config.web?.toolDetails?.enabled === false) return null;
-    return serializer(snapshot, 400).label(
-      error instanceof Error ? error.message : 'Task failed',
+    return capToolDetail(
+      serializer(snapshot).redact(
+        error instanceof Error ? error.message : 'Task failed',
+      ),
+      400,
     );
   }
 
@@ -176,14 +193,17 @@ export class ToolDetails {
         log({ level: 'error', event: 'tool.details_write_failed', taskId });
       }
     };
-    const format = save(() => serializer(current, options?.maxChars ?? 4000));
+    const format = save(() => serializer(current));
     if (!format) return;
     const seq = save(() =>
       store.createToolCall({
         taskId,
         approvalId: null,
-        name: format.label(name),
-        callId: callId === undefined ? null : format.label(callId),
+        name: capToolDetail(format.redact(name), 400),
+        callId:
+          callId === undefined
+            ? null
+            : capToolDetail(format.redact(callId), 400),
         startedAt: Date.now(),
         endedAt: null,
         status: null,

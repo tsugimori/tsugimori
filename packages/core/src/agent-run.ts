@@ -16,6 +16,7 @@ import { Ajv } from 'ajv';
 import { createHash } from 'node:crypto';
 
 import type { HookRunner, Logger } from './hooks.ts';
+import type { TaskRecorder } from './task-recorder.ts';
 import type { ToolDetail, ToolDetails } from './tool-details.ts';
 
 import { untilAborted } from './abort.ts';
@@ -24,6 +25,7 @@ interface AgentRunDependencies {
   approvalPending?: AbortSignal;
   log: Logger;
   onSession?(sessionId: string): void;
+  recorder?: TaskRecorder;
   scopeChatId?: string | null;
   scopeModel?: string;
   task: ToolContext;
@@ -48,6 +50,7 @@ export async function runAgent(
     trace,
     log,
     onSession,
+    recorder,
     task,
     scopeChatId,
     scopeModel,
@@ -94,6 +97,11 @@ export async function runAgent(
       event.durationMs,
       event.status,
     );
+    const { trigger, tokensBefore, tokensAfter, status } = event;
+    recorder?.event({
+      kind: 'compaction',
+      data: { trigger, tokensBefore, tokensAfter, status },
+    });
     io.reportCompaction?.(event);
   };
   return trace.span('agent.run', attrs, async () => {
@@ -103,6 +111,7 @@ export async function runAgent(
       {
         detail?: ToolDetail;
         end: ReturnType<Tracer['begin']>;
+        timed?: () => void;
       }
     >();
     const denying = new Set<string>();
@@ -134,8 +143,10 @@ export async function runAgent(
         detail?.pending(approval.id);
         if (!approval.waiting) detail?.resume();
       }
+      recorder?.toolStarted(detail?.seq);
       const tool = {
         detail,
+        timed: recorder?.timing('toolsMs'),
         end: trace.begin('agent.tool', {
           ...attrs,
           name,
@@ -151,6 +162,7 @@ export async function runAgent(
       result?: unknown,
     ) => {
       const tool = tools.get(callId);
+      tool?.timed?.();
       tool?.detail?.finish(status, result);
       tool?.end(
         status === 'ok' || status === 'pending-approval' ? 'ok' : 'error',
@@ -175,11 +187,20 @@ export async function runAgent(
         if (approvalPending?.aborted) continue;
         const event = next.value;
         switch (event.type) {
+          case 'reasoning':
+            recorder?.text('reasoning', event.text);
+            break;
+          case 'model':
+            recorder?.model(event.model, event.reasoning);
+            break;
           case 'text.delta':
+            recorder?.text('text', event.text);
             if (event.text) firstText();
             deltas += event.text;
             break;
           case 'text.final':
+            if (!deltas.endsWith(event.text))
+              recorder?.text('text', event.text);
             if (event.text) firstText();
             final = event.text;
             break;
@@ -192,6 +213,7 @@ export async function runAgent(
                 sessionScope: nextScope,
               });
             activeScope = nextScope;
+            recorder?.sessionId(sessionId);
             onSession?.(sessionId);
             break;
           }
@@ -287,12 +309,14 @@ export function protectTools(
     trace,
     hooks,
     onResult,
+    recorder,
     toolDetails,
     task,
     requestApproval,
   }: {
     hooks: HookRunner;
     onResult?(result: unknown): void;
+    recorder?: TaskRecorder;
     requestApproval(
       request: Parameters<AgentIO['requestApproval']>[0],
       tool: Extract<ApprovalContinuation, { kind: 'tool' }>,
@@ -319,6 +343,8 @@ export function protectTools(
         const { signal, taskId } = task;
         const { name } = tool;
         const detail = toolDetails?.begin(taskId, name, args, callId);
+        recorder?.toolStarted(detail?.seq);
+        const timed = recorder?.timing('toolsMs');
         const end = trace.begin('tool.run', {
           taskId,
           name,
@@ -373,6 +399,7 @@ export function protectTools(
           result = error;
           throw error;
         } finally {
+          timed?.();
           detail?.finish(status, result);
           const traceStatus =
             status === 'ok' || status === 'pending-approval' ? 'ok' : 'error';

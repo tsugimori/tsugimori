@@ -9,7 +9,11 @@ import type {
   PreviewCloseReason,
   PrincipalRef,
   ResourceRef,
+  TaskEvent,
+  TaskExecution,
+  TaskRefs,
   TextRange,
+  TriggerDecision,
   WebhookConfig,
 } from '@tsugimori/plugin-sdk';
 
@@ -20,6 +24,7 @@ export interface ChatRecord extends ChatRef {
   migratedToChatId: string | null;
   model: string | null;
   serviceTier: string | null;
+  sessionAgentId?: string | null;
   thinking: string | null;
   title: string | null;
 }
@@ -45,6 +50,7 @@ export interface MessageRecord extends ChatRef {
   raw: unknown;
   recordedAt: number | null;
   replyTo: string | null;
+  revision?: number;
   seq: number;
   text: string;
   threadId: string | null;
@@ -289,6 +295,11 @@ export interface ToolCallRecord extends AdminToolCall {
   taskId: string;
 }
 
+export interface ActiveTaskRefs extends ChatRef {
+  refs: Pick<TaskRefs, 'summary' | 'workspace'>;
+  taskId: string;
+}
+
 export interface Store {
   adminAgentActivity(
     agentId: string,
@@ -335,6 +346,11 @@ export interface Store {
     tasksToday: number;
   };
   adminToolCall(taskId: string, seq: number): ToolCallRecord | undefined;
+  appendTaskEvents(
+    taskId: string,
+    events: readonly TaskEvent[],
+    replaceAfterSeq?: number,
+  ): void;
   approvalStatus(
     ref: ChatRef,
     now: number,
@@ -354,6 +370,7 @@ export interface Store {
     sourceMessageId?: string,
     sourceChatId?: string,
   ): void;
+
   claimPairing(principal: PrincipalRef, digest: string, now: number): boolean;
   claimScheduleRun(
     schedule: ScheduleRecord,
@@ -377,6 +394,12 @@ export interface Store {
     now: number,
     matches: (scope: StoredGrant['scope'], resource: ResourceRef) => boolean,
   ): boolean;
+  contextBlob(sha256: string): string | undefined;
+  contextMessage(
+    ref: ChatRef,
+    seq: number,
+    revision?: number,
+  ): string | undefined;
   countPendingApprovals(now: number): number;
   createApproval(approval: ApprovalRecord): void;
   createSchedule(schedule: ScheduleRecord, limit: number): boolean;
@@ -431,7 +454,10 @@ export interface Store {
   getSummaryStatus(
     ref: ChatRef,
   ): { messages: number; updatedAt: number | null } | undefined;
+  getSummaryVersion(ref: ChatRef, revision: number): string | undefined;
   getTask(id: string): TaskRecord | undefined;
+  getTaskEvents(taskId: string): readonly TaskEvent[];
+  getTaskExecution(taskId: string): TaskExecution | undefined;
   getUser(ref: PrincipalRef): UserRecord | undefined;
   getUserDisplay(ref: PrincipalRef): string | undefined;
   getWorkspaceSettings(ref: ChatRef): WorkspaceSettings | undefined;
@@ -477,13 +503,19 @@ export interface Store {
     migratedFromChatId?: string,
   ): void;
   markSetupSecret(ref: ChatRef, messageId: string): void;
+  messageRaw(ref: ChatRef, seq: number): unknown;
   migrateChat(ref: ChatRef, newChatId: string, title?: string): boolean;
   openPreview(preview: StoredPreview): void;
+  pruneRecords(
+    maxBytes: number,
+    active?: readonly ActiveTaskRefs[],
+  ): { bytes: number; tasks: number };
   recentMessages(
     ref: ChatRef,
     options: {
       afterSeq?: number;
       afterSummarySeq?: number;
+      includeRaw?: boolean;
       limit?: number;
       skipSeq?: readonly number[];
       throughSeq: number;
@@ -496,15 +528,19 @@ export interface Store {
     edited?: boolean,
   ): MessageRecord | undefined;
   recordOutbound(message: NewMessage, taskId?: string): void;
+  recordUsage(): { bytes: number; oldestFullTaskAt?: number };
   recordUser(
     user: Omit<UserRecord, 'username'> & Partial<Pick<UserRecord, 'username'>>,
   ): void;
   releaseRemoval(id: string, lease: string): void;
   resolveChat(ref: ChatRef): ChatRef;
+  saveContextBlob(sha256: string, content: string): void;
   saveCursor(adapterId: string, stream: string, cursor: AdapterCursor): void;
   savePairingCode(adapterId: string, digest: string, expiresAt: number): void;
   saveSetupRun(run: SetupRun, lease: string): boolean;
   saveSummary(summary: ChatSummary): boolean;
+  saveTaskExecution(taskId: string, record: TaskExecution): void;
+  saveTrigger(decision: TriggerDecision, messageSeq?: number): void;
   scheduleStatus(
     adapterId: string,
     target: ScheduleAddress,
@@ -538,6 +574,10 @@ export interface Store {
     details?: boolean | 'args',
   ): ToolCallRecord[];
   taskTrace(taskId: string): TraceSpan[];
+  triggerForTask(task: TaskRecord): TriggerDecision | undefined;
+  triggersForMessages(
+    seqs: readonly number[],
+  ): ReadonlyMap<number, TriggerDecision>;
   updateSchedule(
     schedule: ScheduleRecord,
     expected: ScheduleRecord,

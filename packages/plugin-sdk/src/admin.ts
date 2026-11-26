@@ -1,4 +1,9 @@
-import type { ChatRef, ResourcePattern, ResourceRef } from './index.ts';
+import type {
+  ChatRef,
+  ContextBlock,
+  ResourcePattern,
+  ResourceRef,
+} from './index.ts';
 import type { WebhookStatus } from './webhooks.ts';
 
 export interface AccessIdentity {
@@ -114,16 +119,146 @@ export interface AdminTask extends ChatRef {
   tools: readonly AdminToolCall[];
 }
 
+export type TriggerReason =
+  | 'dm-owner'
+  | 'mention'
+  | 'reply-to-bot'
+  | 'command'
+  | 'scheduled'
+  | 'not-addressed'
+  | 'not-allowlisted'
+  | 'addressed-to-other'
+  | 'bot-message'
+  | 'deleted'
+  | 'duplicate';
+
+export interface TriggerDecision extends ChatRef {
+  at: number;
+  messageId: string;
+  reason: TriggerReason;
+  taskId?: string | null;
+  triggered: boolean;
+}
+
+export interface TaskAgent {
+  agentId: string;
+  kind: string;
+  model: string;
+  reasoning?: string;
+  requestedModel: string;
+  serviceTier?: string;
+}
+
+export type TaskContextRef =
+  | { kind: 'system'; name: 'guidelines' | 'schedule-style' }
+  | { index: number; kind: 'rule' }
+  | { kind: 'summary' }
+  | {
+      kind: 'history';
+      revision?: number;
+      seq: number;
+      trust: ContextBlock['trust'];
+    }
+  | { index: number; kind: 'new' };
+
+export interface TaskRefs {
+  history: { fromSeq?: number; seqs?: number[]; throughSeq?: number };
+  order: TaskContextRef[];
+  session: {
+    mode: 'new' | 'resumed';
+    previousSessionId?: string;
+    reason?: string;
+    sessionId?: string;
+  };
+  summary?: { chatId?: string; revision: number };
+  tsugimori: { commit: string; dirty?: boolean };
+  workspace?: {
+    commit?: string;
+    files: { blob?: true; path: string; sha256: string }[];
+  };
+}
+
+export interface TaskOutcome {
+  delivery?: {
+    adapterId: string;
+    parts: { error?: string; messageId?: string; ok: boolean }[];
+  };
+  error?: {
+    code: string;
+    message: string;
+    stage: 'queue' | 'context' | 'agent' | 'delivery' | 'record' | 'other';
+  };
+  kind: 'delivered' | 'silent' | 'failed' | 'cancelled' | 'no-agent';
+  silentReason?: string;
+}
+
+export interface TaskTiming {
+  agentMs: number;
+  contextMs: number;
+  deliveryMs: number;
+  firstTokenMs?: number;
+  queuedMs: number;
+  toolsMs: number;
+  totalMs: number;
+}
+
+export interface TaskSupplement {
+  afterEventSeq: number;
+  at: number;
+  messageId: string;
+}
+
+export type TaskEvent = { at: number; seq: number } & (
+  | { data: { text: string }; kind: 'text' | 'reasoning' }
+  | { data: { toolSeq: number }; kind: 'tool'; tool?: AdminToolCall }
+  | { data: { messageId: string }; kind: 'supplement' }
+  | {
+      data: {
+        status?: string;
+        tokensAfter?: number;
+        tokensBefore?: number;
+        trigger: string;
+      };
+      kind: 'compaction';
+    }
+  | { data: NonNullable<TaskOutcome['error']>; kind: 'error' }
+);
+
+export interface TaskExecution {
+  agent: TaskAgent | null;
+  input: ContextBlock[] | null;
+  outcome: TaskOutcome;
+  output: string | null;
+  refs: TaskRefs;
+  supplements: TaskSupplement[];
+  timing: TaskTiming;
+}
+
+export interface AdminTaskRecord extends Partial<TaskExecution> {
+  context: readonly {
+    kind: 'fixed' | 'history' | 'summary' | 'new';
+    ref: string;
+    text?: string;
+    title: string;
+  }[];
+  events: readonly TaskEvent[];
+  task: AdminTask;
+  trigger?: TriggerDecision;
+}
+
 export interface AdminConversation {
   approvals?: AdminApprovals['approvals'];
   chat: AdminChat;
   messages: readonly {
+    adapterId?: string;
+    chatId?: string;
     deleted: boolean;
     direction: string;
     displayName: string | null;
     recordedAt: number | null;
     seq: number;
     text: string;
+    trigger?: TriggerDecision;
     userId: string | null;
   }[];
   older?: number;
@@ -181,6 +316,7 @@ export interface AdminWorkspace {
 
 export interface AdminOverview {
   chats: readonly AdminChat[];
+  records: { bytes: number; maxBytes: number; oldestFullTaskAt?: number };
   totals: {
     chats: number;
     failedToday: number;
@@ -206,10 +342,12 @@ export interface AdminReader {
   approvals(recentLimit?: number): AdminApprovals;
   chat(ref: ChatRef, before?: number): AdminConversation | undefined;
   chats(): readonly AdminChat[];
+  messageRaw(ref: ChatRef, seq: number): unknown;
   overview(now: number, agentId?: string): AdminOverview;
   pendingApprovals(now: number): number;
   schedules?(): AdminSchedules;
   subscribe(listener: (event: AdminEvent) => void): () => void;
+  task(taskId: string): Promise<AdminTaskRecord | undefined>;
   toolCall(taskId: string, seq: number): AdminToolCall | undefined;
   trace(taskId: string): AdminTrace | undefined;
   workspace(): AdminWorkspace;

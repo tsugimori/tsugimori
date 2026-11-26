@@ -39,7 +39,17 @@ Keep the deployment workspace separate from the framework checkout. Chat rules t
 
 The deployment workspace can be a Git checkout. Use its `.gitignore` to whitelist guideline files only. The `memory.propose` tool requests linked owner approval to add, replace, or remove a bullet in `MEMORY.md`. If the workspace checkout has an `origin`, the gateway commits and pushes the approved edit. The approval result reports any Git failure, and the file edit stays in place.
 
-An agent can stay silent by returning exactly `NO_REPLY`. The gateway completes the task without sending a message and records the silent outcome in the trace and admin API.
+An agent can stay silent by returning `NO_REPLY: <short reason>` on a single line. A bare `NO_REPLY` also works. The console shows the reason, and any required approval notice still goes out.
+
+### Execution records
+
+Open a task in the owner console to inspect its trigger decision, resolved model, session, new input, transcript, output, delivery receipts, and stage timings. The context view loads referenced message and summary revisions and guideline files on demand. Git-tracked guidelines are read from their recorded commit. Modified or untracked guidelines in a Git workspace are saved by content hash. Guidelines in a workspace without Git have hash references only.
+
+The console also shows raw Telegram and LINE message payloads when available. Private commands omit their raw payload. Agent text, visible reasoning, and tool details use secret redaction. Stored tool arguments and results are capped at 64 KiB per field. `web.toolDetails.maxChars` controls how much the console displays.
+
+`records.maxBytes` defaults to 2 GiB (2,147,483,648 bytes). The gateway checks usage one minute after startup and hourly thereafter. When usage exceeds the cap, it prunes the oldest transcripts and task input/output, then raw message payloads, then unreferenced guideline blobs and summary versions. It aims for 90% of the cap and keeps task outcomes, message text, and tool-call metadata. Records have no age limit.
+
+The build writes `packages/core/dist/build-info.json` with the source commit, dirty state, and build time when Git metadata is available. The gateway reads it at startup and attaches the source revision to task context references.
 
 Owners are identified by native platform user ID. Set `owner` by adapter ID or platform kind, with the adapter ID taking precedence. To pair an adapter that has no owner, run `corepack pnpm exec tsugimori pair ./ws --adapter <id>` and send the printed `/pair` command to its bot in a DM within ten minutes. Owners trigger the agent in a DM or by mentioning the bot. In an allowlisted chat, members can trigger it by mentioning or replying to the bot. Ordinary messages can enter chat history even when they do not trigger a turn.
 

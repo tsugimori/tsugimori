@@ -124,9 +124,40 @@ async function fixture() {
     workspace: () => ({ locale: 'zh-TW', timezone: 'Asia/Taipei' }),
     overview: () => ({
       webhook: { state: 'unconfigured' },
+      records: { bytes: 0, maxBytes: 2147483648 },
       chats: [chat],
       totals: { chats: 1, tasksToday: 4, failedToday: 2, pendingApprovals: 0 },
     }),
+    task: async (id) =>
+      id === 'task'
+        ? {
+            task: {
+              ...ref,
+              id,
+              createdAt: 1,
+              agentId: 'agent',
+              model: 'resolved',
+              startedAt: 2,
+              finishedAt: 3,
+              status: 'sent',
+              tools: [],
+            },
+            events: [
+              { kind: 'text', at: 2, seq: 1, data: { text: 'Agent reply' } },
+            ],
+            context: [
+              { kind: 'new', title: 'Owner message', ref: '1', text: payload },
+            ],
+            outcome: { kind: 'delivered' },
+            output: 'Agent reply',
+          }
+        : undefined,
+    messageRaw: (requested, seq) =>
+      requested.adapterId === ref.adapterId &&
+      requested.chatId === ref.chatId &&
+      seq === 1
+        ? { payload }
+        : undefined,
     pendingApprovals: () => 0,
     approvals: () => ({ approvals: [], grants: [] }),
     chat: (requested, before) =>
@@ -281,6 +312,27 @@ test('offers the APIs before the UI is built and redirects bookmarked routes', a
   assert.deepEqual(await result.json(), tool);
   assert.equal(
     (await fetch(f.url + '/api/tool-call?task=missing&seq=11', { headers }))
+      .status,
+    404,
+  );
+  const taskUrl = f.url + '/api/task?id=task';
+  const rawUrl =
+    f.url + '/api/message-raw?adapter=telegram%3Amain&chat=room&seq=1';
+  for (const url of [taskUrl, rawUrl])
+    assert.equal((await fetch(url)).status, 403);
+  const execution = await (await fetch(taskUrl, { headers })).json();
+  assert.equal(execution.task.model, 'resolved');
+  assert.equal(execution.context[0].text, payload);
+  assert.equal(execution.events[0].data.text, execution.output);
+  assert.deepEqual(await (await fetch(rawUrl, { headers })).json(), {
+    payload,
+  });
+  assert.equal(
+    (await fetch(rawUrl.replace('seq=1', 'seq=no'), { headers })).status,
+    400,
+  );
+  assert.equal(
+    (await fetch(rawUrl.replace('chat=room', 'chat=wrong'), { headers }))
       .status,
     404,
   );

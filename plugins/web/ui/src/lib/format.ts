@@ -56,5 +56,8 @@ export interface ViewContext extends AdminWorkspace {
 export const omission = /…\[omitted ([\d,]+) chars\]…/g;
 
 export function wasTruncated(text: string | null) {
-  return text !== null && text.search(omission) !== -1;
+  return (
+    text !== null &&
+    (text.search(omission) !== -1 || /…\[truncated \d+ bytes\]/u.test(text))
+  );
 }

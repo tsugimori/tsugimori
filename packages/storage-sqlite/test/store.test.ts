@@ -1,6 +1,9 @@
+import type { TaskExecution } from '@tsugimori/plugin-sdk';
+
 import { drizzle } from 'drizzle-orm/node-sqlite';
 import { migrate } from 'drizzle-orm/node-sqlite/migrator';
 import assert from 'node:assert/strict';
+import { randomBytes } from 'node:crypto';
 import { mkdir, mkdtemp, readdir, rm, stat, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -246,4 +249,214 @@ test('backfills state for group upgrades already recorded before chat continuity
       reopened.close();
     }
   }
+});
+
+test('migrates existing tasks, raw JSON and the current summary, then stores new summary revisions', async (t) => {
+  const temp = await mkdtemp(join(tmpdir(), 'tsugimori-record-migration-'));
+  t.after(() => rm(temp, { recursive: true, force: true }));
+  const path = join(temp, 'records.db');
+  const migrations = fileURLToPath(new URL('../drizzle/', import.meta.url));
+  const legacyMigrations = join(temp, 'drizzle');
+  await mkdir(legacyMigrations);
+  for (const folder of (await readdir(migrations)).sort()) {
+    if (folder.endsWith('_execution_records')) break;
+    await symlink(
+      join(migrations, folder),
+      join(legacyMigrations, folder),
+      'dir',
+    );
+  }
+  const legacy = new DatabaseSync(path);
+  try {
+    migrate(drizzle({ client: legacy }), {
+      migrationsFolder: legacyMigrations,
+    });
+    legacy.exec(`
+      INSERT INTO chats (adapter_id, chat_id, kind) VALUES ('adapter', 'chat', 'dm');
+      INSERT INTO messages (adapter_id, chat_id, message_id, direction, text, raw)
+        VALUES ('adapter', 'chat', 'old', 'inbound', 'Legacy text', '{"legacy":true}');
+      INSERT INTO chat_summaries (adapter_id, chat_id, revision, text, through_seq, updated_at)
+        VALUES ('adapter', 'chat', 3, 'Legacy summary', 1, 42);
+      INSERT INTO tasks (id, adapter_id, chat_id, source_message_id, status, created_at)
+        VALUES ('old-task', 'adapter', 'chat', 'old', 'completed', 42);
+    `);
+  } finally {
+    legacy.close();
+  }
+  const ref = { adapterId: 'adapter', chatId: 'chat' };
+  const store = new SqliteStore(path);
+  t.after(() => store.close());
+  assert.equal(store.getTask('old-task')?.status, 'completed');
+  assert.equal(store.getTaskExecution('old-task'), undefined);
+  assert.deepEqual(store.messageRaw(ref, 1), { legacy: true });
+  assert.equal(store.getSummaryVersion(ref, 3), 'Legacy summary');
+  const message = {
+    ...ref,
+    direction: 'inbound',
+    userId: 'user',
+    replyTo: null,
+    threadId: null,
+    messageId: 'new',
+    text: 'New message',
+    raw: { text: '界'.repeat(2000) },
+  } as const;
+  const stored = store.recordInbound(
+    { ...ref, kind: 'dm', title: null },
+    { adapterId: ref.adapterId, userId: 'user', display: null },
+    message,
+  )!;
+  const next = 'Updated summary '.repeat(100);
+  assert.ok(
+    store.saveSummary({
+      ...store.getSummary(ref)!,
+      text: next,
+      throughSeq: stored.seq,
+    }),
+  );
+  assert.equal(store.getSummary(ref)?.revision, 4);
+  assert.equal(store.getSummaryVersion(ref, 4), next);
+
+  const inspect = new DatabaseSync(path, { readOnly: true });
+  try {
+    const row = inspect
+      .prepare('SELECT raw, raw_z FROM messages WHERE seq = ?')
+      .get(stored.seq);
+    const raw = Buffer.from(row?.raw_z as Uint8Array);
+    assert.equal(row?.raw, null);
+    assert.deepEqual([...raw.subarray(0, 5)], [1, 0x28, 0xb5, 0x2f, 0xfd]);
+    assert.ok(raw.length < 100);
+    assert.deepEqual(store.messageRaw(ref, stored.seq), message.raw);
+  } finally {
+    inspect.close();
+  }
+});
+
+test('prunes the oldest task transcript first and preserves outcomes and tool metadata', (t) => {
+  const store = new SqliteStore(':memory:');
+  t.after(() => store.close());
+  const ref = { adapterId: 'adapter', chatId: 'chat' };
+  const payload = randomBytes(4_096).toString('base64');
+  const state: TaskExecution = {
+    agent: {
+      agentId: 'fake',
+      kind: 'test',
+      model: 'model',
+      requestedModel: 'default',
+    },
+    input: [{ source: 'message', trust: 'owner', content: payload }],
+    output: payload,
+    refs: {
+      tsugimori: { commit: 'unknown' },
+      history: {},
+      session: { mode: 'new' },
+      order: [],
+    },
+    outcome: {
+      kind: 'delivered',
+      delivery: {
+        adapterId: ref.adapterId,
+        parts: [{ ok: true, messageId: 'outbound' }],
+      },
+    },
+    timing: {
+      queuedMs: 0,
+      contextMs: 0,
+      agentMs: 1,
+      toolsMs: 0,
+      deliveryMs: 1,
+      totalMs: 2,
+    },
+    supplements: [],
+  };
+  for (const createdAt of [1, 2]) {
+    const id = 'task-' + createdAt;
+    store.createTask({
+      ...ref,
+      id,
+      createdAt,
+      sourceMessageId: 'source-' + createdAt,
+      status: 'sent',
+      startedAt: createdAt,
+      finishedAt: createdAt + 1,
+      agentId: 'fake',
+      model: 'model',
+    });
+    store.saveTaskExecution(id, state);
+    store.appendTaskEvents(id, [
+      { seq: 1, at: createdAt, kind: 'text', data: { text: payload } },
+    ]);
+    store.createToolCall({
+      taskId: id,
+      approvalId: null,
+      args: 'arguments',
+      callId: null,
+      name: 'fixture',
+      startedAt: createdAt,
+      endedAt: createdAt + 1,
+      status: 'ok',
+      result: 'result',
+    });
+  }
+  store.recordOutbound({
+    ...ref,
+    messageId: 'outbound',
+    direction: 'outbound',
+    userId: null,
+    replyTo: null,
+    threadId: null,
+    text: 'Delivered',
+    raw: { payload },
+  });
+  const before = store.recordUsage();
+  assert.equal(before.oldestFullTaskAt, 1);
+  const cap = Math.floor(before.bytes * 0.8);
+  const prune = store.pruneRecords(cap);
+  const remaining = store.recordUsage();
+  assert.deepEqual(prune, { bytes: before.bytes - remaining.bytes, tasks: 1 });
+  assert.ok(remaining.bytes <= Math.floor(cap * 0.9));
+  assert.equal(remaining.oldestFullTaskAt, 2);
+  assert.equal(store.getTask('task-1')?.status, 'sent');
+  assert.equal(store.getTaskExecution('task-1')?.input, null);
+  assert.equal(store.getTaskExecution('task-1')?.output, null);
+  assert.deepEqual(store.getTaskExecution('task-1')?.outcome, state.outcome);
+  assert.deepEqual(store.getTaskEvents('task-1'), []);
+  assert.equal(store.taskToolCalls(['task-1'])[0]?.name, 'fixture');
+  assert.equal(store.taskToolCalls(['task-1'])[0]?.args, null);
+  assert.equal(store.taskToolCalls(['task-1'])[0]?.result, null);
+  assert.equal(store.getTaskExecution('task-2')?.output, payload);
+  assert.deepEqual(store.messageRaw(ref, 1), { payload });
+
+  const prior = store.beginSummary(ref);
+  assert.ok(
+    store.saveSummary({ ...prior, text: 'old summary', throughSeq: 1 }),
+  );
+  const active = store.getSummary(ref)!;
+  assert.ok(
+    store.saveSummary({ ...active, text: 'current summary', throughSeq: 2 }),
+  );
+  store.saveContextBlob('orphan', payload);
+  store.saveContextBlob('in-use', payload);
+  assert.ok(
+    store.pruneRecords(0, [
+      {
+        ...ref,
+        taskId: 'running',
+        refs: {
+          workspace: {
+            files: [{ path: 'AGENTS.md', sha256: 'in-use', blob: true }],
+          },
+        },
+      },
+    ]).bytes > 0,
+  );
+  assert.equal(store.contextBlob('in-use'), payload);
+  assert.equal(store.messageRaw(ref, 1), null);
+  assert.equal(store.getMessage(ref, 'outbound')?.text, 'Delivered');
+  assert.equal(store.contextBlob('orphan'), undefined);
+  assert.equal(store.getSummaryVersion(ref, active.revision), undefined);
+  assert.equal(
+    store.getSummaryVersion(ref, store.getSummary(ref)!.revision),
+    'current summary',
+  );
+  assert.equal(store.getTaskExecution('task-2')?.outcome.kind, 'delivered');
 });

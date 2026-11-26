@@ -50,6 +50,10 @@ For manual API-key authentication, configure the key before starting the gateway
 
 For a chat routed to Claude, `/status` shows the effective model, reasoning and speed when known, along with context usage and the reported model window when available. It shows compaction timing and session count from traces. When the SDK reports subscription rate-limit events, the card shows cached five-hour and seven-day quota windows and reset times as available. The card uses cached state. **System** shows whether the Claude instance is attached.
 
+## Execution records
+
+Claude reports the active model and reasoning effort from the SDK initialization message through the `model` event. It emits `reasoning` events for visible thinking text supplied by the SDK.
+
 ## Compaction
 
 After a completed turn reports a context above `compactAt`, the connector queues a background `/compact`. Further turns on that session wait for it. The owner can also use `/compact` to request compaction for the current session. The gateway records native, manual, and post-turn compaction and records before/after token counts when supplied.

@@ -6,9 +6,15 @@ import { mkdir, open, readdir, realpath } from 'node:fs/promises';
 import { join } from 'node:path';
 
 export interface SummaryProvider {
-  get(
-    chat: ChatRef,
-  ): Promise<{ block?: ContextBlock; throughSeq: number } | undefined>;
+  get(chat: ChatRef): Promise<
+    | {
+        block?: ContextBlock;
+        chatId?: string;
+        revision?: number;
+        throughSeq: number;
+      }
+    | undefined
+  >;
 }
 
 const summaryBacklogLimit = 40;
@@ -58,6 +64,40 @@ async function existsAtPath(path: string) {
   }
 }
 
+export const guidelineBlock: ContextBlock = {
+  source: 'system',
+  trust: 'trusted',
+  content:
+    'Older conversation history is available in storage. Workspace guideline files follow; AGENTS.md lists further guideline files that you can read with the guide.read tool when a task needs them. Apply rules in specificity order: workspace, platform, then conversation.\nIf the latest message does not need a reply from you, answer exactly `NO_REPLY: <short reason>` (one line, no other text).',
+};
+
+export function guidelineFileBlock(
+  path: string,
+  content: string,
+): ContextBlock {
+  const chat = path.startsWith('chats/');
+  return {
+    source: 'rule',
+    trust: chat ? 'member' : 'trusted',
+    content: `--- ${chat ? 'chat rules: ' + path.split('/').at(-1) : path} ---\n${content}`,
+  };
+}
+
+type RuleEntry = {
+  block: ContextBlock;
+  content: string;
+  kind: 'rule';
+  path: string;
+};
+
+export type AssembledEntry =
+  | RuleEntry
+  | ({ block: ContextBlock } & (
+      | { kind: 'system'; name: 'guidelines' | 'schedule-style' }
+      | { chatId?: string; kind: 'summary'; revision?: number }
+      | { kind: 'history' | 'new'; revision?: number; seq?: number }
+    ));
+
 export class ContextAssembler {
   readonly #workspace: string;
   readonly #store: ContextDependencies['store'];
@@ -86,19 +126,28 @@ export class ContextAssembler {
   }
 
   async assemble(request: ContextRequest) {
-    const blocks: ContextBlock[] = [];
+    return (await this.assembleWithRefs(request)).map(({ block }) => block);
+  }
+
+  async assembleWithRefs(request: ContextRequest) {
+    const entries: AssembledEntry[] = [];
     let afterSummarySeq: number | undefined;
     if (request.afterSeq === undefined) {
-      blocks.push({
-        source: 'system',
-        trust: 'trusted',
-        content:
-          'Older conversation history is available in storage. Workspace guideline files follow; AGENTS.md lists further guideline files that you can read with the guide.read tool when a task needs them. Apply rules in specificity order: workspace, platform, then conversation.\nIf the latest message does not need a reply from you, answer exactly NO_REPLY.',
+      entries.push({
+        kind: 'system',
+        name: 'guidelines',
+        block: guidelineBlock,
       });
-      blocks.push(...(await this.#loadRules(request)));
+      entries.push(...(await this.#loadRules(request)));
       const summary = await this.#summary.get(request);
       if (summary && summary.throughSeq < request.throughSeq) {
-        if (summary.block) blocks.push(summary.block);
+        if (summary.block)
+          entries.push({
+            kind: 'summary',
+            block: summary.block,
+            revision: summary.revision,
+            chatId: summary.chatId,
+          });
         afterSummarySeq = summary.throughSeq;
       }
     }
@@ -112,18 +161,24 @@ export class ContextAssembler {
       afterSeq: request.afterSeq,
       afterSummarySeq,
       skipSeq: request.skipSeq,
+      includeRaw: false,
     });
     for (const message of messages) {
-      blocks.push({
-        source: 'message',
-        trust:
-          message.userId !== null && message.userId === request.ownerId
-            ? 'owner'
-            : 'member',
-        content: message.text,
+      entries.push({
+        kind: message.seq === request.throughSeq ? 'new' : 'history',
+        seq: message.seq,
+        revision: message.revision,
+        block: {
+          source: 'message',
+          trust:
+            message.userId !== null && message.userId === request.ownerId
+              ? 'owner'
+              : 'member',
+          content: message.text,
+        },
       });
     }
-    return blocks;
+    return entries;
   }
 
   async #loadRules(request: ContextRequest) {
@@ -135,7 +190,7 @@ export class ContextAssembler {
       pathId(request.chatId),
       'rules',
     );
-    const blocks: ContextBlock[] = [];
+    const blocks: RuleEntry[] = [];
     for (const path of [
       'AGENTS.md',
       'SOUL.md',
@@ -147,9 +202,10 @@ export class ContextAssembler {
       const content = await this.#readRule(join(workspace, path));
       if (content !== undefined)
         blocks.push({
-          source: 'rule',
-          trust: 'trusted',
-          content: `--- ${path} ---\n${content}`,
+          kind: 'rule',
+          path,
+          content,
+          block: guidelineFileBlock(path, content),
         });
     }
     if (await existsAtPath(chatRules)) {
@@ -165,12 +221,15 @@ export class ContextAssembler {
         .sort();
       for (const filename of filenames) {
         const content = await this.#readRule(join(chatRules, filename));
-        if (content !== undefined)
+        if (content !== undefined) {
+          const path = `chats/${pathId(request.adapterId)}/${pathId(request.chatId)}/rules/${filename}`;
           blocks.push({
-            source: 'rule',
-            trust: 'member',
-            content: `--- chat rules: ${filename} ---\n${content}`,
+            kind: 'rule',
+            path,
+            content,
+            block: guidelineFileBlock(path, content),
           });
+        }
       }
     }
     return blocks;

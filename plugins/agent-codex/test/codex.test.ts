@@ -16,6 +16,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { CodexAgent } from '../src/index.ts';
 import { mergeQuota } from '../src/quota.ts';
 import { codexChecks } from '../src/setup.ts';
+import { TurnOutput } from '../src/turn.ts';
 
 test('describes model, effort and service tier configured at the root of the Codex home', async (t) => {
   const home = await mkdtemp(join(tmpdir(), 'tsugimori-codex-defaults-'));
@@ -814,6 +815,7 @@ test(
       [Symbol.asyncIterator]();
     const first = await iterator.next();
     assert.equal(first.value.type, 'sessionId');
+    assert.equal((await iterator.next()).value.type, 'model');
     const pending = iterator.next();
     controller.abort();
     await assert.rejects(pending, { name: 'AbortError' });
@@ -901,4 +903,37 @@ test('clears the reached quota flag when an update sets it to null', () => {
   assert.equal(recovered?.rateLimitReachedType, undefined);
   assert.equal(recovered?.primary?.usedPercent, 4);
   assert.equal(recovered?.primary?.windowDurationMins, 10_080);
+});
+
+test('maps visible Codex reasoning summaries once and ignores hidden reasoning', () => {
+  const output = new TurnOutput();
+  const itemId = 'reasoning-1';
+  assert.deepEqual(
+    output.events({
+      method: 'item/reasoning/summaryTextDelta',
+      params: { itemId, summaryIndex: 0, delta: 'Visible' },
+    }),
+    [{ type: 'reasoning', text: 'Visible' }],
+  );
+  assert.deepEqual(
+    output.events({
+      method: 'item/reasoning/textDelta',
+      params: { itemId, delta: 'Hidden' },
+    }),
+    [],
+  );
+  assert.deepEqual(
+    output.events({
+      method: 'item/completed',
+      params: {
+        item: {
+          id: itemId,
+          type: 'reasoning',
+          summary: ['Visible', 'More visible text'],
+          content: ['Hidden'],
+        },
+      },
+    }),
+    [{ type: 'reasoning', text: '\n\nMore visible text' }],
+  );
 });

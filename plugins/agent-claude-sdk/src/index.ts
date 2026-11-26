@@ -497,6 +497,9 @@ export class ClaudeAgent implements AgentConnector {
   ): AsyncIterable<AgentEvent> {
     let sessionId: string | undefined;
     let lastText = '';
+    let reportedModel = false;
+    let streamedText = false;
+    const thinkingBlocks = new Set<number>();
     let model: string | undefined;
     let lastContext: number | undefined;
     let streamedContext: number | undefined;
@@ -517,6 +520,8 @@ export class ClaudeAgent implements AgentConnector {
         const { event: part } = event;
         if (part.type === 'message_start') {
           model = part.message.model;
+          streamedText = false;
+          thinkingBlocks.clear();
           streamedContext = contextTokens(part.message.usage, false);
           lastContext = contextTokens(part.message.usage);
         } else if (
@@ -528,8 +533,25 @@ export class ClaudeAgent implements AgentConnector {
         if (
           part.type === 'content_block_delta' &&
           part.delta.type === 'text_delta'
-        )
+        ) {
+          streamedText = true;
           yield { type: 'text.delta', text: part.delta.text };
+        }
+        if (
+          part.type === 'content_block_start' &&
+          part.content_block.type === 'thinking' &&
+          part.content_block.thinking
+        ) {
+          thinkingBlocks.add(part.index);
+          yield { type: 'reasoning', text: part.content_block.thinking };
+        }
+        if (
+          part.type === 'content_block_delta' &&
+          part.delta.type === 'thinking_delta'
+        ) {
+          thinkingBlocks.add(part.index);
+          yield { type: 'reasoning', text: part.delta.thinking };
+        }
         if (
           part.type === 'content_block_start' &&
           part.content_block.type === 'tool_use'
@@ -556,8 +578,18 @@ export class ClaudeAgent implements AgentConnector {
           lastContext = contextTokens(event.message.usage) ?? lastContext;
         }
         const text: string[] = [];
-        for (const block of event.message.content) {
-          if (block.type === 'text') text.push(block.text);
+        for (const [index, block] of event.message.content.entries()) {
+          if (block.type === 'text') {
+            text.push(block.text);
+            if (event.parent_tool_use_id === null && !streamedText)
+              yield { type: 'text.delta', text: block.text };
+          }
+          if (
+            block.type === 'thinking' &&
+            event.parent_tool_use_id === null &&
+            !thinkingBlocks.has(index)
+          )
+            yield { type: 'reasoning', text: block.thinking };
           if (block.type !== 'tool_use' || frameworkTools.has(block.name))
             continue;
           if (tools.has(block.id)) {
@@ -573,8 +605,11 @@ export class ClaudeAgent implements AgentConnector {
             };
           }
         }
-        if (text.length && event.parent_tool_use_id === null)
-          lastText = text.join('');
+        if (event.parent_tool_use_id === null) {
+          if (text.length) lastText = text.join('');
+          streamedText = false;
+          thinkingBlocks.clear();
+        }
       } else if (
         event.type === 'user' &&
         Array.isArray(event.message.content)
@@ -595,6 +630,10 @@ export class ClaudeAgent implements AgentConnector {
         }
       } else if (event.type === 'system' && event.subtype === 'init') {
         model = event.model;
+        if (model && !reportedModel) {
+          reportedModel = true;
+          yield { type: 'model', model, reasoning: event.effort ?? undefined };
+        }
       } else if (
         event.type === 'system' &&
         event.subtype === 'compact_boundary'

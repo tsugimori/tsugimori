@@ -7,6 +7,7 @@
 
   import Badge from '../components/Badge.svelte';
   import JsonView from '../components/JsonView.svelte';
+  import TaskRecord from '../components/TaskRecord.svelte';
   import Time from '../components/Time.svelte';
   import ToolDetails from '../components/ToolDetails.svelte';
   import { chatHref, statusStyle } from '../lib/display.ts';
@@ -86,6 +87,7 @@
     )}
   </p>
 </div>
+{#if !preview}<TaskRecord taskId={task.id} {ctx} />{/if}
 {#if data.spans.length}
   <div class="card">
     <ol class="spans">

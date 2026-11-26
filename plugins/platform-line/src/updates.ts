@@ -48,6 +48,14 @@ export function mapEvent(
   const mentionsBot =
     Array.isArray(mentionees) &&
     mentionees.some((entry: unknown) => record(entry)?.isSelf === true);
+  const addressedToOther =
+    sourceType !== 'user' &&
+    !mentionsBot &&
+    Array.isArray(mentionees) &&
+    mentionees.some(
+      (entry: unknown) =>
+        record(entry)?.type === 'user' && record(entry)?.isSelf === false,
+    );
   const user = encodeURIComponent(userId);
   const profilePath =
     sourceType === 'user'
@@ -58,10 +66,12 @@ export function mapEvent(
     quoteToken: nonempty(message.quoteToken),
     replyToken: nonempty(event.replyToken),
     inbound: {
+      ...(addressedToOther && { addressedToOther: true }),
       chatId,
       chatKind: sourceType === 'user' ? 'dm' : 'group',
       mentionsBot,
       messageId,
+      raw: event,
       replyTo: nonempty(message.quotedMessageId),
       text,
       type: 'message',

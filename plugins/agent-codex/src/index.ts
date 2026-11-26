@@ -578,14 +578,15 @@ export class CodexAgent implements AgentConnector {
     )
       throw new Error('Codex returned an invalid thread ID');
     const reportedTier = result.serviceTier;
+    const resolvedModel =
+      typeof result.model === 'string' ? result.model : model;
+    const resolvedEffort =
+      typeof result.reasoningEffort === 'string'
+        ? result.reasoningEffort
+        : effort;
     this.#updateThreadContext(server, threadId, {
-      model:
-        model ?? (typeof result.model === 'string' ? result.model : undefined),
-      effort:
-        effort ??
-        (typeof result.reasoningEffort === 'string'
-          ? result.reasoningEffort
-          : undefined),
+      model: resolvedModel,
+      effort: resolvedEffort,
       requestedModel: request.model,
       requestedServiceTier: request.serviceTier,
       requestedThinking: request.thinking,
@@ -604,6 +605,8 @@ export class CodexAgent implements AgentConnector {
       model,
       effort,
       serviceTier,
+      resolvedModel,
+      resolvedEffort,
       summarize,
       compaction,
       window,
@@ -685,6 +688,8 @@ export class CodexAgent implements AgentConnector {
       model,
       effort,
       serviceTier,
+      resolvedModel,
+      resolvedEffort,
       summarize,
       compaction,
       window,
@@ -752,6 +757,22 @@ export class CodexAgent implements AgentConnector {
       turnId = id;
       signal.throwIfAborted();
       yield { type: 'sessionId', sessionId: stamp + threadId };
+      const turn = asRecord(started.turn);
+      const activeModel =
+        typeof turn.model === 'string'
+          ? turn.model
+          : typeof started.model === 'string'
+            ? started.model
+            : resolvedModel;
+      const activeEffort =
+        typeof turn.reasoningEffort === 'string'
+          ? turn.reasoningEffort
+          : typeof started.reasoningEffort === 'string'
+            ? started.reasoningEffort
+            : resolvedEffort;
+      signal.throwIfAborted();
+      if (activeModel)
+        yield { type: 'model', model: activeModel, reasoning: activeEffort };
       for (;;) {
         const frame = await frames.next(signal);
         if (frame.method === 'turn/completed') {

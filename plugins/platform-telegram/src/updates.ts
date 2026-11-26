@@ -80,6 +80,7 @@ export function mapUpdate(
       const userDisplay = displayName(from);
       return {
         type: 'callback',
+        raw: callback,
         callbackId: typeof callback.data === 'string' ? callback.data : '',
         queryId: callback.id,
         chatId: room.chatId,
@@ -137,11 +138,17 @@ function mapMessage(
       ? message.entities
       : message.caption_entities;
   const reply = record(message.reply_to_message);
-  const repliesToBot = nativeId(record(reply?.from)?.id) === bot.id;
+  const replySender = record(reply?.from);
+  const repliesToBot = nativeId(replySender?.id) === bot.id;
+  const mentionsBot = repliesToBot || mentions(entities, text, bot);
+  const addressedToOther = !mentionsBot && replySender?.is_bot === true;
   const userDisplay = displayName(sender);
   return {
     ...room,
     type: 'message',
+    raw: message,
+    ...(sender?.is_bot === true && { botMessage: true }),
+    ...(addressedToOther && { addressedToOther: true }),
     edited,
     userId,
     userDisplay: userDisplay || undefined,
@@ -149,6 +156,6 @@ function mapMessage(
     text,
     replyTo: nativeId(reply?.message_id),
     repliesToBot,
-    mentionsBot: repliesToBot || mentions(entities, text, bot),
+    mentionsBot,
   };
 }

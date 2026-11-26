@@ -19,6 +19,7 @@ import type { GuidedSetup, SetupRequest } from './setup.ts';
 import { untilAborted } from './abort.ts';
 import { choiceLabel, supportsChoices } from './chat-choices.ts';
 import { failureText } from './checks.ts';
+import { describeError } from './errors.ts';
 import { conversationId } from './outbound.ts';
 import { SetupCancelled } from './setup.ts';
 import { systemMessages } from './system-messages.ts';
@@ -48,6 +49,7 @@ interface Dependencies {
   choices: ChatChoices;
   isOwner(adapterId: string, userId: string): boolean;
   log: Logger;
+  redact(text: string): string;
   runtime: Runtime;
   setup: GuidedSetup;
   store: Store;
@@ -215,7 +217,7 @@ export class ChatSetup {
     message: InboundMessage,
     request: SetupRequest,
   ) {
-    const { log, runtime, setup, store, trace } = this.#deps;
+    const { log, redact, runtime, setup, store, trace } = this.#deps;
     const { locale } = runtime.config;
     const m = systemMessages(locale).setup;
     const adapterId = adapter.id;
@@ -238,6 +240,21 @@ export class ChatSetup {
       (message.chatKind === 'dm' ? m.directMessage : origin)
     ).replace(/\s+/gu, ' ');
     let promptClosed: Promise<void> | undefined;
+    const category = request.mode === 'add' ? request.category : 'agent';
+    const kind =
+      request.mode === 'add'
+        ? request.kind
+        : (runtime.config.agents.find(({ id }) => id === request.id)?.kind ??
+          'unknown');
+    const secrets = new Set<string>();
+    const errorText = (error: unknown) =>
+      describeError(error, (text) => {
+        for (const secret of secrets)
+          text = text.replaceAll(secret, '[redacted]');
+        return redact(text);
+      });
+    let step: string = request.mode;
+    let tracedError: unknown;
     const done = (async () => {
       try {
         const result = await setup.run(request, {
@@ -245,8 +262,30 @@ export class ChatSetup {
           show,
           signal: this.#shutdown.signal,
           cancelSignal: cancel.signal,
-          measure: (step, run) =>
-            trace.span('setup.step', { adapterId, step }, run),
+          measure: (name, run) => {
+            step = name;
+            const attrs = {
+              adapterId,
+              category,
+              kind,
+              step,
+              error: null as string | null,
+            };
+            return trace.span('setup.step', attrs, async () => {
+              try {
+                return await run();
+              } catch (error) {
+                if (
+                  !(error instanceof SetupError) &&
+                  !(error instanceof SetupCancelled)
+                ) {
+                  attrs.error = errorText(error);
+                  tracedError = error;
+                }
+                throw error;
+              }
+            });
+          },
           waitForAttach: async (id) => {
             const wait = AbortSignal.any([signal, AbortSignal.timeout(15_000)]);
             try {
@@ -282,6 +321,7 @@ export class ChatSetup {
             ) => {
               if (answered || signal.aborted || timeout?.aborted) return;
               answered = true;
+              if (secret && answer.trim()) secrets.add(answer.trim());
               if (finish) {
                 const typed = answer.trim();
                 const value =
@@ -412,6 +452,18 @@ export class ChatSetup {
       } catch (error) {
         if (error instanceof SetupCancelled) return error;
         if (!this.#shutdown.signal.aborted && !cancel.signal.aborted) {
+          if (!(error instanceof SetupError)) {
+            const attrs = {
+              adapterId,
+              category,
+              kind,
+              step,
+              error: errorText(error),
+            };
+            log({ level: 'error', event: 'setup.failed', ...attrs });
+            if (tracedError !== error)
+              trace.record('setup.step', attrs, 0, 'error');
+          }
           const text = error instanceof SetupError ? error.message : m.failed;
           await show(text).catch(() =>
             log({ level: 'warn', event: 'setup.feedback_failed', adapterId }),

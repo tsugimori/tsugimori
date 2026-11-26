@@ -23,6 +23,7 @@ const schema: Record<string, unknown> = JSON.parse(
 
 export const configFilename = 'tsugimori.json';
 export const envFilename = '.env';
+export const defaultRecordsMaxBytes = 2 * 1024 ** 3;
 
 export class ConfigError extends Error {}
 
@@ -63,6 +64,7 @@ export interface Config {
       zoneId: string;
     };
   };
+  records?: { maxBytes?: number };
   scheduler?: {
     highCostModels?: string[];
     maxActivePerUser?: number;

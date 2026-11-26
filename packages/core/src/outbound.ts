@@ -96,6 +96,7 @@ export class Outbound {
     adapter: PlatformAdapter,
     message: OutboundMessage,
     options: {
+      onDelivery?(messageIds: readonly string[], error?: unknown): void;
       onReceipt?(receipt: SendReceipt): void;
       scheduled?: boolean;
       signal?: AbortSignal;
@@ -161,10 +162,19 @@ export class Outbound {
           adapter.send(message),
         );
       } catch (error) {
-        if (error instanceof SendFailure) record(error.parts);
+        const sent = error instanceof SendFailure ? error.parts : [];
+        options.onDelivery?.(
+          sent.map(({ messageId }) => messageId),
+          error,
+        );
+        if (sent.length) record(sent);
         throw error;
       }
-      record(receipt.parts ?? [{ ...receipt, text: message.text }], taskId);
+      const parts = receipt.parts?.length
+        ? receipt.parts
+        : [{ ...receipt, text: message.text }];
+      options.onDelivery?.(parts.map(({ messageId }) => messageId));
+      record(parts, taskId);
       options.onReceipt?.(receipt);
     } catch (error) {
       if (!taskId || (error instanceof SendFailure && !error.deliveryUnknown))

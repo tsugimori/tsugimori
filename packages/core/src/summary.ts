@@ -77,6 +77,8 @@ export class BackgroundSummaries implements SummaryProvider {
           }
         : undefined,
       throughSeq: summary?.throughSeq ?? 0,
+      revision: summary?.revision,
+      chatId: summary?.chatId,
     };
   }
 

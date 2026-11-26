@@ -51,6 +51,10 @@ For an existing agent, use `/login <id>` or `corepack pnpm exec tsugimori setup 
 
 For a chat routed to Codex, `/status` shows the implementation, effective model, effort and speed, context usage, session age, and cached provider quota and compaction details when available. The gateway uses reported session information and the configured or native defaults it knows about. **System** lists the agent's attachment state.
 
+## Execution records
+
+Codex reports the active model and reasoning effort through the SDK `model` event when the app server supplies them. It emits `reasoning` events for visible reasoning summaries supplied by the server.
+
 ## Compaction
 
 The gateway configures Codex's post-turn compaction on supported CLIs. Set `options.asyncCompaction` to `true` to use async compaction when the CLI supports it. These modes derive a percentage threshold from `compactAt` and the model context window. With an unknown model window or unsupported timing, native auto-compaction is the fallback.

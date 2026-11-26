@@ -6,6 +6,7 @@ import type {
   AdminTask,
   AdminToolCall,
   ChatRef,
+  TaskEvent,
   WebhookStatus,
 } from '@tsugimori/plugin-sdk';
 import type {
@@ -17,7 +18,12 @@ import type {
   TraceSpan,
 } from '@tsugimori/storage';
 
+import { defaultRecordsMaxBytes } from '@tsugimori/config';
+
 import type { Tasks } from './tasks.ts';
+
+import { reconstructContext } from './record-context.ts';
+import { capToolDetail } from './tool-details.ts';
 
 interface Dependencies {
   agentInfo(id: string): {
@@ -32,6 +38,7 @@ interface Dependencies {
   route: Tasks['route'];
   store: Store;
   webhook(): WebhookStatus;
+  workspace: string;
 }
 
 function startOfDay(now: number, timezone: string) {
@@ -91,7 +98,9 @@ function taskDetails(
     ...task,
     silent: spans.some(
       ({ attrs, name }) =>
-        name === 'outbound.silent' && attrs.reply === 'silent',
+        name === 'outbound.silent' &&
+        attrs.reply === 'silent' &&
+        !attrs.fallback,
     ),
     tools: tools.sort(
       (a, b) =>
@@ -160,7 +169,17 @@ export function adminReader({
   webhook,
   route,
   store,
+  workspace,
 }: Dependencies): AdminReader {
+  function showTool({ args, result, ...tool }: AdminToolCall): AdminToolCall {
+    const limit = config().web?.toolDetails?.maxChars ?? 4000;
+    return {
+      ...tool,
+      args: args === null ? null : capToolDetail(args, limit),
+      result: result === null ? null : capToolDetail(result, limit),
+    };
+  }
+
   const chatDetails = (chat: ChatRecord, now: number): AdminChat => {
     const {
       activeTask,
@@ -306,6 +325,10 @@ export function adminReader({
       return {
         chats: chats.slice(0, 200),
         webhook: webhook(),
+        records: {
+          ...store.recordUsage(),
+          maxBytes: config().records?.maxBytes ?? defaultRecordsMaxBytes,
+        },
         totals: {
           chats: chats.length,
           ...store.adminTaskCounts(startOfDay(now, config().timezone), now),
@@ -318,6 +341,7 @@ export function adminReader({
       const chat = getChat(ref, now);
       if (!chat) return;
       const window = store.listChatMessages(ref, before);
+      const decisions = store.triggersForMessages(window.map(({ seq }) => seq));
       const oldest = window.length === 100 ? window.at(-1) : undefined;
       const page = store.adminChatTasks(ref, {
         before,
@@ -332,7 +356,10 @@ export function adminReader({
       );
       return {
         chat,
-        messages: window,
+        messages: window.map((message) => ({
+          ...message,
+          trigger: decisions.get(message.seq),
+        })),
         older: oldest?.seq,
         approvals: store
           .adminChatApprovals(ref, now)
@@ -405,7 +432,9 @@ export function adminReader({
             approval.expiresAt <= now
               ? 'expired'
               : approval.status,
-          args: byApproval.get(approval.id)?.args,
+          args: byApproval.has(approval.id)
+            ? showTool(byApproval.get(approval.id)!).args
+            : undefined,
           chat: getChat(approval, now),
           requesterDisplay: store.getUserDisplay({
             ...approval,
@@ -419,7 +448,57 @@ export function adminReader({
       const record = store.adminToolCall(taskId, seq);
       if (!record) return;
       const { name, args, result, status, callId, startedAt, endedAt } = record;
-      return { name, args, result, status, callId, startedAt, endedAt, seq };
+      return showTool({
+        name,
+        args,
+        result,
+        status,
+        callId,
+        startedAt,
+        endedAt,
+        seq,
+      });
+    },
+    messageRaw: (ref, seq) => store.messageRaw(ref, seq),
+    task: async (taskId) => {
+      const task = store.getTask(taskId);
+      if (!task) return;
+      const execution = store.getTaskExecution(taskId);
+      const detailedTask = taskDetails(
+        task,
+        store.taskToolCalls([taskId]).map(showTool),
+        store.taskTrace(taskId),
+      );
+      const bySeq = new Map(detailedTask.tools.map((call) => [call.seq, call]));
+      const events: TaskEvent[] = [];
+      let lastSeq = 0;
+      for (const event of store.getTaskEvents(taskId)) {
+        lastSeq = event.seq;
+        if (event.kind === 'tool') {
+          events.push({ ...event, tool: bySeq.get(event.data.toolSeq) });
+          bySeq.delete(event.data.toolSeq);
+        } else events.push(event);
+      }
+      // Calls created by older builds or by a post-task approval still belong in the transcript.
+      for (const tool of bySeq.values()) {
+        events.push({
+          kind: 'tool',
+          at: tool.startedAt,
+          seq: ++lastSeq,
+          data: { toolSeq: tool.seq },
+          tool,
+        });
+      }
+      events.sort((a, b) => a.at - b.at || a.seq - b.seq);
+      return {
+        ...execution,
+        task: detailedTask,
+        events,
+        trigger: store.triggerForTask(task),
+        context: execution
+          ? await reconstructContext(store, workspace, task, execution)
+          : [],
+      };
     },
     trace: (taskId) => {
       const task = store.getTask(taskId);
@@ -428,7 +507,11 @@ export function adminReader({
       const spans = store.taskTrace(taskId);
       return {
         chat,
-        task: taskDetails(task, store.taskToolCalls([taskId]), spans),
+        task: taskDetails(
+          task,
+          store.taskToolCalls([taskId]).map(showTool),
+          spans,
+        ),
         spans,
       };
     },

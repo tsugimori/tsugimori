@@ -136,10 +136,12 @@ test(
     assert.equal(first.text, '😀 @EXAMPLEBOT');
     assert.equal(first.replyTo, '9');
     assert.equal(first.mentionsBot, true);
+    assert.deepEqual(first.raw, updates[0]?.message);
     assert.equal(edit?.type, 'message');
     assert.equal(edit.edited, true);
     assert.equal(edit.userUsername, null);
     assert.equal(edit.text, 'edited');
+    assert.deepEqual(edit.raw, updates[1]?.edited_message);
     assert.equal(edit.mentionsBot, true);
     assert.equal(reply?.type, 'message');
     assert.equal(reply.chatKind, 'dm');
@@ -147,6 +149,7 @@ test(
     assert.equal(callback?.type, 'callback');
     assert.equal(callback.callbackId, 'approval:once:test-id');
     assert.equal(callback.queryId, 'query-1');
+    assert.deepEqual(callback.raw, updates[3]?.callback_query);
     assert.equal(callback.userUsername, 'example_sender');
     assert.equal(callback.userDisplay, 'Example sender');
     assert.equal(adapter.capabilities.deleteEvents, false);

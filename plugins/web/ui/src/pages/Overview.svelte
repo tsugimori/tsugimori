@@ -29,6 +29,21 @@
   } = $props();
   const m = $derived(i18n(ctx.locale));
 
+  function bytes(value: number) {
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    const unit = Math.min(
+      units.length - 1,
+      Math.max(0, Math.floor(Math.log2(Math.max(1, value)) / 10)),
+    );
+    return (
+      new Intl.NumberFormat(ctx.locale, { maximumFractionDigits: 1 }).format(
+        value / 1024 ** unit,
+      ) +
+      ' ' +
+      units[unit]
+    );
+  }
+
   function shortId(id: string) {
     return id.length > 20 ? id.slice(0, 9) + '…' + id.slice(-5) : id;
   }
@@ -103,6 +118,17 @@
     {#if data.webhook.baseUrl}
       · {data.webhook.baseUrl}{/if}
   </p>
+  {#if data.records}
+    <p class="meta">
+      {m.records}{ctx.locale === 'zh-TW' ? '：' : ': '}{bytes(
+        data.records.bytes,
+      )} / {bytes(data.records.maxBytes)}{#if data.records.oldestFullTaskAt}
+        · {m.recordsSince}{ctx.locale === 'zh-TW' ? '：' : ' '}{formatTime(
+          data.records.oldestFullTaskAt,
+          ctx.timezone,
+        ).slice(0, 16)}{/if}
+    </p>
+  {/if}
   <div class="section-head">
     <h2>
       {m.chats}

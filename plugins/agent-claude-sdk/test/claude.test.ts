@@ -286,12 +286,32 @@ test(
           assert.equal(denied?.behavior, 'deny');
           assert.equal(bash?.behavior, 'allow');
 
+          yield frame({
+            type: 'system',
+            subtype: 'init',
+            model: 'claude-resolved',
+            effort: 'high',
+          });
+          yield frame({
+            type: 'stream_event',
+            parent_tool_use_id: null,
+            event: {
+              type: 'content_block_delta',
+              index: 0,
+              delta: {
+                type: 'thinking_delta',
+                thinking: 'Visible Claude thought',
+              },
+            },
+          });
           yield await Promise.resolve(
             frame({
               type: 'assistant',
               parent_tool_use_id: null,
               message: {
                 content: [
+                  { type: 'thinking', thinking: 'Visible Claude thought' },
+                  { type: 'redacted_thinking', data: 'Excluded thought' },
                   {
                     type: 'tool_use',
                     id: 'tool-1',
@@ -356,6 +376,8 @@ test(
     ]);
     assert.deepEqual(first, [
       { type: 'sessionId', sessionId: 'claude-native' },
+      { type: 'model', model: 'claude-resolved', reasoning: 'high' },
+      { type: 'reasoning', text: 'Visible Claude thought' },
       {
         type: 'tool.started',
         callId: 'tool-1',
