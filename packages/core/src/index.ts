@@ -145,6 +145,7 @@ export class Gateway {
           decidedAt: approval.decidedAt,
           decidedBy: approval.decidedBy,
           expiresAt: approval.expiresAt,
+          failureReason: approval.failureReason,
           id: approval.id,
           promptMessageId: approval.promptMessageId,
           requester: approval.requester,
@@ -296,6 +297,7 @@ export class Gateway {
         );
       },
       owner: (id) => this.#auth.owner(id),
+      pushFailure: (chat, attrs) => this.#schedulePushFailure(chat, attrs),
       settings: () => ({
         ...this.#runtime.config.scheduler,
         locale: this.#runtime.config.locale,
@@ -412,7 +414,12 @@ export class Gateway {
     for (const id of this.#runtime.adapterIds) {
       const owner = this.#auth.owner(id);
       const adapter = this.#runtime.getAdapter(id);
-      if (!owner || !adapter) continue;
+      if (
+        !owner ||
+        !adapter ||
+        (adapter.capabilities.outboundPush ?? 'free') !== 'free'
+      )
+        continue;
       this.#environmentNotification = this.#notifyOwner(
         adapter,
         owner,
@@ -429,7 +436,11 @@ export class Gateway {
       if (this.#platformNotifications.has(id)) continue;
       for (const route of [id, ...active.filter((item) => item !== id)]) {
         const adapter = this.#runtime.getAdapter(route);
-        if (!adapter) continue;
+        if (
+          !adapter ||
+          (adapter.capabilities.outboundPush ?? 'free') !== 'free'
+        )
+          continue;
         const owner = this.#auth.owner(route);
         if (!owner) continue;
         const batch = this.#runtime.takePlatformNotices(id);
@@ -790,7 +801,16 @@ export class Gateway {
   ): Promise<ScheduleRun['status']> {
     const { store } = this.#deps;
     const { id, adapterId, chatId, createdBy, action } = schedule;
-    const attrs = { adapterId, chatId, scheduleId: id, dueAt: run.dueAt };
+    const metered =
+      this.#runtime.getAdapter(adapterId)?.capabilities.outboundPush ===
+      'metered';
+    const attrs = {
+      adapterId,
+      chatId,
+      scheduleId: id,
+      dueAt: run.dueAt,
+      ...(metered && { 'push.metered': true }),
+    };
     const delayNote = delayed
       ? systemMessages(this.#runtime.config.locale).delayed(
           new Date(run.dueAt).toISOString(),
@@ -811,15 +831,19 @@ export class Gateway {
               )
             : { mentions: action.mentions, text: action.text };
         try {
-          await this.#outbound.send(adapter, {
-            ...schedule.target,
-            text: delayNote + reminder.text,
-            entities: reminderEntities(reminder.mentions).map((entity) => ({
-              ...entity,
-              offset: entity.offset + delayNote.length,
-            })),
-            parseTextMentions: false,
-          });
+          await this.#outbound.send(
+            adapter,
+            {
+              ...schedule.target,
+              text: delayNote + reminder.text,
+              entities: reminderEntities(reminder.mentions).map((entity) => ({
+                ...entity,
+                offset: entity.offset + delayNote.length,
+              })),
+              parseTextMentions: false,
+            },
+            { scheduled: true },
+          );
           return 'sent';
         } catch (error) {
           this.#deps.log({
@@ -889,6 +913,31 @@ export class Gateway {
     });
   }
 
+  #schedulePushFailure(
+    chat: ChatRef,
+    attrs: {
+      approvalId?: string;
+      dueAt?: number;
+      scheduleId?: string;
+      taskId?: string;
+    },
+  ) {
+    if (
+      this.#runtime.getAdapter(chat.adapterId)?.capabilities.outboundPush !==
+      'none'
+    )
+      return;
+    const reason =
+      'Scheduled delivery is unavailable on this platform. It only supports replies to incoming messages.';
+    this.#trace.record(
+      'schedule.push_unavailable',
+      { ...chat, ...attrs, reason },
+      0,
+      'error',
+    );
+    return reason;
+  }
+
   #resolveApproval(
     adapter: PlatformAdapter,
     input: Parameters<Auth['resolveApproval']>[0],
@@ -901,7 +950,19 @@ export class Gateway {
         chatId: input.chatId,
       },
       () =>
-        this.#auth.resolveApproval(input, (approval) => {
+        this.#auth.resolveApproval(input, (approval, schedule) => {
+          const failure = this.#schedulePushFailure(
+            {
+              adapterId: schedule.adapterId,
+              chatId: conversationId(schedule.target),
+            },
+            {
+              taskId: approval.taskId,
+              approvalId: approval.id,
+              scheduleId: schedule.id,
+            },
+          );
+          if (failure) return failure;
           const source = store.getTask(approval.taskId);
           if (source && this.#canCompleteApproval(source, approval.requester))
             return this.#runtime.config.scheduler?.maxActivePerUser ?? 20;
@@ -1019,6 +1080,7 @@ export class Gateway {
     source: TaskRecord,
     text: string,
   ) {
+    if ((adapter.capabilities.outboundPush ?? 'free') !== 'free') return;
     const { store, log } = this.#deps;
     const address = store.deliveryAddress(source);
     if (!address) return;
@@ -1197,6 +1259,8 @@ export class Gateway {
         const card = statusCard(
           {
             runtime: this.#runtime,
+            showRecentApproval:
+              (adapter.capabilities.outboundPush ?? 'free') !== 'free',
             sandboxEnabled: this.#execution.enabled,
             startedAt: this.#startedAt,
             store,

@@ -43,10 +43,8 @@ const catalogs = {
       expired: '⌛ Expired',
     },
     expired: 'Expired',
-    pending: (approver: string) =>
-      `Request sent. Awaiting approval from ${approver}.`,
-    pendingRecipient: 'the recipient',
-    owner: 'the owner',
+    pending:
+      "I'll check whether this can be scheduled; it takes effect once confirmed.",
     unavailable: 'Approval is unavailable.',
     reply: 'Reply directly to this message with “approve” or “deny”.',
     title: 'Approval requested',
@@ -112,9 +110,7 @@ const catalogs = {
       scheduleFailed: (ref: string) => `排程 #${ref} 已獲核准，但未能儲存。`,
     },
     expired: '已逾時',
-    pending: (approver: string) => `已送出，等待${approver}同意`,
-    pendingRecipient: '收件人',
-    owner: '主人',
+    pending: '會確認是否能排入，確認後生效。',
     unavailable: '這項審核已無法處理。',
     reply: '請直接回覆這則訊息，輸入「同意」或「拒絕」。',
     title: '需要你同意',

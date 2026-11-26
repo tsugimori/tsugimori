@@ -56,6 +56,7 @@ export interface AdminApprovals {
     action: string;
     decidedAt: number | null;
     decidedBy: string | null;
+    failureReason?: string | null;
     id: string;
     requester: string;
     resource: ResourceRef;

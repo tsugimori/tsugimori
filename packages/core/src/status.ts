@@ -50,8 +50,11 @@ const messages = {
     approvals: 'Approvals',
     pending: (chat: number, total: number) => `${chat} here / ${total} total`,
     expires: 'next expiry',
+    lastApproval: 'Last approval',
+    decisions: { approved: 'approved', denied: 'denied', expired: 'expired' },
     schedules: 'Schedules',
     active: (count: number) => `${count} active`,
+    failed: 'failed',
     due: 'next due',
     platforms: 'Platforms',
     agents: 'Agents',
@@ -107,8 +110,11 @@ const messages = {
     pending: (chat: number, total: number) =>
       `此聊天室 ${chat} 件／共 ${total} 件`,
     expires: '最早到期',
+    lastApproval: '最近核准結果',
+    decisions: { approved: '已核准', denied: '已拒絕', expired: '已逾時' },
     schedules: '排程',
     active: (count: number) => `${count} 項啟用`,
+    failed: '失敗',
     due: '下次執行',
     platforms: '平台',
     agents: '代理程式',
@@ -129,6 +135,7 @@ const messages = {
 interface StatusDependencies {
   runtime: Pick<Runtime, 'attachments' | 'config' | 'environmentReports'>;
   sandboxEnabled: boolean;
+  showRecentApproval?: boolean;
   startedAt: number;
   store: Pick<Store, 'approvalStatus' | 'getSummaryStatus' | 'scheduleStatus'>;
   tasks: Pick<Tasks, 'status'>;
@@ -139,6 +146,7 @@ export function statusCard(
   {
     runtime,
     sandboxEnabled,
+    showRecentApproval,
     startedAt,
     store,
     tasks,
@@ -249,7 +257,7 @@ export function statusCard(
     );
   }
 
-  const approvals = store.approvalStatus(chat, now);
+  const approvals = store.approvalStatus(chat, now, showRecentApproval);
   if (approvals.total)
     line(
       m.approvals,
@@ -258,15 +266,33 @@ export function statusCard(
         ? ''
         : `${m.expires} ${date(approvals.nextExpiry)}`,
     );
+  const latest = approvals.latest;
+  if (
+    latest &&
+    (latest.status === 'approved' ||
+      latest.status === 'denied' ||
+      latest.status === 'expired')
+  )
+    line(
+      m.lastApproval,
+      m.decisions[latest.status],
+      latest.failureReason ?? '',
+    );
 
   const schedules = store.scheduleStatus(chat.adapterId, target);
-  if (schedules.count) {
-    const { next } = schedules;
+  if (schedules.count || schedules.failed) {
+    const { next, failed } = schedules;
     const details =
       next?.nextDueAt != null
         ? `#${scheduleRef(next.id)} · ${m.due} ${date(next.nextDueAt)} · ${shortText(next.action.kind === 'message' ? next.action.text : next.action.prompt, 30)}`
         : '';
-    line(m.schedules, m.active(schedules.count), details);
+    line(
+      m.schedules,
+      m.active(schedules.count),
+      details,
+      failed ? `#${scheduleRef(failed.id)} ${m.failed}` : '',
+      failed?.failureReason ?? '',
+    );
   }
 
   const { platforms, agents } = runtime.attachments;

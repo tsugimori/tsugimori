@@ -97,6 +97,7 @@ export class Outbound {
     message: OutboundMessage,
     options: {
       onReceipt?(receipt: SendReceipt): void;
+      scheduled?: boolean;
       signal?: AbortSignal;
       taskId?: string;
     } = {},
@@ -113,7 +114,15 @@ export class Outbound {
       adapterId: adapter.id,
       chatId: conversationId(message),
     };
-    const attrs = { ...chat, taskId: taskId ?? null };
+    const push = adapter.capabilities.outboundPush ?? 'free';
+    const metered =
+      (message.approval && push !== 'free') ||
+      (options.scheduled && push === 'metered');
+    const attrs = {
+      ...chat,
+      taskId: taskId ?? null,
+      ...(metered && { 'push.metered': true }),
+    };
     await hooks.emit('outbound.before', { chat, message });
     signal?.throwIfAborted();
     if (taskId) store.updateTask(taskId, { status: 'sending' });

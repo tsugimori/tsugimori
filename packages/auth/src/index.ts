@@ -5,7 +5,12 @@ import type {
   PrincipalRef,
   ResourceRef,
 } from '@tsugimori/plugin-sdk';
-import type { ApprovalRecord, Store, StoredGrant } from '@tsugimori/storage';
+import type {
+  ApprovalRecord,
+  ScheduleRecord,
+  Store,
+  StoredGrant,
+} from '@tsugimori/storage';
 
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
@@ -184,7 +189,10 @@ export class Auth {
 
   resolveApproval(
     input: ApprovalInput,
-    scheduleLimit?: (approval: ApprovalRecord) => number | undefined,
+    checkSchedule?: (
+      approval: ApprovalRecord,
+      schedule: ScheduleRecord,
+    ) => number | string | undefined,
   ) {
     let approval: ApprovalRecord | undefined;
     let decision: ApprovalDecision | undefined;
@@ -236,23 +244,29 @@ export class Auth {
           consumedAt: now,
         }
       : undefined;
+    const eligibility =
+      approved && approval.continuation?.kind === 'schedule'
+        ? checkSchedule?.(approval, approval.continuation.change.schedule)
+        : undefined;
+    const failureReason =
+      typeof eligibility === 'string' ? eligibility : undefined;
     const changed = this.#store.decideApproval(
       approval.id,
       {
         status: approved ? 'approved' : 'denied',
         decidedBy: input.userId,
         decidedAt: now,
+        failureReason,
       },
       grant,
-      approved && approval.continuation?.kind === 'schedule'
-        ? scheduleLimit?.(approval)
-        : undefined,
+      typeof eligibility === 'number' ? eligibility : undefined,
     );
     if (changed)
       return {
         id: approval.id,
         approved,
         decision,
+        ...(failureReason && { failureReason }),
         ...changed,
       };
   }

@@ -71,6 +71,7 @@ export class TelegramAdapter implements PlatformAdapter {
   readonly capabilities = {
     deleteEvents: false,
     inlineButtons: true,
+    outboundPush: 'free' as const,
     richText: true,
   };
   readonly #api: BotApi;

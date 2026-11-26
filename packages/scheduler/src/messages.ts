@@ -9,7 +9,7 @@ import {
 
 export type ScheduleLocale = 'en' | 'zh-TW';
 export type ScheduleStatus =
-  'scheduled' | 'pending_approval' | 'paused' | 'cancelled' | 'done';
+  'scheduled' | 'pending_approval' | 'paused' | 'cancelled' | 'done' | 'failed';
 
 const messages = {
   en: {
@@ -22,6 +22,7 @@ const messages = {
     paused: 'Paused',
     cancelled: 'Cancelled',
     done: 'Completed',
+    failed: 'Failed',
     pending_approval: 'Awaiting approval',
     today: 'Today',
     tomorrow: 'Tomorrow',
@@ -47,6 +48,7 @@ const messages = {
     paused: '已暫停',
     cancelled: '已取消',
     done: '已完成',
+    failed: '失敗',
     pending_approval: '等待同意',
     today: '今天',
     tomorrow: '明天',
@@ -64,7 +66,7 @@ const messages = {
 };
 
 export const scheduleReplyStyle =
-  'Confirm completed schedule changes in one sentence with when, where, and what. Use the human-readable summary. The framework reports the outcome of pending approvals. Omit internal IDs, field names, and JSON. Mention a short reference only when the user asks to manage a schedule.';
+  'Confirm completed schedule changes in one sentence with when, where, and what. Use the human-readable summary. The framework handles pending approval feedback. Omit internal IDs, field names, and JSON. Mention a short reference only when the user asks to manage a schedule.';
 
 export function scheduleChatName(
   store: Store,
@@ -234,6 +236,7 @@ export function scheduleResult(
     targets,
     content,
     status === 'scheduled' ? '' : `(${m[status]})`,
+    schedule.failureReason,
   ]
     .filter(Boolean)
     .join(' ');

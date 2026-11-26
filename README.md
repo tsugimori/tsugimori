@@ -28,9 +28,11 @@ For manual configuration, use the [example workspace](examples/workspace/tsugimo
 
 - `tsugimori doctor [dir] [--json]` reports core and enabled-plugin checks and exits with status 1 on failure.
 - `tsugimori setup [dir] [--yes] [--upgrade]` prints the package-manager command for missing system packages. `--yes` runs that command. Setup installs the full Codex release package for each enabled Codex instance, verifies published SHA-256 checksums, and saves each version in `agents[].version`. Use `--upgrade` to update those pins to the latest release.
-- `tsugimori start [dir]` logs failed checks and disables the affected capabilities. The owner gets a direct message with failures when a platform and its owner are available. Use `/status` for the current state.
+- `tsugimori start [dir]` logs failed checks and disables the affected capabilities. The owner gets a direct message with failures when an owner channel with free push is available. Use `/status` for the current state.
 
 ## Plugin configuration
+
+Platform adapters declare `outboundPush`. `free` is the default and allows proactive sends without quota. `metered` uses quota for sends outside a current inbound reply. `none` only supports replies to a current inbound. Telegram declares `free`.
 
 ### Telegram
 
@@ -78,11 +80,13 @@ Agents can create fixed messages or agent tasks using `schedule.create` and mana
 
 Schedules are scoped to the conversation they were created in. Self-delivery and untargeted one-time group delivery can proceed immediately. Other delivery and resource-intensive jobs require linked approval. Configure `scheduler.minIntervalMinutes` (default 15), `scheduler.maxActivePerUser` (default 20), and `scheduler.highCostModels` in the workspace.
 
+Scheduled deliveries use quota on `metered` platforms and carry `push.metered=true` in traces. Scheduling is unavailable on `none` platforms. If a platform switches to `none`, existing schedules fail on their next due occurrence and stop. The failure reason appears in `/status`, `schedule.list`, and traces.
+
 Approval prompts offer **Approve** and **Deny**. Reply directly to the prompt with `approve` or `deny` to decide by text. Older replies such as `allow once` and `always` also approve the request. Approving a recurring schedule covers its future fires and edits that preserve the approved delivery scope. Resource checks can still require fresh owner approval.
 
-The requesting agent waits up to two minutes. If approval is still pending, the gateway ends the turn and keeps any answer the agent already produced. Telegram marks the original request with 👀 as soon as the approval prompt is sent, replaces it with 👍 on approval or 👎 on denial, and clears it on expiry. Reactions are best-effort. Adapters without reactions send a one-line pending notice when the wait ends.
+The requesting agent waits up to two minutes. If approval is still pending, the gateway ends the turn and keeps any answer the agent already produced. Telegram marks the original request with 👀 as soon as the approval prompt is sent, replaces it with 👍 on approval or 👎 on denial, and clears it on expiry. Reactions are best-effort. Adapters without reactions add the line “I'll check whether this can be scheduled; it takes effect once confirmed.”
 
-Pending approvals survive a reload or restart, and the gateway reports later outcomes in the requesting conversation, including the schedule reference when it creates a schedule. Schedule requests expire at the first scheduled trigger or 24 hours after the request was created, whichever comes first. Other requests expire after 24 hours. On expiry, the prompt shows **Expired**, its buttons are removed, and the requester is notified in the original conversation.
+Pending approvals survive a reload or restart. The gateway sends follow-up notices to requesting conversations on `free` platforms. On `metered` and `none` platforms, the owner can check `/status` and the approval UI, and requesters can ask their agent to look up schedules. Approval prompts still use their designated channel, with `push.metered=true` traced on non-free platforms. Schedule requests expire at the first scheduled trigger or 24 hours after the request was created, whichever comes first. Other requests expire after 24 hours. Where supported, expiry edits the prompt to show **Expired** and removes its buttons.
 
 Pass native platform user IDs in the schedule's `mentions` array to notify specific recipients. Telegram also renders `[name](tg://user?id=123)` as a user mention and preserves `@username` in the message text.
 

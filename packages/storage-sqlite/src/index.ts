@@ -134,6 +134,13 @@ type Transaction = Parameters<
   Parameters<ReturnType<typeof createDatabase>['db']['transaction']>[0]
 >[0];
 
+function scheduleRecord({
+  failureReason,
+  ...row
+}: ScheduleRecord): ScheduleRecord {
+  return failureReason == null ? row : { ...row, failureReason };
+}
+
 function readdressSchedule(
   schedule: ScheduleRecord,
   resolve: (chatId: string) => string,
@@ -711,8 +718,8 @@ export class SqliteStore implements Store {
       .all();
   }
 
-  approvalStatus(ref: ChatRef, now: number) {
-    return this.#db
+  approvalStatus(ref: ChatRef, now: number, includeRecent = false) {
+    const pending = this.#db
       .select({
         chat: sql<number>`count(*) filter (where ${chatScope(approvals, ref)})`,
         total: count(),
@@ -726,6 +733,24 @@ export class SqliteStore implements Store {
         ),
       )
       .get()!;
+    if (!includeRecent) return pending;
+    const latest = this.#db
+      .select({
+        status: approvals.status,
+        failureReason: approvals.failureReason,
+      })
+      .from(approvals)
+      .innerJoin(tasks, eq(tasks.id, approvals.taskId))
+      .where(
+        and(
+          or(chatScope(tasks, ref), chatScope(approvals, ref)),
+          inArray(approvals.status, ['approved', 'denied', 'expired']),
+        ),
+      )
+      .orderBy(desc(approvals.decidedAt), approvals.id)
+      .limit(1)
+      .get();
+    return { ...pending, latest };
   }
 
   listGrants() {
@@ -825,7 +850,12 @@ export class SqliteStore implements Store {
   }
 
   getSchedule(id: string) {
-    return this.#db.select().from(schedules).where(eq(schedules.id, id)).get();
+    const row = this.#db
+      .select()
+      .from(schedules)
+      .where(eq(schedules.id, id))
+      .get();
+    return row && scheduleRecord(row);
   }
 
   listSchedules(ref: ChatRef) {
@@ -833,16 +863,17 @@ export class SqliteStore implements Store {
       .select()
       .from(schedules)
       .where(chatScope(schedules, ref))
-      .all();
+      .all()
+      .map(scheduleRecord);
   }
 
   scheduleStatus(adapterId: string, target: ScheduleAddress) {
-    const filter = and(
-      eq(schedules.status, 'active'),
+    const destination = and(
       eq(schedules.adapterId, adapterId),
       eq(sql`json_extract(${schedules.target}, '$.chatId')`, target.chatId),
       sql`json_extract(${schedules.target}, '$.threadId') is ${target.threadId ?? null}`,
     );
+    const filter = and(destination, eq(schedules.status, 'active'));
     return {
       count: this.#db
         .select({ value: count() })
@@ -858,6 +889,20 @@ export class SqliteStore implements Store {
         .from(schedules)
         .where(and(filter, isNotNull(schedules.nextDueAt)))
         .orderBy(asc(schedules.nextDueAt), asc(schedules.id))
+        .get(),
+      failed: this.#db
+        .select({ id: schedules.id, failureReason: schedules.failureReason })
+        .from(schedules)
+        .innerJoin(scheduleRuns, eq(schedules.id, scheduleRuns.scheduleId))
+        .where(
+          and(
+            destination,
+            eq(schedules.status, 'failed'),
+            eq(scheduleRuns.status, 'failed'),
+          ),
+        )
+        .orderBy(desc(scheduleRuns.dueAt), schedules.id)
+        .limit(1)
         .get(),
     };
   }
@@ -876,7 +921,8 @@ export class SqliteStore implements Store {
       )
       .orderBy(asc(schedules.nextDueAt))
       .limit(100)
-      .all();
+      .all()
+      .map(scheduleRecord);
   }
 
   updateSchedule(
@@ -942,6 +988,7 @@ export class SqliteStore implements Store {
     schedule: ScheduleRecord,
     run: ScheduleRun,
     nextDueAt: number | null,
+    failureReason?: string,
   ) {
     return this.#db.transaction(
       (tx) => {
@@ -950,7 +997,12 @@ export class SqliteStore implements Store {
           .update(schedules)
           .set({
             nextDueAt,
-            status: nextDueAt === null ? 'done' : 'active',
+            status: failureReason
+              ? 'failed'
+              : nextDueAt === null
+                ? 'done'
+                : 'active',
+            failureReason,
           })
           .where(
             and(

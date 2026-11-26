@@ -30,6 +30,8 @@ export interface PrincipalRef {
 export interface PlatformCapabilities {
   deleteEvents?: boolean;
   inlineButtons?: boolean;
+  /** Defaults to `free`. `metered` uses quota for sends outside a current inbound reply. `none` supports only replies to a current inbound. */
+  outboundPush?: 'free' | 'metered' | 'none';
   poll?: boolean;
   richText?: boolean;
 }
@@ -62,7 +64,7 @@ export type ApprovalReaction = 'pending' | 'approved' | 'denied' | 'expired';
 export const pendingApprovalResult = {
   pending: true,
   instruction:
-    'The framework will report the outcome. Do not mention the pending approval in your reply.',
+    'The framework handles pending approval feedback. Do not mention the pending approval in your reply.',
 } as const;
 
 export interface ChatMigration {
@@ -302,7 +304,9 @@ export interface ScheduleApprovalRequest {
 }
 
 export type ScheduleApproval =
-  { approvedBy: string } | { pending: true } | { scheduleApplied: boolean };
+  | { approvedBy: string }
+  | { pending: true }
+  | { failureReason?: string; scheduleApplied: boolean };
 
 export interface ToolContext {
   chat: ChatRef;

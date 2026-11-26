@@ -157,6 +157,7 @@ export const approvals = sqliteTable(
       NonNullable<ApprovalRecord['continuation']>
     >(),
     expiresAt: integer('expires_at'),
+    failureReason: text('failure_reason'),
     promptMessageId: text('prompt_message_id'),
     migratedPrompt: text('migrated_prompt'),
     promptFormat: text('prompt_format', { mode: 'json' }).$type<
@@ -280,6 +281,7 @@ export const schedules = sqliteTable(
       .notNull(),
     createdBy: text('created_by').notNull(),
     deliveryApprovedBy: text('delivery_approved_by'),
+    failureReason: text('failure_reason'),
     mentions: text('mentions', { mode: 'json' }).$type<string[]>().notNull(),
     missed: text('missed').$type<ScheduleRecord['missed']>().notNull(),
     nextDueAt: integer('next_due_at'),

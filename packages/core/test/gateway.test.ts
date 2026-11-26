@@ -7,6 +7,7 @@ import type {
   InboundMessage,
   OutboundMessage,
   PlatformAdapter,
+  PlatformCapabilities,
   PluginDefinition,
   TunnelProvider,
 } from '@tsugimori/plugin-sdk';
@@ -47,6 +48,7 @@ function inbound(
 function createPlatform(
   messagePrefix = 'bot',
   react?: true | PlatformAdapter['setApprovalReaction'],
+  outboundPush?: PlatformCapabilities['outboundPush'],
 ) {
   let context: AdapterContext | undefined;
   let starts = 0;
@@ -60,7 +62,7 @@ function createPlatform(
   const platform: PlatformAdapter = {
     id: adapterId,
     kind: 'fake',
-    capabilities: { deleteEvents: true, inlineButtons: true },
+    capabilities: { deleteEvents: true, inlineButtons: true, outboundPush },
     start(ctx) {
       context = ctx;
       starts++;
@@ -113,6 +115,7 @@ async function fixture(
     durable?: boolean;
     locale?: 'en' | 'zh-TW';
     onScopedTool?: (args: unknown, userId: string) => void;
+    outboundPush?: PlatformCapabilities['outboundPush'];
     plugins?: PluginDefinition[];
     previews?: { named?: TunnelProvider; quick: TunnelProvider };
     reactions?: true | PlatformAdapter['setApprovalReaction'];
@@ -123,7 +126,11 @@ async function fixture(
   const dbPath = options.durable ? join(workspace, 'gateway.db') : ':memory:';
   const store = new SqliteStore(dbPath);
   const trace = new Tracer(store, { ringSize: 500 });
-  const platform = createPlatform(undefined, options.reactions);
+  const platform = createPlatform(
+    undefined,
+    options.reactions,
+    options.outboundPush,
+  );
   let agentStarts = 0;
   let agentStops = 0;
   const registry = new PluginRegistry([
@@ -464,6 +471,280 @@ test(
 async function until(t: TestContext, condition: () => boolean) {
   while (!condition()) await delay(10, undefined, { signal: t.signal });
 }
+
+for (const outboundPush of ['free', 'metered', 'none'] as const) {
+  test(
+    `uses the same pending approval line with ${outboundPush} push`,
+    { timeout: 5_000 },
+    async (t) => {
+      const wait = new AbortController();
+      const timeout = AbortSignal.timeout;
+      t.mock.method(AbortSignal, 'timeout', (ms: number) =>
+        ms === 120_000 ? wait.signal : timeout(ms),
+      );
+      const f = await fixture(
+        t,
+        async function* (request) {
+          const tool = request.tools.find(({ name }) => name === 'scoped_tool');
+          assert.ok(tool);
+          await tool.run({ id: 'pending' });
+        },
+        true,
+        { locale: 'zh-TW', outboundPush },
+      );
+      await f.platform.emit(inbound('pending', 'Use the scoped tool'));
+      await until(t, () =>
+        f.store.listApprovals().some(({ promptMessageId }) => promptMessageId),
+      );
+      wait.abort();
+      await f.gateway.idle();
+
+      const [prompt, ...replies] = f.platform.sent;
+      assert.ok(prompt?.approval);
+      assert.deepEqual(
+        replies.map(({ replyTo, text }) => ({ replyTo, text })),
+        [{ replyTo: 'pending', text: '會確認是否能排入，確認後生效。' }],
+      );
+      assert.deepEqual(f.platform.reactions, []);
+    },
+  );
+}
+
+test(
+  'metered schedules deliver while post-turn approval outcomes use feedback and status',
+  { timeout: 5_000 },
+  async (t) => {
+    let now = Date.now();
+    const at = now + 60_000;
+    t.mock.method(Date, 'now', () => now);
+    t.mock.timers.enable({ apis: ['setInterval'] });
+    let wait = new AbortController();
+    const timeout = AbortSignal.timeout;
+    t.mock.method(AbortSignal, 'timeout', (ms: number) =>
+      ms === 120_000 ? wait.signal : timeout(ms),
+    );
+    const f = await fixture(
+      t,
+      async function* (request) {
+        const command = request.context.findLast(
+          ({ source }) => source === 'message',
+        )?.content;
+        if (!command?.startsWith('schedule ')) return;
+        const tool = request.tools.find(
+          ({ name }) => name === 'schedule.create',
+        );
+        assert.ok(tool);
+        await tool.run({
+          action: { kind: 'message', text: command },
+          trigger: { kind: 'once', at },
+          needsApproval: true,
+        });
+      },
+      true,
+      { locale: 'zh-TW', outboundPush: 'metered' },
+    );
+    await f.platform.emit(inbound('owner-dm', 'Register', { chatId: 'owner' }));
+    await f.gateway.idle();
+
+    for (const [request, decision] of [
+      ['deliver', 'approve'],
+      ['deny', 'deny'],
+      ['expire', undefined],
+    ] as const) {
+      wait = new AbortController();
+      const before = f.platform.sent.length;
+      await f.platform.emit(inbound(request, `schedule ${request}`));
+      await until(t, () =>
+        f.store
+          .listApprovals()
+          .some(
+            ({ promptMessageId }) =>
+              promptMessageId === f.platform.sent[before]?.messageId,
+          ),
+      );
+      const prompt = f.platform.sent[before];
+      assert.ok(prompt?.approval);
+      assert.equal(prompt.chatId, 'owner');
+      wait.abort();
+      await f.gateway.idle();
+      assert.equal(
+        f.platform.sent.at(-1)?.text,
+        '會確認是否能排入，確認後生效。',
+      );
+      if (decision) {
+        now++;
+        await f.platform.emit(
+          inbound(`decision-${request}`, decision, {
+            chatId: 'owner',
+            replyTo: prompt.messageId,
+          }),
+        );
+        assert.equal(f.platform.feedback.at(-1)?.decision, decision);
+      }
+      assert.equal(f.platform.sent.length, before + 2);
+    }
+    const [schedule] = f.store.listSchedules(chat);
+    assert.equal(schedule?.status, 'active');
+    const beforeFire = f.platform.sent.length;
+    now = at;
+    t.mock.timers.tick(1_000);
+    await until(
+      t,
+      () =>
+        f.platform.feedback.at(-1)?.decision === 'expired' &&
+        f.store.getSchedule(schedule.id)?.status === 'done',
+    );
+    await until(t, () =>
+      f.trace.recent.some(({ name }) => name === 'schedule.fire'),
+    );
+    assert.deepEqual(
+      f.platform.sent.slice(beforeFire).map(({ text }) => text),
+      ['schedule deliver'],
+    );
+    assert.equal(
+      f.store.listApprovals().filter(({ status }) => status === 'expired')
+        .length,
+      1,
+    );
+    assert.equal(
+      f.trace.recent.filter(
+        ({ name, attrs }) =>
+          name === 'outbound.send' && attrs['push.metered'] === true,
+      ).length,
+      4,
+    );
+    assert.ok(
+      f.trace.recent.some(
+        ({ name, attrs }) =>
+          name === 'schedule.fire' &&
+          attrs.scheduleId === schedule.id &&
+          attrs['push.metered'] === true,
+      ),
+    );
+
+    await f.platform.emit(inbound('status', '/status'));
+    assert.match(f.platform.sent.at(-1)?.text ?? '', /最近核准結果 · 已逾時/);
+  },
+);
+
+test(
+  'reply-only platforms reject new schedules and record a terminal failure after capability changes',
+  { timeout: 5_000 },
+  async (t) => {
+    let now = Date.now();
+    const at = now + 60_000;
+    const reason =
+      'Scheduled delivery is unavailable on this platform. It only supports replies to incoming messages.';
+    t.mock.method(Date, 'now', () => now);
+    t.mock.timers.enable({ apis: ['setInterval'] });
+    let toolError: string | undefined;
+    const f = await fixture(
+      t,
+      async function* (request) {
+        const command = request.context.findLast(
+          ({ source }) => source === 'message',
+        )?.content;
+        if (command === 'Register') return;
+        if (command === 'list schedules') {
+          const list = request.tools.find(
+            ({ name }) => name === 'schedule.list',
+          );
+          assert.ok(list);
+          const result = (await list.run({})) as { summary: string };
+          yield { type: 'text.final', text: result.summary };
+          return;
+        }
+        const tool = request.tools.find(
+          ({ name }) => name === 'schedule.create',
+        );
+        assert.ok(tool);
+        try {
+          await tool.run({
+            action: { kind: 'message', text: 'reminder' },
+            trigger: { kind: 'interval', at, minutes: 30 },
+            needsApproval: command === 'approval',
+          });
+        } catch (error) {
+          if (!(error instanceof Error)) throw error;
+          toolError = error.message;
+        }
+      },
+      true,
+      { outboundPush: 'none' },
+    );
+    await f.platform.emit(inbound('owner-dm', 'Register', { chatId: 'owner' }));
+    await f.platform.emit(inbound('reject', 'new schedule'));
+    await f.gateway.idle();
+    assert.equal(toolError, reason);
+    assert.deepEqual(f.store.listSchedules(chat), []);
+    assert.deepEqual(f.store.listApprovals(), []);
+
+    const { capabilities } = f.platform.platform;
+    capabilities.outboundPush = 'free';
+    await f.platform.emit(inbound('existing', 'existing schedule'));
+    await f.gateway.idle();
+    const [schedule] = f.store.listSchedules(chat);
+    assert.equal(schedule?.status, 'active');
+    await f.platform.emit(inbound('awaiting', 'approval'));
+    await until(t, () =>
+      f.store.listApprovals().some(({ promptMessageId }) => promptMessageId),
+    );
+    const [approval] = f.store.listApprovals();
+    assert.ok(approval?.promptMessageId);
+
+    capabilities.outboundPush = 'none';
+    toolError = undefined;
+    await f.platform.emit(
+      inbound('approve', 'approve', {
+        chatId: 'owner',
+        replyTo: approval.promptMessageId,
+      }),
+    );
+    await f.gateway.idle();
+    assert.equal(toolError, reason);
+    assert.equal(f.store.getApproval(approval.id)?.failureReason, reason);
+    assert.equal(
+      f.gateway.admin.approvals().approvals[0]?.failureReason,
+      reason,
+    );
+    assert.equal(f.store.listGrants().length, 0);
+    assert.equal(f.store.listSchedules(chat).length, 1);
+
+    const sent = f.platform.sent.length;
+    now = at;
+    t.mock.timers.tick(1_000);
+    const failed = f.store.getSchedule(schedule.id);
+    assert.equal(failed?.status, 'failed');
+    assert.equal(failed?.failureReason, reason);
+    assert.equal(failed?.nextDueAt, null);
+    now += 60 * 60_000;
+    t.mock.timers.tick(1_000);
+    assert.equal(f.platform.sent.length, sent);
+    const failures = f.trace.recent.filter(
+      ({ name }) => name === 'schedule.push_unavailable',
+    );
+    assert.equal(failures.length, 3);
+    assert.ok(
+      failures.some(
+        ({ attrs }) =>
+          attrs.approvalId === approval.id && attrs.reason === reason,
+      ),
+    );
+    assert.equal(
+      failures.filter(({ attrs }) => attrs.scheduleId === schedule.id).length,
+      1,
+    );
+
+    await f.platform.emit(inbound('status', '/status'));
+    assert.match(
+      f.platform.sent.at(-1)?.text ?? '',
+      new RegExp(`#${schedule.id.slice(0, 6)} failed`),
+    );
+    await f.platform.emit(inbound('list', 'list schedules'));
+    await f.gateway.idle();
+    assert.ok(f.platform.sent.at(-1)?.text.includes(reason));
+  },
+);
 
 test('trigger decisions use native owner status, allowlist, mentions and bot replies', () => {
   const dm = inbound('m', 'hello');
@@ -1105,16 +1386,19 @@ for (const mode of ['reaction', 'fallback', 'answer'] as const) {
       assert.ok(turnSignal?.aborted);
       assert.deepEqual(toolResult, {
         pending: true,
-        summary: 'Request sent. Awaiting approval from the owner.',
+        summary:
+          "I'll check whether this can be scheduled; it takes effect once confirmed.",
         instruction:
-          'The framework will report the outcome. Do not mention the pending approval in your reply.',
+          'The framework handles pending approval feedback. Do not mention the pending approval in your reply.',
       });
       assert.deepEqual(
         f.platform.sent.slice(1).map(({ text }) => text),
         mode === 'answer'
           ? ['The independent answer is 42.']
           : mode === 'fallback'
-            ? ['Request sent. Awaiting approval from the owner.']
+            ? [
+                "I'll check whether this can be scheduled; it takes effect once confirmed.",
+              ]
             : [],
       );
       assert.equal(f.store.getApproval(approval.id)?.status, 'pending');
@@ -1644,7 +1928,7 @@ test(
     assert.equal(pending.status, 'pending_approval');
     assert.match(
       pending.instruction,
-      /framework will report the outcome.*Do not mention/,
+      /framework handles pending approval feedback.*Do not mention/,
     );
     assert.match(pending.ref, /^[a-f0-9]{6}$/);
     assert.match(pending.summary, /^已送出，等待管理員同意/);

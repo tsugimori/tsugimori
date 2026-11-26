@@ -90,6 +90,7 @@ export type TaskStage =
 type ApprovalAnswer =
   | {
       approved: boolean;
+      failureReason?: string;
       reaction?: Promise<boolean>;
       scheduleApplied?: boolean;
     }
@@ -503,6 +504,7 @@ export class Tasks {
           },
           {
             taskId: id,
+            scheduled: scheduled !== undefined,
             signal: abort.signal,
           },
         );
@@ -869,13 +871,9 @@ export class Tasks {
     if ('approvedBy' in approval) return true;
     const result = await approval.decision;
     if (result === 'timeout') {
-      const owner = this.#deps.auth.owner(work.chat.adapterId);
-      const display = owner
-        ? this.#deps.store.getUserDisplay({ ...work.chat, userId: owner })
-        : undefined;
       return {
         ...pendingApprovalResult,
-        summary: this.#markApprovalPending(work, display || undefined),
+        summary: this.#markApprovalPending(work),
       };
     }
     if (!result || result === 'expired') return false;
@@ -910,26 +908,27 @@ export class Tasks {
     if (!approval || 'approvedBy' in approval) return approval;
     const result = await approval.decision;
     if (result === 'timeout') {
-      this.#markApprovalPending(work, change.approverName);
+      this.#markApprovalPending(work);
       return { pending: true };
     }
     if (result === 'expired') throw new Error('Schedule approval expired');
     await result?.reaction;
     if (result?.approved)
-      return { scheduleApplied: result.scheduleApplied === true };
+      return {
+        failureReason: result.failureReason,
+        scheduleApplied: result.scheduleApplied === true,
+      };
   }
 
-  #markApprovalPending(work: Work, approver?: string) {
-    const m = approvalMessages(this.#deps.runtime.config.locale);
-    const name = approver?.replace(/\s+/gu, ' ').trim().replaceAll('@', '＠');
-    const summary = m.pending(
-      name || (approver === '' ? m.pendingRecipient : m.owner),
-    );
+  #markApprovalPending(work: Work) {
+    const summary = approvalMessages(this.#deps.runtime.config.locale).pending;
+    const push = work.adapter.capabilities.outboundPush ?? 'free';
     if (!work.endForApproval.signal.aborted) {
       if (
-        !work.adapter.setApprovalReaction ||
-        work.input.scheduled ||
-        this.#deps.store.getTask(work.id)?.sourceChatId
+        (!work.input.scheduled || push === 'free') &&
+        (!work.adapter.setApprovalReaction ||
+          work.input.scheduled ||
+          this.#deps.store.getTask(work.id)?.sourceChatId)
       )
         work.pendingApprovalFallback = summary;
       work.endForApproval.abort();

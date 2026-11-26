@@ -78,6 +78,10 @@ interface SchedulerDependencies {
   model(chat: ChatRef): string;
   now?(): number;
   owner(adapterId: string): string | undefined;
+  pushFailure?(
+    chat: ChatRef,
+    trace: { dueAt: number; scheduleId: string } | { taskId: string },
+  ): string | undefined;
   settings(): Settings & { locale?: 'en' | 'zh-TW'; timezone: string };
   store: Store;
 }
@@ -372,7 +376,11 @@ export class Scheduler {
     }
     if (!schedule || !this.#canManage(task, schedule))
       throw new Error('Schedule is unavailable in this conversation');
-    if (schedule.status === 'cancelled' || schedule.status === 'done')
+    if (
+      schedule.status === 'cancelled' ||
+      schedule.status === 'done' ||
+      schedule.status === 'failed'
+    )
       throw new Error('Schedule is already closed');
     return schedule;
   }
@@ -437,6 +445,10 @@ export class Scheduler {
     const target = store.deliveryAddress(targetScope);
     if (!address || !target)
       throw new Error('Schedule destination is unavailable');
+    const failureReason = this.#deps.pushFailure?.(targetScope, {
+      taskId: task.taskId,
+    });
+    if (failureReason) throw new Error(failureReason);
     const { action, trigger } = input;
     const due = occurrence({ trigger, timezone }, time);
     if (
@@ -629,7 +641,10 @@ export class Scheduler {
         };
       if ('scheduleApplied' in approval) {
         if (!approval.scheduleApplied)
-          throw new Error('Schedule limit reached or schedule changed');
+          throw new Error(
+            approval.failureReason ??
+              'Schedule limit reached or schedule changed',
+          );
         return this.#result(schedule);
       }
       signal.throwIfAborted();
@@ -648,8 +663,18 @@ export class Scheduler {
       latest < schedule.nextDueAt
     )
       return;
+    const failureReason = this.#deps.pushFailure?.(
+      {
+        adapterId: schedule.adapterId,
+        chatId:
+          schedule.target.threadId === undefined
+            ? schedule.target.chatId
+            : `${schedule.target.chatId}_${schedule.target.threadId}`,
+      },
+      { scheduleId: schedule.id, dueAt: latest },
+    );
     const next =
-      schedule.trigger.kind === 'once'
+      failureReason || schedule.trigger.kind === 'once'
         ? null
         : (occurrence(schedule, now) ?? null);
     const availableSince =
@@ -663,10 +688,14 @@ export class Scheduler {
       scheduleId: schedule.id,
       dueAt: latest,
       startedAt: now,
-      finishedAt: null,
-      status: 'claimed',
+      finishedAt: failureReason ? now : null,
+      status: failureReason ? 'failed' : 'claimed',
     };
-    if (!store.claimScheduleRun(schedule, record, next)) return;
+    if (
+      !store.claimScheduleRun(schedule, record, next, failureReason) ||
+      failureReason
+    )
+      return;
     let status: ScheduleRun['status'] = 'failed';
     try {
       status =

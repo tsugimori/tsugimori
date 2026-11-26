@@ -87,6 +87,7 @@ export interface ApprovalRecord extends ChatRef {
   decidedAt: number | null;
   decidedBy: string | null;
   expiresAt: number | null;
+  failureReason?: string | null;
   id: string;
   migratedPrompt?: string | null;
   promptFormat: ApprovalPromptFormat | null;
@@ -177,11 +178,12 @@ export interface ScheduleRecord extends ChatRef {
   address: ScheduleAddress;
   createdBy: string;
   deliveryApprovedBy: string | null;
+  failureReason?: string | null;
   id: string;
   mentions: string[];
   missed: 'latest' | 'skip';
   nextDueAt: number | null;
-  status: 'active' | 'paused' | 'cancelled' | 'done';
+  status: 'active' | 'paused' | 'cancelled' | 'done' | 'failed';
   target: ScheduleAddress;
   timezone: string;
   trigger: ScheduleTrigger;
@@ -229,7 +231,13 @@ export interface Store {
   approvalStatus(
     ref: ChatRef,
     now: number,
-  ): { chat: number; nextExpiry: number | null; total: number };
+    includeRecent?: boolean,
+  ): {
+    chat: number;
+    latest?: Pick<ApprovalRecord, 'failureReason' | 'status'>;
+    nextExpiry: number | null;
+    total: number;
+  };
   beginSummary(ref: ChatRef): ChatSummary;
   cancelApproval(id: string, now: number): void;
   cancelChatApprovals(
@@ -243,6 +251,7 @@ export interface Store {
     schedule: ScheduleRecord,
     run: ScheduleRun,
     nextDueAt: number | null,
+    failureReason?: string,
   ): boolean;
   claimSetupRun(run: SetupRun, now: number): SetupRun | undefined;
   clearAgentSessions(agentId: string): void;
@@ -268,6 +277,7 @@ export interface Store {
     decision: {
       decidedAt: number;
       decidedBy: string;
+      failureReason?: string;
       status: 'approved' | 'denied';
     },
     grant?: StoredGrant,
@@ -373,6 +383,7 @@ export interface Store {
     target: ScheduleAddress,
   ): {
     count: number;
+    failed?: Pick<ScheduleRecord, 'failureReason' | 'id'>;
     next?: Pick<ScheduleRecord, 'action' | 'id' | 'nextDueAt'>;
   };
   setAllowlisted(ref: ChatRef, allowlisted: boolean): void;
