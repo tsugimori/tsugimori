@@ -8,6 +8,7 @@ import type {
 } from '@tsugimori/plugin-sdk';
 import type {
   ScheduleAction,
+  ScheduleChange,
   ScheduleRecord,
   ScheduleRun,
   ScheduleTrigger,
@@ -55,7 +56,7 @@ interface SchedulerDependencies {
   approve(
     task: ToolContext,
     request: ScheduleApprovalRequest,
-    signal: AbortSignal,
+    change: ScheduleChange,
   ): Promise<ScheduleApproval | undefined>;
   attachedAdapters(): readonly string[];
   canSchedule(chat: ChatRef, userId: string): boolean;
@@ -70,12 +71,6 @@ interface SchedulerDependencies {
   owner(adapterId: string): string | undefined;
   settings(): Settings & { locale?: 'en' | 'zh-TW'; timezone: string };
   store: Store;
-}
-
-interface PendingSchedule {
-  approverName?: string;
-  controller: AbortController;
-  schedule: ScheduleRecord;
 }
 
 const text = { type: 'string', minLength: 1, maxLength: 10_000 };
@@ -190,7 +185,6 @@ export class Scheduler {
   readonly #deps: SchedulerDependencies;
   readonly #now: () => number;
   readonly #active = new Set<Promise<void>>();
-  readonly #pending = new Map<string, PendingSchedule>();
   readonly #wake = new AbortController();
   #timer?: NodeJS.Timeout;
   #startedAt = Number.NEGATIVE_INFINITY;
@@ -211,7 +205,6 @@ export class Scheduler {
   stop() {
     clearInterval(this.#timer);
     this.#wake.abort();
-    for (const { controller } of this.#pending.values()) controller.abort();
   }
 
   async idle() {
@@ -222,6 +215,7 @@ export class Scheduler {
     if (this.#wake.signal.aborted) return;
     try {
       const now = this.#now();
+      this.#deps.store.expireApprovals(now);
       for (const schedule of this.#deps.store.dueSchedules(
         now,
         this.#deps.attachedAdapters(),
@@ -265,7 +259,7 @@ export class Scheduler {
         run: (args, task) => {
           const input = args as ScheduleInput & { id: string };
           const schedule = this.#get(task, input.id);
-          if (this.#pending.has(schedule.id))
+          if (this.#pending(task.chat).has(schedule.id))
             throw new Error('Schedule is awaiting approval');
           return this.#save(input, task, schedule);
         },
@@ -306,27 +300,39 @@ export class Scheduler {
     );
   }
 
-  #inChat(chat: ChatRef) {
-    return [
-      ...this.#deps.store.listSchedules(chat),
-      ...[...this.#pending.values()]
-        .map(({ schedule }) => schedule)
-        .filter(
-          (schedule) =>
-            schedule.adapterId === chat.adapterId &&
-            schedule.chatId === chat.chatId,
-        ),
-    ];
+  #pending(chat: ChatRef) {
+    const pending = new Map<string, ScheduleChange & { approvalId: string }>();
+    for (const approval of this.#deps.store.listPendingApprovals(chat)) {
+      if (
+        approval.continuation?.kind !== 'schedule' ||
+        (approval.expiresAt !== null && approval.expiresAt <= this.#now())
+      )
+        continue;
+      const { change } = approval.continuation;
+      pending.set(change.schedule.id, { ...change, approvalId: approval.id });
+    }
+    return pending;
+  }
+
+  #inChat(chat: ChatRef, pending = this.#pending(chat)) {
+    const schedules = new Map(
+      this.#deps.store
+        .listSchedules(chat)
+        .map((schedule) => [schedule.id, schedule]),
+    );
+    for (const [id, { schedule }] of pending) schedules.set(id, schedule);
+    return [...schedules.values()];
   }
 
   #list(task: ToolContext) {
     const locale = this.#deps.settings().locale ?? 'en';
     const now = this.#now();
-    const schedules = this.#inChat(task.chat)
+    const changes = this.#pending(task.chat);
+    const schedules = this.#inChat(task.chat, changes)
       .filter((schedule) => this.#canManage(task, schedule))
       .sort((a, b) => (a.nextDueAt ?? Infinity) - (b.nextDueAt ?? Infinity));
     const entries = schedules.map((schedule) => {
-      const pending = this.#pending.get(schedule.id);
+      const pending = changes.get(schedule.id);
       return scheduleResult(
         this.#deps.store,
         schedule,
@@ -358,7 +364,8 @@ export class Scheduler {
       schedule = matches[0];
     } else {
       schedule =
-        this.#pending.get(ref)?.schedule ?? this.#deps.store.getSchedule(ref);
+        this.#pending(task.chat).get(ref)?.schedule ??
+        this.#deps.store.getSchedule(ref);
     }
     if (!schedule || !this.#canManage(task, schedule))
       throw new Error('Schedule is unavailable in this conversation');
@@ -374,19 +381,18 @@ export class Scheduler {
   ) {
     const existing = this.#get(task, id);
     const next = { ...existing, status };
-    const pending = this.#pending.get(existing.id);
+    const pending = this.#pending(task.chat).get(existing.id);
     if (pending) {
       if (status !== 'cancelled')
         throw new Error('Schedule is awaiting approval');
-      this.#pending.delete(existing.id);
-      pending.controller.abort();
+      this.#deps.store.cancelApproval(pending.approvalId, this.#now());
     } else if (!this.#deps.store.updateSchedule(next, existing, Infinity)) {
       throw new Error('Schedule changed while the request was running');
     }
     return this.#result(next);
   }
 
-  #result(schedule: ScheduleRecord, pending?: PendingSchedule) {
+  #result(schedule: ScheduleRecord, pending?: ScheduleChange) {
     return scheduleResult(
       this.#deps.store,
       schedule,
@@ -582,22 +588,10 @@ export class Scheduler {
         timezone,
         until,
       };
-      if (previous) {
-        const approval = await this.#deps.approve(task, request, signal);
-        const approvedBy =
-          approval &&
-          ('approvedBy' in approval
-            ? approval.approvedBy
-            : await approval.decision);
-        if (!approvedBy) throw new Error('Schedule approval denied');
-        signal.throwIfAborted();
-        return save(approvedBy);
-      }
-      const controller = new AbortController();
       const designated = approverId ?? ownerId;
-      const pending = {
-        controller,
+      const change = {
         schedule,
+        previous,
         approverName: designated
           ? (store.getUserDisplay({
               adapterId: chat.adapterId,
@@ -608,38 +602,11 @@ export class Scheduler {
             (approverId ? '' : undefined))
           : undefined,
       };
-      this.#pending.set(id, pending);
-      let waiting = false;
-      try {
-        const approval = await this.#deps.approve(
-          task,
-          request,
-          controller.signal,
-        );
-        signal.throwIfAborted();
-        controller.signal.throwIfAborted();
-        if (!approval)
-          throw new Error('Schedule approval denied or unavailable');
-        if ('approvedBy' in approval) return save(approval.approvedBy);
-        waiting = true;
-        void approval.decision
-          .then((approvedBy) => {
-            if (
-              approvedBy &&
-              !controller.signal.aborted &&
-              this.#deps.canSchedule(chat, userId)
-            )
-              save(approvedBy);
-          })
-          .catch(() => this.#deps.logError('schedule.approval_failed', id))
-          .finally(() => this.#pending.delete(id));
-        return this.#result(schedule, pending);
-      } finally {
-        if (!waiting) {
-          this.#pending.delete(id);
-          controller.abort();
-        }
-      }
+      const approval = await this.#deps.approve(task, request, change);
+      if (!approval) throw new Error('Schedule approval denied or unavailable');
+      if ('pending' in approval) return this.#result(schedule, change);
+      signal.throwIfAborted();
+      return save(approval.approvedBy);
     }
     signal.throwIfAborted();
     return save(null);

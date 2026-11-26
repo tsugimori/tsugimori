@@ -7,6 +7,7 @@ import type {
   ToolContext,
   ToolDefinition,
 } from '@tsugimori/plugin-sdk';
+import type { ApprovalContinuation } from '@tsugimori/storage';
 import type { Tracer } from '@tsugimori/trace';
 
 import { Ajv } from 'ajv';
@@ -128,7 +129,10 @@ export function protectTools(
     requestApproval,
   }: {
     hooks: HookRunner;
-    requestApproval: AgentIO['requestApproval'];
+    requestApproval(
+      request: Parameters<AgentIO['requestApproval']>[0],
+      tool: Extract<ApprovalContinuation, { kind: 'tool' }>,
+    ): Promise<boolean>;
     task: ToolContext;
     trace: Tracer;
   },
@@ -158,11 +162,14 @@ export function protectTools(
               const permission = tool.permission;
               if (
                 permission &&
-                !(await requestApproval({
-                  action: permission.action,
-                  description: permission.describe?.(args, task),
-                  resource: permission.resource(args, task),
-                }))
+                !(await requestApproval(
+                  {
+                    action: permission.action,
+                    description: permission.describe?.(args, task),
+                    resource: permission.resource(args, task),
+                  },
+                  { kind: 'tool', name, args },
+                ))
               )
                 throw new Error('Tool permission denied');
               signal.throwIfAborted();

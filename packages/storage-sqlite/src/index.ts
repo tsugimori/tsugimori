@@ -92,6 +92,7 @@ function chatScope(
     | typeof approvals
     | typeof grants
     | typeof schedules
+    | typeof tasks
     | typeof workspaceSettings,
   ref: ChatRef,
 ) {
@@ -391,14 +392,9 @@ export class SqliteStore implements Store {
   }
 
   createSchedule(schedule: ScheduleRecord, limit: number) {
-    return this.#db.transaction(
-      () => {
-        if (!this.#hasScheduleCapacity(schedule, limit)) return false;
-        this.#db.insert(schedules).values(schedule).run();
-        return true;
-      },
-      { behavior: 'immediate' },
-    );
+    return this.#db.transaction(() => this.#saveSchedule(schedule, limit), {
+      behavior: 'immediate',
+    });
   }
 
   #hasScheduleCapacity(schedule: ScheduleRecord, limit: number) {
@@ -451,34 +447,48 @@ export class SqliteStore implements Store {
     limit: number,
   ) {
     return this.#db.transaction(
-      () => {
-        if (
-          schedule.status === 'active' &&
-          (expected.status === 'done' || expected.status === 'cancelled') &&
-          !this.#hasScheduleCapacity(schedule, limit)
-        )
-          return false;
-        const nextDue =
-          expected.nextDueAt === null
-            ? isNull(schedules.nextDueAt)
-            : eq(schedules.nextDueAt, expected.nextDueAt);
-        return !!this.#db
-          .update(schedules)
-          .set(schedule)
-          .where(
-            and(
-              eq(schedules.id, expected.id),
-              eq(schedules.status, expected.status),
-              nextDue,
-              eq(schedules.trigger, expected.trigger),
-              eq(schedules.action, expected.action),
-            ),
-          )
-          .returning({ id: schedules.id })
-          .get();
-      },
+      () => this.#saveSchedule(schedule, limit, expected),
       { behavior: 'immediate' },
     );
+  }
+
+  #saveSchedule(
+    schedule: ScheduleRecord,
+    limit: number,
+    expected?: ScheduleRecord,
+  ) {
+    if (
+      (!expected ||
+        (schedule.status === 'active' &&
+          (expected.status === 'done' || expected.status === 'cancelled'))) &&
+      !this.#hasScheduleCapacity(schedule, limit)
+    )
+      return false;
+    if (!expected)
+      return !!this.#db
+        .insert(schedules)
+        .values(schedule)
+        .onConflictDoNothing()
+        .returning({ id: schedules.id })
+        .get();
+    const nextDue =
+      expected.nextDueAt === null
+        ? isNull(schedules.nextDueAt)
+        : eq(schedules.nextDueAt, expected.nextDueAt);
+    return !!this.#db
+      .update(schedules)
+      .set(schedule)
+      .where(
+        and(
+          eq(schedules.id, expected.id),
+          eq(schedules.status, expected.status),
+          nextDue,
+          eq(schedules.trigger, expected.trigger),
+          eq(schedules.action, expected.action),
+        ),
+      )
+      .returning({ id: schedules.id })
+      .get();
   }
 
   claimScheduleRun(
@@ -845,10 +855,6 @@ export class SqliteStore implements Store {
           .set({ status: 'delivery-unknown', finishedAt: now })
           .where(eq(tasks.status, 'sending'))
           .run();
-        tx.update(approvals)
-          .set({ status: 'cancelled', decidedAt: now })
-          .where(eq(approvals.status, 'pending'))
-          .run();
       },
       { behavior: 'immediate' },
     );
@@ -903,16 +909,30 @@ export class SqliteStore implements Store {
     this.#db.insert(approvals).values(approval).run();
   }
 
-  linkApproval(id: string, promptMessageId: string) {
+  linkApproval(
+    id: string,
+    promptMessageId: string,
+    promptFormat?: Parameters<Store['linkApproval']>[2],
+  ) {
     this.#db
       .update(approvals)
-      .set({ promptMessageId })
+      .set({ promptMessageId, promptFormat })
       .where(and(eq(approvals.id, id), eq(approvals.status, 'pending')))
       .run();
   }
 
   getApproval(id: string) {
     return this.#db.select().from(approvals).where(eq(approvals.id, id)).get();
+  }
+
+  listPendingApprovals(ref: ChatRef) {
+    return this.#db
+      .select({ approval: approvals })
+      .from(approvals)
+      .innerJoin(tasks, eq(tasks.id, approvals.taskId))
+      .where(and(chatScope(tasks, ref), eq(approvals.status, 'pending')))
+      .all()
+      .map(({ approval }) => approval);
   }
 
   findApprovalByPrompt(ref: ChatRef, promptMessageId: string) {
@@ -933,6 +953,7 @@ export class SqliteStore implements Store {
     id: string,
     decision: Parameters<Store['decideApproval']>[1],
     grant?: StoredGrant,
+    scheduleLimit?: number,
   ) {
     return this.#db.transaction(
       (tx) => {
@@ -942,9 +963,25 @@ export class SqliteStore implements Store {
           .where(and(eq(approvals.id, id), eq(approvals.status, 'pending')))
           .returning()
           .get();
-        if (!approval) return false;
+        if (!approval) return;
+        const continuation = approval.continuation;
+        if (
+          decision.status === 'approved' &&
+          continuation?.kind === 'schedule'
+        ) {
+          const { schedule, previous } = continuation.change;
+          const scheduleApplied =
+            scheduleLimit !== undefined &&
+            this.#saveSchedule(
+              { ...schedule, deliveryApprovedBy: decision.decidedBy },
+              scheduleLimit,
+              previous,
+            );
+          if (scheduleApplied && grant) tx.insert(grants).values(grant).run();
+          return { scheduleApplied };
+        }
         if (grant) tx.insert(grants).values(grant).run();
-        return true;
+        return {};
       },
       { behavior: 'immediate' },
     );
@@ -958,11 +995,37 @@ export class SqliteStore implements Store {
       .run();
   }
 
-  cancelApprovals(taskId: string, now: number) {
+  cancelChatApprovals(ref: ChatRef, now: number, sourceMessageId?: string) {
+    const sources = this.#db
+      .select({ id: tasks.id })
+      .from(tasks)
+      .where(
+        and(
+          chatScope(tasks, ref),
+          sourceMessageId === undefined
+            ? undefined
+            : eq(tasks.sourceMessageId, sourceMessageId),
+        ),
+      );
     this.#db
       .update(approvals)
       .set({ status: 'cancelled', decidedAt: now })
-      .where(and(eq(approvals.taskId, taskId), eq(approvals.status, 'pending')))
+      .where(
+        and(
+          inArray(approvals.taskId, sources),
+          eq(approvals.status, 'pending'),
+        ),
+      )
+      .run();
+  }
+
+  expireApprovals(now: number) {
+    this.#db
+      .update(approvals)
+      .set({ status: 'cancelled', decidedAt: now })
+      .where(
+        and(eq(approvals.status, 'pending'), lte(approvals.expiresAt, now)),
+      )
       .run();
   }
 

@@ -12,7 +12,12 @@ import type {
   SetupDependencies,
   TunnelProvider,
 } from '@tsugimori/plugin-sdk';
-import type { ScheduleRecord, ScheduleRun, Store } from '@tsugimori/storage';
+import type {
+  ApprovalRecord,
+  ScheduleRecord,
+  ScheduleRun,
+  Store,
+} from '@tsugimori/storage';
 
 import { Auth } from '@tsugimori/auth';
 import {
@@ -33,7 +38,7 @@ import { Tracer } from '@tsugimori/trace';
 import type { Logger } from './hooks.ts';
 import type { PreviewProviders } from './previews.ts';
 
-import { approvalDecisionText } from './approval-messages.ts';
+import { approvalDecisionText, approvalMessages } from './approval-messages.ts';
 import { ChatSetup } from './chat-setup.ts';
 import { EnvironmentChecks, failureText } from './checks.ts';
 import { Executions, sandboxScope } from './executions.ts';
@@ -64,6 +69,11 @@ interface GatewayDependencies {
   trace?: Tracer;
   workspace: string;
 }
+
+type LinkedApproval = NonNullable<ReturnType<Auth['resolveApproval']>> & {
+  live: boolean;
+  record: ApprovalRecord;
+};
 
 export class Gateway {
   readonly #deps;
@@ -110,7 +120,21 @@ export class Gateway {
           };
       },
       approvals: () => ({
-        approvals: store.listApprovals(),
+        approvals: store.listApprovals().map((approval) => ({
+          action: approval.action,
+          adapterId: approval.adapterId,
+          approverId: approval.approverId,
+          chatId: approval.chatId,
+          decidedAt: approval.decidedAt,
+          decidedBy: approval.decidedBy,
+          id: approval.id,
+          onceOnly: approval.onceOnly,
+          promptMessageId: approval.promptMessageId,
+          requester: approval.requester,
+          resource: approval.resource,
+          status: approval.status,
+          taskId: approval.taskId,
+        })),
         grants: store.listGrants(),
       }),
       trace: (taskId) => {
@@ -195,8 +219,8 @@ export class Gateway {
     });
     this.#scheduler = new Scheduler({
       store,
-      approve: async (task, request, signal) =>
-        task.approveSchedule?.(request, signal),
+      approve: (task, request, change) =>
+        this.#tasks.approveSchedule(task, request, change),
       canSchedule: (chat, userId) =>
         this.#auth.isOwner({ ...chat, userId }) ||
         this.#auth.isAllowlisted(chat),
@@ -421,9 +445,9 @@ export class Gateway {
         queryId: event.queryId,
         decision: result?.decision,
         alwaysAsOnce: result?.alwaysAsOnce,
-        pre: result?.pre,
-        entities: result?.entities,
+        ...result?.record.promptFormat,
       });
+      if (result) await this.#approvalOutcome(adapter, result);
       return;
     }
     const user = {
@@ -485,9 +509,9 @@ export class Gateway {
           messageId: event.replyTo,
           decision: result.decision,
           alwaysAsOnce: result.alwaysAsOnce,
-          pre: result.pre,
-          entities: result.entities,
+          ...result.record.promptFormat,
         });
+        await this.#approvalOutcome(adapter, result);
         return;
       }
     }
@@ -614,23 +638,94 @@ export class Gateway {
     });
   }
 
-  #resolveApproval(input: Parameters<Auth['resolveApproval']>[0]) {
+  #resolveApproval(
+    input: Parameters<Auth['resolveApproval']>[0],
+  ): LinkedApproval | undefined {
+    const { store } = this.#deps;
     const result = this.#trace.span(
       'approval.resolve',
       {
         adapterId: input.adapterId,
         chatId: input.chatId,
       },
-      () => this.#auth.resolveApproval(input),
-    );
-    if (result)
-      return {
-        ...result,
-        ...this.#tasks.resolveApproval({
-          ...result,
-          decidedBy: input.userId,
+      () =>
+        this.#auth.resolveApproval(input, (approval) => {
+          const source = store.getTask(approval.taskId);
+          if (source && this.#canCompleteApproval(source, approval.requester))
+            return this.#runtime.config.scheduler?.maxActivePerUser ?? 20;
         }),
-      };
+    );
+    if (!result) return;
+    const record = store.getApproval(result.id);
+    if (!record) return;
+    const live = this.#tasks.resolveApproval({
+      ...result,
+      decidedBy: input.userId,
+    });
+    return { ...result, live, record };
+  }
+
+  #canCompleteApproval(chat: ChatRef, requester: string) {
+    return (
+      Boolean(this.#deps.store.getChat(chat)) &&
+      (this.#auth.isAllowlisted(chat) ||
+        this.#auth.isOwner({ ...chat, userId: requester }))
+    );
+  }
+
+  async #approvalOutcome(adapter: PlatformAdapter, result: LinkedApproval) {
+    if (result.live) return;
+    const { store, log } = this.#deps;
+    const { record, approved, scheduleApplied } = result;
+    const source = store.getTask(record.taskId);
+    if (!source) return;
+    const address = store.deliveryAddress(source);
+    if (!address) return;
+    const message = store.getMessage(source, source.sourceMessageId);
+    const m = approvalMessages(this.#runtime.config.locale).outcomes;
+    const continuation = record.continuation;
+    let text = approved ? m.interrupted : m.denied;
+    if (continuation?.kind === 'schedule') {
+      const { schedule, previous } = continuation.change;
+      const ref = schedule.id.slice(0, 6);
+      text = !approved
+        ? m.scheduleDenied(ref)
+        : !scheduleApplied
+          ? m.scheduleFailed(ref)
+          : previous
+            ? m.scheduleUpdated(ref)
+            : m.scheduleCreated(ref);
+    } else if (approved && continuation?.kind === 'tool') {
+      text = m.failed;
+      try {
+        if (
+          this.#canCompleteApproval(source, record.requester) &&
+          (await this.#tasks.runApprovedTool(adapter, record, source))
+        )
+          text = m.completed;
+      } catch {
+        log({
+          level: 'error',
+          event: 'approval.action_failed',
+          taskId: source.id,
+        });
+      }
+    }
+    try {
+      await this.#outbound.send(adapter, {
+        chatId: address.chatId,
+        threadId: address.threadId,
+        replyTo:
+          message && !message.deleted ? source.sourceMessageId : undefined,
+        text,
+      });
+    } catch {
+      log({
+        level: 'error',
+        event: 'approval.outcome_failed',
+        taskId: source.id,
+      });
+    }
   }
 
   async #approvalFeedback(
@@ -718,6 +813,7 @@ export class Gateway {
       case 'allow':
       case 'deny':
         store.setAllowlisted(chat, name === 'allow');
+        if (name === 'deny') this.#tasks.cancelApprovals(chat);
         await send(name === 'allow' ? m.allowlisted : m.removedFromAllowlist);
         break;
       case 'agent':

@@ -1,5 +1,6 @@
 import type {
   AdapterCursor,
+  ApprovalFeedback,
   ChatRef,
   Grant,
   PluginInstanceConfig,
@@ -72,16 +73,25 @@ export interface TaskRecord extends ChatRef {
 export interface ApprovalRecord extends ChatRef {
   action: string;
   approverId: string | null;
+  continuation: ApprovalContinuation | null;
   decidedAt: number | null;
   decidedBy: string | null;
+  expiresAt: number | null;
   id: string;
   onceOnly: boolean;
+  promptFormat: ApprovalPromptFormat | null;
   promptMessageId: string | null;
   requester: string;
   resource: ResourceRef;
   status: 'pending' | 'approved' | 'denied' | 'cancelled';
   taskId: string;
 }
+
+export type ApprovalPromptFormat = Pick<ApprovalFeedback, 'entities' | 'pre'>;
+
+export type ApprovalContinuation =
+  | { change: ScheduleChange; kind: 'schedule' }
+  | { args: unknown; kind: 'tool'; name: string };
 
 export interface SetupRun {
   category: 'agent' | 'platform';
@@ -163,6 +173,12 @@ export interface ScheduleRecord extends ChatRef {
   trigger: ScheduleTrigger;
 }
 
+export interface ScheduleChange {
+  approverName?: string;
+  previous?: ScheduleRecord;
+  schedule: ScheduleRecord;
+}
+
 export interface ScheduleRun {
   dueAt: number;
   finishedAt: number | null;
@@ -198,7 +214,11 @@ export interface StoredPreview extends ChatRef {
 export interface Store {
   beginSummary(ref: ChatRef): ChatSummary;
   cancelApproval(id: string, now: number): void;
-  cancelApprovals(taskId: string, now: number): void;
+  cancelChatApprovals(
+    ref: ChatRef,
+    now: number,
+    sourceMessageId?: string,
+  ): void;
   claimPairing(principal: PrincipalRef, digest: string, now: number): boolean;
   claimScheduleRun(
     schedule: ScheduleRecord,
@@ -231,13 +251,15 @@ export interface Store {
       status: 'approved' | 'denied';
     },
     grant?: StoredGrant,
-  ): boolean;
+    scheduleLimit?: number,
+  ): { scheduleApplied?: boolean } | undefined;
   deliveryAddress(
     ref: ChatRef,
   ):
     | (ScheduleAddress & { kind: ChatRecord['kind']; userId: string })
     | undefined;
   dueSchedules(now: number, adapterIds: readonly string[]): ScheduleRecord[];
+  expireApprovals(now: number): void;
   findApprovalByPrompt(
     ref: ChatRef,
     promptMessageId: string,
@@ -264,12 +286,17 @@ export interface Store {
   interruptScheduleRuns(now: number): void;
   interruptTasks(now: number): void;
   isSetupSecret(ref: ChatRef, messageId: string): boolean;
-  linkApproval(id: string, promptMessageId: string): void;
+  linkApproval(
+    id: string,
+    promptMessageId: string,
+    format?: ApprovalPromptFormat,
+  ): void;
   listApprovals(): ApprovalRecord[];
   listChatMessages(ref: ChatRef, before?: number): Omit<MessageRecord, 'raw'>[];
   listChats(): ChatRecord[];
   listChatTasks(ref: ChatRef): TaskRecord[];
   listGrants(): StoredGrant[];
+  listPendingApprovals(ref: ChatRef): ApprovalRecord[];
   listPreviews(adapterId?: string): StoredPreview[];
   listSchedules(ref: ChatRef): ScheduleRecord[];
   markDeleted(ref: ChatRef, messageId: string): void;

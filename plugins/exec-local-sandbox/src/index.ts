@@ -4,10 +4,7 @@ import type {
   ExecSession,
   RunOptions,
 } from '@tsugimori/plugin-sdk';
-import type {
-  ChildProcessWithoutNullStreams,
-  spawn as Spawn,
-} from 'node:child_process';
+import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 
 import { definePlugin, ToolFailure } from '@tsugimori/plugin-sdk';
 import { spawn } from 'node:child_process';
@@ -30,6 +27,11 @@ const system = [
   '/etc/localtime',
 ];
 const maxOutput = 1024 * 1024;
+const namespaceArgs = [
+  '--unshare-all',
+  '--unshare-user',
+  '--disable-userns',
+] as const;
 const workerFile = fileURLToPath(
   new URL(
     import.meta.url.endsWith('.ts') ? './worker.ts' : './worker.js',
@@ -60,7 +62,11 @@ type Relay = Awaited<ReturnType<typeof createRelay>>;
 interface BackendDependencies {
   command?: string;
   platform?: string;
-  spawn?: typeof Spawn;
+  spawn?(
+    command: string,
+    args: readonly string[],
+    options: { stdio: 'pipe' },
+  ): ChildProcessWithoutNullStreams;
 }
 
 export class LocalSandbox implements ExecBackend {
@@ -168,8 +174,7 @@ class Session implements ExecSession {
   async #args(relay?: Relay) {
     const { workdir, denyRead, network } = this.#scope;
     const args = [
-      '--unshare-all',
-      '--disable-userns',
+      ...namespaceArgs,
       '--die-with-parent',
       '--new-session',
       '--clearenv',
@@ -450,8 +455,7 @@ export default definePlugin({
       ];
     const namespaces = await available([
       'bwrap',
-      '--unshare-all',
-      '--disable-userns',
+      ...namespaceArgs,
       '--ro-bind',
       '/',
       '/',

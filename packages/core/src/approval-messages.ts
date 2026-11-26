@@ -22,6 +22,19 @@ const catalogs = {
       always: 'Always allow (this recurring schedule)',
       deny: 'Deny',
     },
+    outcomes: {
+      denied: 'The request was denied.',
+      completed: 'The approved action completed.',
+      failed: 'The approved action could not be completed.',
+      interrupted:
+        'The agent turn ended before it could carry out the approved action. Please submit a new request.',
+      scheduleCreated: (ref: string) => `Schedule #${ref} was created.`,
+      scheduleUpdated: (ref: string) => `Schedule #${ref} was updated.`,
+      scheduleDenied: (ref: string) =>
+        `Approval for schedule #${ref} was denied.`,
+      scheduleFailed: (ref: string) =>
+        `Schedule #${ref} could not be saved after approval.`,
+    },
     decisions: {
       once: '✅ Allowed once',
       always: '✅ Always allowed',
@@ -46,6 +59,7 @@ const catalogs = {
       'workspace.configure': 'Change chat workspace settings',
     },
     chat: 'Location',
+    mentions: 'Mentions',
     recipient: 'Recipient',
     requester: 'Requested by',
     when: 'When',
@@ -54,14 +68,15 @@ const catalogs = {
     model: 'Model',
     path: 'Path',
     globalScope: 'Scope: Global',
-    everyone: 'Everyone',
+    noMentions: 'none',
     unknownUser: 'Unknown user',
     reference: 'Ref',
     reason: 'Reason',
     reasons: {
       agent: 'The agent requested owner approval.',
       crossChat: 'This agent task reads one chat and delivers to another.',
-      delivery: 'Delivery to this destination requires approval.',
+      delivery: 'This will send a message to another location.',
+      recurringGroup: 'This will send recurring messages to the group.',
       mentions: 'This will mention specific people.',
       frequency:
         'The schedule can run faster than the configured minimum interval.',
@@ -82,6 +97,16 @@ const catalogs = {
       always: '✅ 已設為一律允許',
       deny: '❌ 已拒絕',
     },
+    outcomes: {
+      denied: '這項請求已被拒絕。',
+      completed: '核准的操作已完成。',
+      failed: '核准的操作未能完成。',
+      interrupted: '代理程式的回合已結束，無法執行核准的操作。請重新提出請求。',
+      scheduleCreated: (ref: string) => `已建立排程 #${ref}。`,
+      scheduleUpdated: (ref: string) => `已更新排程 #${ref}。`,
+      scheduleDenied: (ref: string) => `排程 #${ref} 的請求已被拒絕。`,
+      scheduleFailed: (ref: string) => `排程 #${ref} 已獲核准，但未能儲存。`,
+    },
     alwaysAsOnce: '✅ 已允許一次（此請求的「一律允許」視為「允許一次」）',
     unavailable: '這項審核已無法處理。',
     replyRecurring:
@@ -97,6 +122,7 @@ const catalogs = {
       'workspace.configure': '變更聊天室工作區設定',
     },
     chat: '位置',
+    mentions: '對象',
     recipient: '對象',
     requester: '發起',
     when: '時間',
@@ -105,14 +131,15 @@ const catalogs = {
     model: '模型',
     path: '路徑',
     globalScope: '範圍：全域',
-    everyone: '大家',
+    noMentions: '不提及任何人',
     unknownUser: '未知使用者',
     reference: '識別碼',
     reason: '原因',
     reasons: {
       agent: '代理程式要求主人審核。',
       crossChat: '這項代理任務會讀取一個聊天室的內容，並傳送到另一個聊天室。',
-      delivery: '傳送到這個位置需要同意。',
+      delivery: '會發訊息到其他位置',
+      recurringGroup: '會定時在群組發訊息',
       mentions: '會提及特定的人',
       frequency: '這項排程的執行間隔可能短於設定的下限。',
       model: '所選模型需要主人授權。',
@@ -212,7 +239,10 @@ export function approvalPrompt({
   const date = (timestamp: number) =>
     scheduleTime(timestamp, timezone, locale, now);
   const title = field('🔔 ' + m.title, m[schedule.operation][schedule.kind]);
-  const recipientsPrefix = field(m.recipient, '');
+  const recipientsPrefix = field(
+    schedule.targetUserId ? m.recipient : m.mentions,
+    '',
+  );
   let names = '';
   for (const { name, userId } of recipients) {
     if (names) names += m.names;
@@ -234,7 +264,7 @@ export function approvalPrompt({
   }
   const lines = [
     title,
-    recipientsPrefix + (names || m.everyone),
+    recipientsPrefix + (names || m.noMentions),
     field(
       m.when,
       date(schedule.dueAt) + scheduleCadence(schedule.repeat, locale),
@@ -252,12 +282,12 @@ export function approvalPrompt({
   if (schedule.model) lines.push(field(m.model, withoutPings(schedule.model)));
   const reasons = schedule.reasons
     .filter((reason) => reason !== 'agent')
-    .map((reason) => {
-      const mentions =
-        reason === 'delivery' &&
-        recipients.length > 0 &&
-        !schedule.targetUserId;
-      return m.reasons[mentions ? 'mentions' : reason];
+    .flatMap((reason) => {
+      if (reason !== 'delivery' || schedule.targetUserId)
+        return [m.reasons[reason]];
+      const reasons = schedule.repeat ? [m.reasons.recurringGroup] : [];
+      if (recipients.length) reasons.push(m.reasons.mentions);
+      return reasons.length ? reasons : [m.reasons.delivery];
     });
   if (schedule.agentReason) {
     const reason = schedule.agentReason.replace(

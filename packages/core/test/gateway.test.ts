@@ -43,7 +43,7 @@ function inbound(
   };
 }
 
-function createPlatform() {
+function createPlatform(messagePrefix = 'bot') {
   let context: AdapterContext | undefined;
   let starts = 0;
   const sent: (OutboundMessage & { messageId: string })[] = [];
@@ -62,7 +62,7 @@ function createPlatform() {
       return Promise.resolve();
     },
     send(message) {
-      const messageId = `bot-${sent.length + 1}`;
+      const messageId = `${messagePrefix}-${sent.length + 1}`;
       sent.push({ ...message, messageId });
       return Promise.resolve({ messageId, raw: { delivered: true } });
     },
@@ -95,14 +95,17 @@ async function fixture(
   options: {
     compact?: AgentConnector['compact'];
     context?: { recentMessages: number; summary?: { model: string } };
+    durable?: boolean;
     locale?: 'en' | 'zh-TW';
+    onScopedTool?: (args: unknown, userId: string) => void;
     plugins?: PluginDefinition[];
     previews?: { named?: TunnelProvider; quick: TunnelProvider };
   } = {},
 ) {
   const workspace = await mkdtemp(join(tmpdir(), 'tsugimori-gateway-'));
   const path = join(workspace, 'tsugimori.json');
-  const store = new SqliteStore(':memory:');
+  const dbPath = options.durable ? join(workspace, 'gateway.db') : ':memory:';
+  const store = new SqliteStore(dbPath);
   const trace = new Tracer(store, { ringSize: 500 });
   const platform = createPlatform();
   let agentStarts = 0;
@@ -151,7 +154,8 @@ async function fixture(
               return { type: 'project', id: args.id };
             },
           },
-          run(_args, task) {
+          run(args, task) {
+            options.onScopedTool?.(args, task.principal.userId);
             return Promise.resolve(task.principal.userId);
           },
         },
@@ -213,6 +217,7 @@ async function fixture(
   return {
     gateway,
     configure,
+    dbPath,
     logs,
     platform,
     store,
@@ -641,6 +646,193 @@ test(
   },
 );
 
+for (const mode of ['reload', 'restart'] as const) {
+  test(
+    `a pending schedule stays actionable after gateway ${mode}`,
+    { timeout: 5_000 },
+    async (t) => {
+      const f = await fixture(
+        t,
+        async function* (request) {
+          if (request.context.at(-1)?.content !== 'Schedule a reminder') return;
+          const tool = request.tools.find(
+            ({ name }) => name === 'schedule.create',
+          );
+          assert.ok(tool);
+          await tool.run({
+            action: { kind: 'message', text: 'Recurring reminder' },
+            trigger: { kind: 'interval', at: Date.now() + 60_000, minutes: 30 },
+          });
+          // Keep the original turn active until the agent detaches.
+          await delay(60_000, undefined, { signal: request.signal });
+        },
+        true,
+        { durable: mode === 'restart' },
+      );
+      await f.platform.emit(
+        inbound('owner-dm', 'Hello', { chatId: 'owner', mentionsBot: false }),
+      );
+      const topic = {
+        chatKind: 'group' as const,
+        chatTitle: 'Test group',
+        threadId: '8',
+      };
+      await f.platform.emit(inbound('allow-topic', '/allow', topic));
+      await f.platform.emit(
+        inbound('original', 'Schedule a reminder', {
+          ...topic,
+          mentionsBot: true,
+          userId: 'member',
+        }),
+      );
+      await until(t, () =>
+        f.store.listApprovals().some(({ promptMessageId }) => promptMessageId),
+      );
+      const [approval] = f.store.listApprovals();
+      const prompt = f.platform.sent.find(
+        ({ messageId }) => messageId === approval?.promptMessageId,
+      );
+      assert.ok(approval && prompt?.buttons?.[0]);
+      assert.equal(approval.status, 'pending');
+      assert.equal(prompt.chatId, 'owner');
+      assert.match(prompt.text, /^Mentions: none$/m);
+      assert.match(
+        prompt.text,
+        /^Reason: This will send recurring messages to the group\.$/m,
+      );
+      const scope = { ...chat, chatId: chat.chatId + '_8' };
+
+      let store = f.store;
+      let platform = f.platform;
+      let gateway = f.gateway;
+      try {
+        if (mode === 'reload') {
+          await f.configure(false);
+          await until(
+            t,
+            () =>
+              f.agentStops === 1 &&
+              f.logs.some(({ event }) => event === 'config.reloaded'),
+          );
+        } else {
+          await f.gateway.stop();
+          await f.configure(false);
+          store = new SqliteStore(f.dbPath);
+          platform = createPlatform('restarted');
+          gateway = new Gateway({
+            log: () => {},
+            registry: new PluginRegistry([
+              { name: 'test', adapters: { fake: () => platform.platform } },
+            ]),
+            store,
+            workspace: join(f.path, '..'),
+          });
+          await gateway.start();
+        }
+        assert.equal(store.getTask(approval.taskId)?.status, 'cancelled');
+        assert.equal(store.getApproval(approval.id)?.status, 'pending');
+        assert.deepEqual(store.listSchedules(scope), []);
+        if (mode === 'reload') {
+          await platform.emit({
+            type: 'callback',
+            chatId: 'owner',
+            userId: 'owner',
+            callbackId: prompt.buttons[0].id,
+            messageId: prompt.messageId,
+          });
+        } else {
+          await platform.emit(
+            inbound('accept-schedule', 'yes', {
+              chatId: 'owner',
+              replyTo: prompt.messageId,
+            }),
+          );
+        }
+        const [schedule] = store.listSchedules(scope);
+        assert.ok(schedule);
+        assert.equal(schedule.createdBy, 'member');
+        assert.equal(schedule.deliveryApprovedBy, 'owner');
+        assert.equal(store.getApproval(approval.id)?.status, 'approved');
+        assert.equal(
+          platform.feedback.at(-1)?.pre?.length,
+          'Recurring reminder'.length,
+        );
+        const outcome = platform.sent.at(-1);
+        assert.equal(
+          outcome?.text,
+          `Schedule #${schedule.id.slice(0, 6)} was created.`,
+        );
+        assert.equal(outcome?.chatId, chat.chatId);
+        assert.equal(outcome?.threadId, '8');
+        assert.equal(outcome?.replyTo, 'original');
+        await platform.emit(
+          inbound('repeated-decision', 'yes', {
+            chatId: 'owner',
+            replyTo: prompt.messageId,
+          }),
+        );
+        assert.equal(store.listSchedules(scope).length, 1);
+        assert.equal(store.listGrants().length, 1);
+      } finally {
+        if (gateway !== f.gateway) {
+          await gateway.stop();
+          store.close();
+        }
+      }
+    },
+  );
+}
+
+test(
+  'a detached framework tool runs once with the original arguments and requester',
+  { timeout: 5_000 },
+  async (t) => {
+    const calls: unknown[] = [];
+    const f = await fixture(
+      t,
+      async function* (request) {
+        const tool = request.tools.find(({ name }) => name === 'scoped_tool');
+        assert.ok(tool);
+        await tool.run({ id: 'original-scope' });
+      },
+      true,
+      { onScopedTool: (args, userId) => calls.push({ args, userId }) },
+    );
+    const group = { chatKind: 'group' as const };
+    await f.platform.emit(inbound('allow-tools', '/allow', group));
+    await f.platform.emit(
+      inbound('use-tool', 'Use the scoped tool', {
+        ...group,
+        mentionsBot: true,
+        userId: 'member',
+      }),
+    );
+    await until(t, () =>
+      f.store.listApprovals().some(({ promptMessageId }) => promptMessageId),
+    );
+    const [approval] = f.store.listApprovals();
+    assert.ok(approval?.promptMessageId);
+    await f.configure(false);
+    await until(t, () =>
+      f.logs.some(({ event }) => event === 'config.reloaded'),
+    );
+    const replyTo = approval.promptMessageId;
+    assert.equal(f.store.getApproval(approval.id)?.status, 'pending');
+    await f.platform.emit(inbound('tool-yes', 'yes', { ...group, replyTo }));
+    await f.platform.emit(
+      inbound('tool-yes-again', 'yes', { ...group, replyTo }),
+    );
+    assert.deepEqual(calls, [
+      { args: { id: 'original-scope' }, userId: 'member' },
+    ]);
+    assert.equal(
+      f.platform.sent.at(-1)?.text,
+      'The approved action completed.',
+    );
+    assert.equal(f.platform.sent.at(-1)?.replyTo, 'use-tool');
+  },
+);
+
 test(
   'a platform can detach and reattach while the gateway remains running',
   { timeout: 5_000 },
@@ -819,18 +1011,23 @@ test(
         if (request.purpose === 'summary') {
           summaryRequest.resolve(request);
           await release.promise;
-          yield { type: 'text.final', text: 'Rolling memory' };
+          yield { type: 'text.final', text: '近期對話摘要' };
           return;
         }
         prompts.push(request);
         yield { type: 'text.final', text: 'Chat reply' };
       },
       true,
-      { context: { recentMessages: 2, summary: { model: 'economy' } } },
+      {
+        context: { recentMessages: 2, summary: { model: 'economy' } },
+        locale: 'zh-TW',
+      },
     );
 
     const group = { chatKind: 'group' as const };
+    await f.platform.emit(inbound('sticker', '', group));
     await f.platform.emit(inbound('history-1', 'First old message', group));
+    await f.platform.emit(inbound('service', '　', group));
     await f.platform.emit(inbound('history-2', 'Recent message', group));
     await f.platform.emit(
       inbound('current-1', 'Answer this', { ...group, mentionsBot: true }),
@@ -840,10 +1037,18 @@ test(
     const summary = await summaryRequest.promise;
     assert.equal(summary.model, 'economy');
     assert.equal(summary.tools.length, 0);
+    assert.match(
+      summary.context[0]?.content ?? '',
+      /Traditional Chinese \(Taiwan, zh-TW\)/,
+    );
+    assert.equal(
+      summary.context.filter(({ source }) => source === 'message').length,
+      1,
+    );
     assert.match(summary.context.at(-1)?.content ?? '', /First old message/);
     assert.equal(f.store.getSummary(chat)?.text, '');
     release.resolve();
-    await until(t, () => f.store.getSummary(chat)?.text === 'Rolling memory');
+    await until(t, () => f.store.getSummary(chat)?.text === '近期對話摘要');
     await f.platform.emit(
       inbound('current-2', 'Follow up', { ...group, mentionsBot: true }),
     );
@@ -855,7 +1060,7 @@ test(
           ({ source }) => source === 'summary' || source === 'message',
         )
         .map(({ content }) => content),
-      ['Rolling memory', 'Chat reply', 'Follow up'],
+      ['近期對話摘要', 'Chat reply', 'Follow up'],
     );
   },
 );

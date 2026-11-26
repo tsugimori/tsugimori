@@ -149,7 +149,12 @@ export class Auth {
     taskId: string,
     requester: string,
     request: ApprovalRequest,
-    options: { approverId?: string; onceOnly?: boolean } = {},
+    options: {
+      approverId?: string;
+      continuation?: ApprovalRecord['continuation'];
+      expiresAt?: number;
+      onceOnly?: boolean;
+    } = {},
   ) {
     const approval: ApprovalRecord = {
       adapterId: chat.adapterId,
@@ -159,7 +164,10 @@ export class Auth {
       requester,
       action: request.action,
       resource: request.resource,
+      continuation: options.continuation ?? null,
+      expiresAt: options.expiresAt ?? null,
       promptMessageId: null,
+      promptFormat: null,
       approverId: options.approverId ?? null,
       onceOnly: options.onceOnly ?? false,
       status: 'pending',
@@ -170,7 +178,10 @@ export class Auth {
     return approval;
   }
 
-  resolveApproval(input: ApprovalInput) {
+  resolveApproval(
+    input: ApprovalInput,
+    scheduleLimit?: (approval: ApprovalRecord) => number | undefined,
+  ) {
     let approval: ApprovalRecord | undefined;
     let decision: ApprovalDecision | undefined;
     if ('callbackId' in input) {
@@ -196,6 +207,10 @@ export class Auth {
     const alwaysAsOnce = approval.onceOnly && decision === 'always';
     if (alwaysAsOnce) decision = 'once';
     const now = this.#now();
+    if (approval.expiresAt !== null && approval.expiresAt <= now) {
+      this.#store.cancelApproval(approval.id, now);
+      return;
+    }
     const approved = decision !== 'deny';
     const grant: StoredGrant | undefined =
       decision !== 'deny'
@@ -224,12 +239,16 @@ export class Auth {
         decidedAt: now,
       },
       grant,
+      approved && approval.continuation?.kind === 'schedule'
+        ? scheduleLimit?.(approval)
+        : undefined,
     );
     if (changed)
       return {
         id: approval.id,
         approved,
         decision,
+        ...changed,
         ...(alwaysAsOnce ? { alwaysAsOnce } : {}),
       };
   }

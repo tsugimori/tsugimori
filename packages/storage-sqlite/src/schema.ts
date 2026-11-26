@@ -129,10 +129,17 @@ export const approvals = sqliteTable(
     resource: text('resource', { mode: 'json' }).$type<ResourceRef>().notNull(),
     requester: text('requester').notNull(),
     approverId: text('approver_id'),
+    continuation: text('continuation', { mode: 'json' }).$type<
+      NonNullable<ApprovalRecord['continuation']>
+    >(),
+    expiresAt: integer('expires_at'),
     onceOnly: integer('once_only', { mode: 'boolean' })
       .notNull()
       .default(false),
     promptMessageId: text('prompt_message_id'),
+    promptFormat: text('prompt_format', { mode: 'json' }).$type<
+      NonNullable<ApprovalRecord['promptFormat']>
+    >(),
     status: text('status').$type<ApprovalRecord['status']>().notNull(),
     decidedBy: text('decided_by'),
     decidedAt: integer('decided_at'),

@@ -1,5 +1,6 @@
 import type { ScheduleRecord } from '@tsugimori/storage';
 
+import { Auth } from '@tsugimori/auth';
 import { Scheduler } from '@tsugimori/scheduler';
 import { SqliteStore } from '@tsugimori/storage-sqlite';
 import assert from 'node:assert/strict';
@@ -48,6 +49,52 @@ test('approval reasons deduplicate program text and retain the generic fallback'
   assert.deepEqual(prompt(['agent'], '需要使用大量資源。'), [
     '原因：需要使用大量資源。',
   ]);
+});
+
+test('a recurring group approval identifies the delivery and lack of mentions in both locales', (t) => {
+  const store = new SqliteStore(':memory:');
+  t.after(() => store.close());
+  const chat = { adapterId: 'fake', chatId: 'room' };
+  for (const [locale, mentions, reason] of [
+    ['zh-TW', '對象：不提及任何人', '原因：會定時在群組發訊息'],
+    [
+      'en',
+      'Mentions: none',
+      'Reason: This will send recurring messages to the group.',
+    ],
+  ] as const) {
+    const prompt = approvalPrompt({
+      chat,
+      locale,
+      request: {
+        action: 'schedule.create',
+        resource: { type: 'chat', ...chat },
+      },
+      schedule: {
+        address: chat,
+        content: '提醒',
+        deliveryKey: 'delivery',
+        dueAt: 60_000,
+        id: 'schedule',
+        kind: 'message',
+        operation: 'create',
+        reasons: ['delivery'],
+        recipients: [],
+        repeat: { minutes: 30 },
+        reuseGrant: false,
+        target: chat,
+        timezone: 'UTC',
+      },
+      store,
+      useButtons: false,
+    });
+    assert.ok(prompt.text.split('\n').includes(mentions));
+    assert.ok(prompt.text.split('\n').includes(reason));
+    assert.deepEqual(prompt.entities, [
+      { type: 'pre', offset: prompt.text.length - 2, length: 2 },
+    ]);
+    assert.ok(prompt.text.endsWith('\n提醒'));
+  }
 });
 
 test('a restarted scheduler claims only the latest missed fire and preserves its next due time', async (t) => {
@@ -201,12 +248,39 @@ test('schedule summaries and short references use the current chat, locale, and 
     },
   );
   let locale: 'en' | 'zh-TW' = 'zh-TW';
-  const answer = Promise.withResolvers<string | undefined>();
+  const auth = new Auth({ store, now: () => now });
+  store.createTask({
+    ...chat,
+    id: 'task',
+    sourceMessageId: 'request',
+    status: 'running',
+    agentId: 'test',
+    model: 'test',
+    createdAt: now,
+    startedAt: now,
+    finishedAt: null,
+  });
   let waitForDecision = false;
   const scheduler = new Scheduler({
     attachedAdapters: () => ['fake'],
-    approve: async () =>
-      waitForDecision ? { decision: answer.promise } : { approvedBy: '20' },
+    approve: async (task, request, change) => {
+      if (!waitForDecision) return { approvedBy: '20' };
+      auth.createApproval(
+        chat,
+        task.taskId,
+        task.principal.userId,
+        {
+          action: 'schedule.create',
+          resource: {
+            type: 'schedule',
+            id: request.id,
+            deliveryKey: request.deliveryKey,
+          },
+        },
+        { continuation: { kind: 'schedule', change } },
+      );
+      return { pending: true };
+    },
     canSchedule: () => true,
     deliver: async () => 'sent',
     logError: (event) => assert.fail(event),
@@ -303,8 +377,7 @@ test('schedule summaries and short references use the current chat, locale, and 
     ((await run('cancel', { id: pending.ref })) as typeof result).status,
     'cancelled',
   );
-  answer.resolve('20');
-  await answer.promise;
+  assert.equal(store.listApprovals()[0]?.status, 'cancelled');
   assert.ok(
     store.listSchedules(chat).every(({ id }) => !id.startsWith(pending.ref)),
   );

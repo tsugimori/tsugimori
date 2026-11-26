@@ -225,14 +225,9 @@ export interface ScheduleApprovalRequest {
   until?: number;
 }
 
-export type ScheduleApproval =
-  { approvedBy: string } | { decision: Promise<string | undefined> };
+export type ScheduleApproval = { approvedBy: string } | { pending: true };
 
 export interface ToolContext {
-  approveSchedule?(
-    request: ScheduleApprovalRequest,
-    signal: AbortSignal,
-  ): Promise<ScheduleApproval | undefined>;
   chat: ChatRef;
   principal: PrincipalRef;
   signal: AbortSignal;
