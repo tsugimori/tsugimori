@@ -273,4 +273,9 @@ export function watch(
   };
 }
 
-export { updateSettings, writeCredential } from './workspace-write.ts';
+export {
+  readWorkspaceCredentials,
+  replaceWorkspaceCredentials,
+  updateSettings,
+  writeCredential,
+} from './workspace-write.ts';

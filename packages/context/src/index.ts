@@ -32,7 +32,7 @@ interface ContextDependencies {
   workspace: string;
 }
 
-function pathId(id: string) {
+export function pathId(id: string) {
   if (id === '.') return '%2E';
   if (id === '..') return '%2E%2E';
   if (!id) throw new Error('Expected a non-empty workspace path identifier');

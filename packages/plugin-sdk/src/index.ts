@@ -619,6 +619,10 @@ export interface PluginDefinition {
     ctx: CheckContext,
     options: { signal?: AbortSignal; upgrade: boolean },
   ): Promise<string | undefined>;
+  managedRuntimePaths?(
+    workspace: string,
+    entry: PluginInstanceConfig,
+  ): readonly string[];
   name: string;
   setupComplete?: SetupCompletion;
   setupSteps?: readonly SetupStep[];

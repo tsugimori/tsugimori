@@ -7,7 +7,7 @@ import type {
   PlatformInstanceConfig,
   PluginInstanceConfig,
 } from '@tsugimori/plugin-sdk';
-import type { Store } from '@tsugimori/storage';
+import type { RemovalTarget, Store } from '@tsugimori/storage';
 import type { Tracer } from '@tsugimori/trace';
 
 import { ConfigError, parseConfig } from '@tsugimori/config';
@@ -222,7 +222,7 @@ export class Runtime {
     );
   }
 
-  async apply(snapshot: WorkspaceConfig) {
+  async apply(snapshot: WorkspaceConfig, removal?: RemovalTarget) {
     const { workspace, registry } = this.#deps;
     const config = parseConfig(JSON.stringify(snapshot.config), registry);
     const env = new Map(snapshot.env);
@@ -298,6 +298,7 @@ export class Runtime {
     const stoppedAdapters: AdapterEntry[] = [];
     const changedAdapters = new Set<string>();
     const changedAgents = new Set<string>();
+    let removalStopFailed = false;
     const ready = Promise.withResolvers<void>();
 
     try {
@@ -417,7 +418,13 @@ export class Runtime {
       const sandboxChanged =
         this.#snapshot &&
         (!isDeepStrictEqual(this.config.exec, config.exec) ||
-          !isDeepStrictEqual(sandboxHomes(this.config), sandboxHomes(config)) ||
+          !isDeepStrictEqual(
+            sandboxHomes(
+              this.config,
+              removal?.category === 'agent' ? removal.id : undefined,
+            ),
+            sandboxHomes(config),
+          ) ||
           this.disabled('exec') !==
             reports.some(
               (item) =>
@@ -445,9 +452,13 @@ export class Runtime {
         const old = this.#agents.get(id)!;
         const next = nextAgents.get(id)?.config;
         if (
-          !next ||
-          credentialsChanged('agent', next) ||
-          !isDeepStrictEqual({ ...old.config, compactAt: next.compactAt }, next)
+          (removal?.category !== 'agent' || removal.id !== id) &&
+          (!next ||
+            credentialsChanged('agent', next) ||
+            !isDeepStrictEqual(
+              { ...old.config, compactAt: next.compactAt },
+              next,
+            ))
         )
           this.#deps.store.clearAgentSessions(id);
       }
@@ -457,6 +468,11 @@ export class Runtime {
         } catch {
           nextAdapters.delete(entry.adapter.id);
           failedStart('platform', entry.adapter.id);
+          if (
+            removal?.category === 'platform' &&
+            removal.id === entry.adapter.id
+          )
+            removalStopFailed = true;
         }
       }
     } catch (error) {
@@ -480,7 +496,21 @@ export class Runtime {
     }
 
     for (const id of changedAgents) {
-      await this.#stop(() => this.#agents.get(id)?.agent.stop?.());
+      const stop = () => this.#agents.get(id)?.agent.stop?.();
+      if (removal?.category === 'agent' && removal.id === id) {
+        try {
+          await stop();
+        } catch {
+          removalStopFailed = true;
+          this.#deps.log({
+            level: 'error',
+            event: 'plugin.stop_failed',
+            target: `agent/${id}`,
+          });
+        }
+      } else {
+        await this.#stop(stop);
+      }
     }
     this.#snapshot = current;
     for (const item of reports) {
@@ -505,6 +535,8 @@ export class Runtime {
     await Promise.all(
       [...nextAdapters.values()].map((entry) => this.#resume(entry)),
     );
+    if (removalStopFailed)
+      throw new Error('Removed plugin did not stop cleanly');
   }
 
   #resume(entry: AdapterEntry) {
@@ -747,8 +779,9 @@ function checkIdentity(
   }
 }
 
-function sandboxHomes(config: Config) {
+function sandboxHomes(config: Config, excluded?: string) {
   return config.agents
+    .filter(({ id }) => id !== excluded)
     .flatMap(({ options }) => [options?.codexHome, options?.claudeHome])
     .filter((value): value is string => typeof value === 'string')
     .sort();

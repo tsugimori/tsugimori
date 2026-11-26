@@ -40,6 +40,8 @@ export function sandboxScope(
         join(home, name),
       ),
       join(workspace, '.env'),
+      join(workspace, 'data', '.remove'),
+      join(workspace, 'data', 'backups'),
       join(workspace, 'agents'),
       ...agents.map(({ id }) => agentHome(workspace, id)),
       ...agents.flatMap((agent) =>

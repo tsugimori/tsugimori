@@ -108,6 +108,7 @@ export class ChatSetup {
         (prompt.chatId === chat.chatId || prompt.origin === chat.chatId) &&
         command !== 'add' &&
         command !== 'login' &&
+        command !== 'remove' &&
         command !== 'status',
       ) ||
       /\b(?:\d{5,}:[A-Za-z0-9_-]{25,}|sk-ant-oat[A-Za-z0-9_-]{20,})\b/.test(
@@ -350,5 +351,12 @@ export class ChatSetup {
   async stop() {
     this.#shutdown.abort();
     await this.#running?.done;
+  }
+
+  async detach(adapterId: string) {
+    const run = this.#running;
+    if (run?.adapterId !== adapterId) return;
+    run.cancel.abort();
+    await run.done;
   }
 }

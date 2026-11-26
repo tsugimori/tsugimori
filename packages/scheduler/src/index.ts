@@ -70,6 +70,7 @@ interface SchedulerDependencies {
     change: ScheduleChange,
   ): Promise<ScheduleApproval | undefined>;
   attachedAdapters(): readonly string[];
+  canFire?(schedule: ScheduleRecord): boolean;
   canSchedule(chat: ChatRef, userId: string): boolean;
   deliver(
     schedule: ScheduleRecord,
@@ -201,7 +202,7 @@ function occurrence(
 export class Scheduler {
   readonly #deps: SchedulerDependencies;
   readonly #now: () => number;
-  readonly #active = new Set<Promise<void>>();
+  readonly #active = new Map<Promise<void>, string>();
   readonly #wake = new AbortController();
   #timer?: NodeJS.Timeout;
   #startedAt = Number.NEGATIVE_INFINITY;
@@ -224,8 +225,11 @@ export class Scheduler {
     this.#wake.abort();
   }
 
-  async idle() {
-    await Promise.allSettled(this.#active);
+  async idle(adapterId?: string) {
+    const work = [...this.#active]
+      .filter(([, id]) => adapterId === undefined || id === adapterId)
+      .map(([job]) => job);
+    await Promise.allSettled(work);
   }
 
   tick() {
@@ -236,10 +240,11 @@ export class Scheduler {
       this.#deps.expireApprovals?.(now, adapterIds);
       for (const schedule of this.#deps.store.dueSchedules(now, adapterIds)) {
         if (this.#active.size >= 2) break;
+        if (this.#deps.canFire?.(schedule) === false) continue;
         const execution = this.#fire(schedule, now).catch(() =>
           this.#deps.logError('schedule.run_failed', schedule.id),
         );
-        this.#active.add(execution);
+        this.#active.set(execution, schedule.adapterId);
         void execution.finally(() => this.#active.delete(execution));
       }
     } catch {

@@ -35,6 +35,10 @@ const descriptions = {
   },
   preview: { en: 'Close a preview', 'zh-TW': '關閉預覽' },
   previews: { en: 'List open previews', 'zh-TW': '列出開啟中的預覽' },
+  remove: {
+    en: 'Remove an instance (/remove <platform|agent> <id>)',
+    'zh-TW': '移除實例（/remove <platform|agent> <id>）',
+  },
   status: { en: 'Show status', 'zh-TW': '查看狀態' },
   thinking: {
     en: 'Show or set reasoning effort (default to reset)',

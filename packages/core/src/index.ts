@@ -1,4 +1,4 @@
-import type { WorkspaceConfig } from '@tsugimori/config';
+import type { Config, WorkspaceConfig } from '@tsugimori/config';
 import type { SummaryProvider } from '@tsugimori/context';
 import type {
   AdminReader,
@@ -15,6 +15,7 @@ import type {
 import type {
   ApprovalRecord,
   ChatRoute,
+  RemovalTarget,
   ScheduleRecord,
   ScheduleRun,
   Store,
@@ -29,7 +30,7 @@ import {
   watch,
 } from '@tsugimori/config';
 import { ContextAssembler } from '@tsugimori/context';
-import { SendFailure } from '@tsugimori/plugin-sdk';
+import { SendFailure, SetupError } from '@tsugimori/plugin-sdk';
 import {
   prepareReminder,
   reminderEntities,
@@ -37,15 +38,18 @@ import {
   scheduleRecordTime,
 } from '@tsugimori/scheduler';
 import { Tracer } from '@tsugimori/trace';
+import { isDeepStrictEqual } from 'node:util';
 
 import type { Command } from './chat-commands.ts';
 import type { Logger } from './hooks.ts';
 import type { PreviewProviders } from './previews.ts';
+import type { RemovalPlan } from './removal.ts';
 import type { PlatformNotice } from './runtime.ts';
 
 import { acceptsServiceTier, formatServiceTier } from './agent-settings.ts';
 import { approvalDecisionText, approvalMessages } from './approval-messages.ts';
 import { chatCommands, parseCommand } from './chat-commands.ts';
+import { ChatRemoval } from './chat-removal.ts';
 import { ChatSetup } from './chat-setup.ts';
 import { EnvironmentChecks, failureText } from './checks.ts';
 import { CommandMenus } from './command-menus.ts';
@@ -55,6 +59,8 @@ import { HookRunner, logToStderr } from './hooks.ts';
 import { conversationId, Outbound } from './outbound.ts';
 import { Previews } from './previews.ts';
 import { PluginRegistry } from './registry.ts';
+import { removalMessages } from './removal-messages.ts';
+import { Removal } from './removal.ts';
 import { Runtime } from './runtime.ts';
 import { GuidedSetup } from './setup.ts';
 import { statusCard } from './status.ts';
@@ -103,10 +109,16 @@ export class Gateway {
   readonly #previews?: Previews;
   readonly #execution: Executions;
   readonly #chatSetup: ChatSetup;
+  readonly #chatRemoval: ChatRemoval;
+  readonly removal: Removal;
   readonly #commandMenus: CommandMenus;
   readonly #platformNotifications = new Map<string, Promise<void>>();
+  readonly #ownerDeliveries = new Map<Promise<void>, string>();
   readonly #migratedPrompts = new Map<string, Promise<void>>();
-  readonly #inbound = new Set<Promise<void>>();
+  readonly #inbound = new Map<Promise<void>, string>();
+  #configUpdates = Promise.resolve();
+  #reloadPending = false;
+  #activeRemoval?: { plan: RemovalPlan; work: Promise<string> };
   #applyingConfig = false;
   #closeWatch?: ReturnType<typeof watch>;
   #environmentNotification?: Promise<void>;
@@ -189,7 +201,13 @@ export class Gateway {
       },
       receive: (adapter, event) => this.#receive(adapter, event),
       interrupt: async (adapters, agents) => {
-        await this.#tasks.interrupt(adapters, agents);
+        const target = this.#activeRemoval?.plan;
+        await this.#tasks.interrupt(
+          adapters,
+          agents,
+          target?.category === 'agent' ? target.id : undefined,
+        );
+        if (target) await this.#summaries.interrupt(target);
         await this.#previews?.detach(adapters);
         await this.#execution.stop(adapters);
       },
@@ -228,6 +246,20 @@ export class Gateway {
       log,
       store,
       trace: this.#trace,
+    });
+    this.removal = new Removal({
+      store,
+      workspace,
+      registry,
+      trace: this.#trace,
+    });
+    this.#chatRemoval = new ChatRemoval({
+      execute: (plan, actor, adapterId) =>
+        this.removeInstance(plan, actor, adapterId),
+      isOwner: (adapterId, userId) => this.#auth.isOwner({ adapterId, userId }),
+      log,
+      outbound: this.#outbound,
+      removal: this.removal,
     });
     const context = new ContextAssembler({
       workspace,
@@ -282,7 +314,11 @@ export class Gateway {
       attachedAdapters: () =>
         this.#isStopping() || this.#runtime.transition
           ? []
-          : this.#runtime.adapterIds,
+          : this.#runtime.adapterIds.filter(
+              (id) => !this.#removingPlatform(id),
+            ),
+      canFire: (schedule) =>
+        schedule.action.kind !== 'agent' || !this.#removingAgentRoute(schedule),
       adapterAvailableSince: (id) => this.#runtime.availableSince(id),
       logError: (event, scheduleId) =>
         log({ level: 'error', event, scheduleId }),
@@ -369,11 +405,12 @@ export class Gateway {
     }
     if (this.#isStopping()) return;
     this.#closeWatch = watch(workspace, this.#registry, {
-      onConfig: async (next) => {
+      onConfig: async () => {
         if (this.#state !== 'running') return;
-        await this.#trace.span('config.reload', {}, () => this.#apply(next));
-        log({ level: 'info', event: 'config.reloaded' });
-        await this.#reportFailures();
+        if (await this.#reload()) {
+          log({ level: 'info', event: 'config.reloaded' });
+          await this.#reportFailures();
+        }
       },
       onError: (error) =>
         log({
@@ -391,11 +428,41 @@ export class Gateway {
     await this.#reportFailures();
   }
 
-  async #apply(snapshot: WorkspaceConfig) {
+  #reload(removal?: { current: Config; next: Config; plan: RemovalPlan }) {
+    const work = this.#configUpdates.then(() =>
+      this.#trace.span('config.reload', {}, async () => {
+        if (!removal && this.#activeRemoval) {
+          this.#reloadPending = true;
+          return false;
+        }
+        const snapshot = await loadConfig(this.#deps.workspace, this.#registry);
+        if (removal && !isDeepStrictEqual(snapshot.config, removal.current))
+          throw new SetupError(removalMessages(removal.plan.locale).changed);
+        if (removal) {
+          this.#reloadPending = true;
+          await this.#apply(
+            { ...snapshot, config: removal.next },
+            removal.plan,
+          );
+        } else {
+          await this.#apply(snapshot);
+        }
+        return true;
+      }),
+    );
+    // Each caller handles its reload failure. Keep the queue available for the next configuration.
+    this.#configUpdates = work.then(
+      () => {},
+      () => {},
+    );
+    return work;
+  }
+
+  async #apply(snapshot: WorkspaceConfig, removal?: RemovalTarget) {
     this.#applyingConfig = true;
     try {
       await this.#expiry;
-      await this.#runtime.apply(snapshot);
+      await this.#runtime.apply(snapshot, removal);
       this.#commandMenus.refresh();
       this.#restoreApprovalPrompts();
       if (this.#deps.namedPreview) {
@@ -411,6 +478,63 @@ export class Gateway {
       this.#scheduler.tick();
       this.#reportPlatformNotices();
     }
+  }
+
+  removeInstance(plan: RemovalPlan, actor?: string, adapterId?: string) {
+    if (this.#activeRemoval || this.#state !== 'running')
+      throw new SetupError(removalMessages(plan.locale).busy);
+    const work = this.removal
+      .execute(plan, {
+        actor,
+        adapterId,
+        detach: async (current, next) => {
+          await this.#reload({ current, next, plan });
+          if (plan.category === 'platform') {
+            this.#chatRemoval.stop(plan.id);
+            await this.#chatSetup.detach(plan.id);
+            const inbound = [...this.#inbound]
+              .filter(([, id]) => id === plan.id)
+              .map(([job]) => job);
+            await Promise.allSettled(inbound);
+            await this.#commandMenus.detach(plan.id);
+            await this.#scheduler.idle(plan.id);
+            const deliveries = [...this.#ownerDeliveries]
+              .filter(([, id]) => id === plan.id)
+              .map(([job]) => job);
+            await Promise.allSettled(deliveries);
+            await this.#platformNotifications.get(plan.id);
+            await this.#migratedPrompts.get(plan.id);
+          }
+        },
+      })
+      .finally(() => {
+        this.#activeRemoval = undefined;
+        this.#scheduler.tick();
+        if (this.#reloadPending && this.#state === 'running') {
+          this.#reloadPending = false;
+          void this.#reload().catch(() =>
+            this.#deps.log({ level: 'error', event: 'config.reload_failed' }),
+          );
+        }
+      });
+    this.#activeRemoval = { plan, work };
+    return work;
+  }
+
+  #removingPlatform(id: string) {
+    const target = this.#activeRemoval?.plan;
+    return target?.category === 'platform' && target.id === id;
+  }
+
+  #removingAgentRoute(chat: ChatRef) {
+    const agent = this.#activeRemoval?.plan;
+    return (
+      agent?.category === 'agent' &&
+      (agent.rows.routes.some(
+        (ref) => ref.adapterId === chat.adapterId && ref.chatId === chat.chatId,
+      ) ||
+        this.#tasks.route(chat).agentId === agent.id)
+    );
   }
 
   #reportFailures() {
@@ -487,26 +611,32 @@ export class Gateway {
     return this.#notifyOwner(adapter, owner, text, `platform/${id}`);
   }
 
-  async #notifyOwner(
+  #notifyOwner(
     adapter: PlatformAdapter,
     owner: string,
     text: string,
     target?: string,
   ) {
-    try {
-      await this.#outbound.send(adapter, { chatId: owner, text });
-    } catch {
-      this.#deps.log({
-        level: 'warn',
-        event: 'environment.owner_notification_failed',
-        adapterId: adapter.id,
-        target,
-      });
-    }
+    if (this.#removingPlatform(adapter.id)) return Promise.resolve();
+    const job = this.#outbound
+      .send(adapter, { chatId: owner, text })
+      .then(
+        () => {},
+        () =>
+          this.#deps.log({
+            level: 'warn',
+            event: 'environment.owner_notification_failed',
+            adapterId: adapter.id,
+            target,
+          }),
+      )
+      .finally(() => this.#ownerDeliveries.delete(job));
+    this.#ownerDeliveries.set(job, adapter.id);
+    return job;
   }
 
   async idle() {
-    while (this.#inbound.size) await Promise.allSettled(this.#inbound);
+    while (this.#inbound.size) await Promise.allSettled(this.#inbound.keys());
     await this.#tasks.idle();
     await this.#commandMenus.idle();
     while (this.#migratedPrompts.size)
@@ -523,12 +653,17 @@ export class Gateway {
 
   async #stop() {
     this.#state = 'stopping';
+    await Promise.allSettled(
+      this.#activeRemoval ? [this.#activeRemoval.work] : [],
+    );
+    this.#chatRemoval.stop();
     this.#runtime.cancelStarts();
     this.#commandMenus.stop();
     this.#scheduler.stop();
     try {
       await this.#closeWatch?.();
       await this.#initialApply;
+      await this.#configUpdates;
     } finally {
       try {
         await this.#chatSetup.stop();
@@ -552,9 +687,10 @@ export class Gateway {
   }
 
   #receive(adapter: PlatformAdapter, event: PlatformInboundEvent) {
-    if (this.#isStopping()) return Promise.resolve();
+    if (this.#isStopping() || this.#removingPlatform(adapter.id))
+      return Promise.resolve();
     const work = this.#process(adapter, event);
-    this.#inbound.add(work);
+    this.#inbound.set(work, adapter.id);
     void work.then(
       () => this.#inbound.delete(work),
       () => {
@@ -709,6 +845,12 @@ export class Gateway {
     const command = parsed === 'other-bot' ? undefined : parsed;
     if (
       inbound.type !== 'chat-migrated' &&
+      command?.name === 'cancel' &&
+      (await this.#chatRemoval.receive(adapter, chat, event, true))
+    )
+      return;
+    if (
+      inbound.type !== 'chat-migrated' &&
       (await this.#chatSetup.receive(
         adapter,
         chat,
@@ -719,6 +861,12 @@ export class Gateway {
       store.recordUser(user);
       return;
     }
+    if (
+      inbound.type !== 'chat-migrated' &&
+      parsed !== 'other-bot' &&
+      (await this.#chatRemoval.receive(adapter, chat, event, false))
+    )
+      return;
     const privateCommand =
       command?.name === 'pair' ||
       command?.name === 'login' ||
@@ -795,7 +943,12 @@ export class Gateway {
       shouldTrigger(event, owner, this.#auth.isAllowlisted(chat)),
     );
     await this.#hooks.emit('trigger.decided', { chat, message, triggered });
-    if (triggered && !this.#isStopping()) {
+    if (
+      triggered &&
+      !this.#isStopping() &&
+      !this.#removingPlatform(adapter.id) &&
+      !this.#removingAgentRoute(chat)
+    ) {
       this.#trace.span('task.dispatch', { ...chat }, () =>
         this.#tasks.dispatch(adapter, chat, { message, seq: stored.seq }),
       );
@@ -829,7 +982,13 @@ export class Gateway {
       const chat = store.resolveChat({ adapterId, chatId });
       const adapter = this.#runtime.getAdapter(adapterId);
       const origin = store.getChat(chat);
-      if (!adapter || !origin || !this.#canCompleteApproval(chat, createdBy))
+      if (
+        !adapter ||
+        !origin ||
+        !this.#canCompleteApproval(chat, createdBy) ||
+        this.#removingPlatform(adapterId) ||
+        (action.kind === 'agent' && this.#removingAgentRoute(chat))
+      )
         return 'skipped';
       if (action.kind === 'message') {
         const reminder =
@@ -1270,6 +1429,24 @@ export class Gateway {
             id: args,
           });
         break;
+      case 'remove': {
+        if (message.edited) break;
+        const match =
+          /^(agent|platform)\s+([A-Za-z0-9_][A-Za-z0-9_.:-]*)$/.exec(args);
+        if (!match?.[2]) await send(removalMessages(locale).usage);
+        else
+          await this.#chatRemoval.start(
+            adapter,
+            chat,
+            message,
+            {
+              category: match[1] === 'agent' ? 'agent' : 'platform',
+              id: match[2],
+            },
+            locale,
+          );
+        break;
+      }
       case 'allow':
       case 'deny':
         store.setAllowlisted(chat, name === 'allow');
@@ -1322,6 +1499,11 @@ export class Gateway {
         await send(this.#chatAgentSetting(chat, name, args));
         break;
       case 'compact':
+        if (
+          this.#removingPlatform(adapter.id) ||
+          this.#removingAgentRoute(chat)
+        )
+          break;
         if (args) await send(m.compactUsage);
         else
           this.#tasks.dispatch(adapter, chat, { message, seq, compact: true });
@@ -1383,6 +1565,10 @@ export class Gateway {
 }
 
 export { GuidedSetup, SetupCancelled } from './setup.ts';
+export { Removal } from './removal.ts';
+export { formatRemovalPlan, removalMessages } from './removal-messages.ts';
+export type { RemovalPlan } from './removal.ts';
+export type { RemovalTarget } from '@tsugimori/storage';
 export type { SetupIO, SetupRequest } from './setup.ts';
 
 export { systemInstallPlan } from './system-setup.ts';

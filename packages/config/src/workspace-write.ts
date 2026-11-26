@@ -37,17 +37,7 @@ export async function writeCredential(
     /[\u0000-\u001f\u007f]/u.test(value)
   )
     throw new ConfigError('Invalid workspace credential name or value');
-  const path = join(workspace, envFilename);
-  let text = '';
-  try {
-    if (!(await lstat(path)).isFile())
-      throw new ConfigError('Expected a regular workspace environment file');
-    text = await readFile(path, 'utf8');
-  } catch (error) {
-    if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT'))
-      throw error;
-  }
-  parseEnv(text);
+  const text = await readWorkspaceCredentials(workspace);
   const assignment = new RegExp(`^\\s*(?:export\\s+)?${key}\\s*=`);
   const kept = text
     .split(/\r?\n/)
@@ -55,7 +45,32 @@ export async function writeCredential(
     .join('\n')
     .trimEnd();
   const next = `${kept ? kept + '\n' : ''}${key}=${JSON.stringify(value)}\n`;
-  await replace(path, next);
+  await replace(join(workspace, envFilename), next);
+}
+
+export async function readWorkspaceCredentials(workspace: string) {
+  const path = join(workspace, envFilename);
+  try {
+    if (!(await lstat(path)).isFile())
+      throw new ConfigError('Expected a regular workspace environment file');
+    const text = await readFile(path, 'utf8');
+    parseEnv(text);
+    return text;
+  } catch (error) {
+    if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT'))
+      throw error;
+    return '';
+  }
+}
+
+export async function replaceWorkspaceCredentials(
+  workspace: string,
+  previous: string,
+  next: string,
+) {
+  if ((await readWorkspaceCredentials(workspace)) !== previous)
+    throw new ConfigError('Workspace credentials changed during removal');
+  await replace(join(workspace, envFilename), next);
 }
 
 async function replace(path: string, text: string) {

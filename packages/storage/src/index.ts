@@ -144,7 +144,7 @@ export interface SetupRun {
   id: string;
   lease: string | null;
   leaseUntil: number;
-  mode: 'add' | 'login';
+  mode: 'add' | 'login' | 'remove';
   status: 'pending' | 'complete' | 'cancelled';
   step: number;
 }
@@ -253,6 +253,20 @@ export interface WorkspaceSettings {
   thinking?: string;
 }
 
+export interface RemovalTarget {
+  category: 'agent' | 'platform';
+  id: string;
+}
+
+export interface RemovalRows {
+  chats: string[];
+  counts: Record<string, number>;
+  routes: ChatRef[];
+  schedules: string[];
+  tasks: string[];
+  workspaceSettings: ChatRef[];
+}
+
 export interface StoredPreview extends ChatRef {
   closedAt: number | null;
   closedReason: PreviewCloseReason | null;
@@ -276,6 +290,7 @@ export interface Store {
     nextExpiry: number | null;
     total: number;
   };
+  backup(path: string): void;
   beginSummary(ref: ChatRef): ChatSummary;
   cancelApproval(id: string, now: number): void;
   cancelChatApprovals(
@@ -321,6 +336,11 @@ export interface Store {
     grant?: StoredGrant,
     scheduleLimit?: number,
   ): { scheduleApplied?: boolean } | undefined;
+  deleteInstanceData(
+    target: RemovalTarget,
+    fileRoutes: readonly ChatRef[],
+    now: number,
+  ): Record<string, number>;
   deliveryAddress(
     ref: ChatRef,
   ):
@@ -360,6 +380,11 @@ export interface Store {
   getWorkspaceSettings(ref: ChatRef): WorkspaceSettings | undefined;
   historyMessages(ref: ChatRef, query: HistoryQuery): HistoryMessage[];
   insertGrant(grant: StoredGrant): void;
+  inspectInstanceData(
+    target: RemovalTarget,
+    fileRoutes: readonly ChatRef[],
+  ): RemovalRows;
+  instanceSetupRuns(target: RemovalTarget): SetupRun[];
   interruptScheduleRuns(now: number): void;
   interruptTasks(now: number): void;
   isSetupSecret(ref: ChatRef, messageId: string): boolean;
@@ -416,6 +441,7 @@ export interface Store {
   recordUser(
     user: Omit<UserRecord, 'username'> & Partial<Pick<UserRecord, 'username'>>,
   ): void;
+  releaseRemoval(id: string, lease: string): void;
   resolveChat(ref: ChatRef): ChatRef;
   saveCursor(adapterId: string, stream: string, cursor: AdapterCursor): void;
   savePairingCode(adapterId: string, digest: string, expiresAt: number): void;

@@ -34,7 +34,7 @@ import {
   contextWindow,
 } from './compaction.ts';
 import { readCodexDefaults } from './defaults.ts';
-import { installCodex } from './install.ts';
+import { installCodex, packageDirectory, pinnedVersion } from './install.ts';
 import { mergeQuota } from './quota.ts';
 import {
   codexChecks,
@@ -851,6 +851,10 @@ export default definePlugin({
   },
   checks: codexChecks,
   credentialNames: () => [],
+  managedRuntimePaths: (workspace, entry) => {
+    const version = pinnedVersion(entry);
+    return version ? [packageDirectory(workspace, version)] : [];
+  },
   install: installCodex,
   setupSteps: codexSetup,
 });

@@ -17,6 +17,8 @@ import {
   Gateway,
   GuidedSetup,
   PluginRegistry,
+  Removal,
+  removalMessages,
   SetupCancelled,
   systemInstallPlan,
 } from '@tsugimori/core';
@@ -31,10 +33,11 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { isDeepStrictEqual, parseArgs } from 'node:util';
 
+import { listenForRemoval, runRemoval } from './removal.ts';
 import { doctorText, runSetup, terminalIO } from './setup.ts';
 
 const usage =
-  'Usage: tsugimori init [dir] | start [dir] | pair [dir] --adapter <id> | previews [dir] | doctor [dir] [--json] | setup [dir] [--yes] [--upgrade] | add <agent|platform> <kind> [--id <id>] [--dir <dir>] | setup <agent|platform> <kind> [--id <id>] [--dir <dir>] | setup login <agentId> [--dir <dir>]';
+  'Usage: tsugimori init [dir] | start [dir] | pair [dir] --adapter <id> | previews [dir] | doctor [dir] [--json] | setup [dir] [--yes] [--upgrade] | add <agent|platform> <kind> [--id <id>] [--dir <dir>] | setup <agent|platform> <kind> [--id <id>] [--dir <dir>] | setup login <agentId> [--dir <dir>] | remove <platform|agent> <id> [--dir <dir>] [--yes]';
 
 class UsageError extends Error {}
 
@@ -68,7 +71,8 @@ export async function main(
     command !== 'previews' &&
     command !== 'doctor' &&
     command !== 'setup' &&
-    command !== 'add'
+    command !== 'add' &&
+    command !== 'remove'
   ) {
     throw new UsageError(usage);
   }
@@ -87,10 +91,46 @@ export async function main(
               ? { yes: { type: 'boolean' }, upgrade: { type: 'boolean' } }
               : command === 'add'
                 ? { id: { type: 'string' }, dir: { type: 'string' } }
-                : {},
+                : command === 'remove'
+                  ? { dir: { type: 'string' }, yes: { type: 'boolean' } }
+                  : {},
     });
   } catch {
     throw new UsageError(usage);
+  }
+  if (command === 'remove') {
+    const [category, id] = parsed.positionals;
+    if (
+      (category !== 'platform' && category !== 'agent') ||
+      !id ||
+      parsed.positionals.length !== 2
+    )
+      throw new UsageError(usage);
+    const { dir, yes } = parsed.values;
+    const workspace = resolve(typeof dir === 'string' ? dir : '.');
+    const target = { category, id } as const;
+    await runRemoval(workspace, target, yes === true, async (confirmPlan) => {
+      const store = await openStore(
+        workspace,
+        await loadSettings(workspace, registry),
+      );
+      const removal = new Removal({ registry, store, workspace });
+      try {
+        const plan = await removal.plan(target);
+        console.log(
+          (await confirmPlan(plan))
+            ? await removal.execute(plan)
+            : removalMessages(plan.locale).cancelled,
+        );
+      } finally {
+        try {
+          await removal.flushTrace();
+        } finally {
+          store.close();
+        }
+      }
+    });
+    return;
   }
   if (command === 'add' || login) {
     const [category, kind] = parsed.positionals;
@@ -272,6 +312,30 @@ async function start(
   registry: PluginRegistry,
   deps: SetupDependencies,
 ) {
+  const ready = Promise.withResolvers<Gateway | undefined>();
+  const gateway = async () => {
+    const active = await ready.promise;
+    if (!active) throw new SetupError('The gateway is not running.');
+    return active;
+  };
+  const close = await listenForRemoval(workspace, {
+    plan: async (target) => (await gateway()).removal.plan(target),
+    execute: async (plan) => (await gateway()).removeInstance(plan),
+  });
+  try {
+    await startGateway(workspace, registry, deps, ready.resolve);
+  } finally {
+    ready.resolve(undefined);
+    await close();
+  }
+}
+
+async function startGateway(
+  workspace: string,
+  registry: PluginRegistry,
+  deps: SetupDependencies,
+  ready: (gateway: Gateway) => void,
+) {
   const snapshot = await loadConfig(workspace, registry);
   const verify = createAccessVerifier();
   const config = snapshot.config.web;
@@ -330,6 +394,7 @@ async function start(
   try {
     await gateway.start(snapshot);
     await admin?.start();
+    ready(gateway);
     await terminated.promise;
   } finally {
     process.off('SIGTERM', stop);

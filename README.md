@@ -55,23 +55,24 @@ Agents can use `history.search` to find matching text in the current conversatio
 
 ## Chat commands
 
-| Command                                     | Who                                             | What it does                                                                                                |
-| ------------------------------------------- | ----------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| `/help`                                     | Owner                                           | Lists owner commands.                                                                                       |
-| `/status`                                   | Owner                                           | Shows gateway health, chat activity, and system state.                                                      |
-| `/agent <id>`                               | Owner                                           | Switches this chat to an available agent and reports any incompatible thinking or fast overrides it clears. |
-| `/model [name]`                             | Owner                                           | Shows the current model and its source, or sets a chat override. Use `default` to clear it.                 |
-| `/thinking [level]`                         | Owner                                           | Shows or sets reasoning effort for this chat. Use `default` to clear the override.                          |
-| `/fast [on\|off\|default]`                  | Owner                                           | Shows or sets speed on a supported agent. `off` selects standard speed and `default` clears the override.   |
-| `/compact`                                  | Owner                                           | Requests compaction of this chat's current agent session.                                                   |
-| `/allow`                                    | Owner                                           | Lets members trigger the bot in this chat.                                                                  |
-| `/deny`                                     | Owner                                           | Removes this chat from the allowlist and cancels active approval waits here.                                |
-| `/pair <code>`                              | Pairing code holder, in a DM to an unowned bot  | Claims ownership using an unexpired code.                                                                   |
-| `/add <agent\|platform> <kind> [--id <id>]` | Owner                                           | Runs guided setup for a plugin instance.                                                                    |
-| `/login <agentId>`                          | Owner                                           | Signs an existing agent in again.                                                                           |
-| `/cancel`                                   | Owner in the setup chat or its secret-prompt DM | Cancels guided setup.                                                                                       |
-| `/previews`                                 | Owner                                           | Lists open previews on this adapter.                                                                        |
-| `/preview close <id>`                       | Owner                                           | Closes a preview on this adapter.                                                                           |
+| Command                                     | Who                                                       | What it does                                                                                                |
+| ------------------------------------------- | --------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `/help`                                     | Owner                                                     | Lists owner commands.                                                                                       |
+| `/status`                                   | Owner                                                     | Shows gateway health, chat activity, and system state.                                                      |
+| `/agent <id>`                               | Owner                                                     | Switches this chat to an available agent and reports any incompatible thinking or fast overrides it clears. |
+| `/model [name]`                             | Owner                                                     | Shows the current model and its source, or sets a chat override. Use `default` to clear it.                 |
+| `/thinking [level]`                         | Owner                                                     | Shows or sets reasoning effort for this chat. Use `default` to clear the override.                          |
+| `/fast [on\|off\|default]`                  | Owner                                                     | Shows or sets speed on a supported agent. `off` selects standard speed and `default` clears the override.   |
+| `/compact`                                  | Owner                                                     | Requests compaction of this chat's current agent session.                                                   |
+| `/allow`                                    | Owner                                                     | Lets members trigger the bot in this chat.                                                                  |
+| `/deny`                                     | Owner                                                     | Removes this chat from the allowlist and cancels active approval waits here.                                |
+| `/pair <code>`                              | Pairing code holder, in a DM to an unowned bot            | Claims ownership using an unexpired code.                                                                   |
+| `/add <agent\|platform> <kind> [--id <id>]` | Owner                                                     | Runs guided setup for a plugin instance.                                                                    |
+| `/login <agentId>`                          | Owner                                                     | Signs an existing agent in again.                                                                           |
+| `/remove <platform\|agent> <id>`            | Owner                                                     | Lists the data for an instance and asks for confirmation before removal.                                    |
+| `/cancel`                                   | Owner in the originating chat or setup's secret-prompt DM | Cancels guided setup or a pending removal.                                                                  |
+| `/previews`                                 | Owner                                                     | Lists open previews on this adapter.                                                                        |
+| `/preview close <id>`                       | Owner                                                     | Closes a preview on this adapter.                                                                           |
 
 `/status` uses the workspace locale and time zone. The header shows health, build information when available, and uptime. **This chat** shows the agent implementation and effective model, effort, and speed. When available, it adds context usage, session age, cached quota, last compaction and count, summary coverage, running or queued work, approvals, and schedules. **System** lists platform and agent states, sandbox availability, and the count of failed environment checks. The card uses cached provider information and local state, and shows today's timestamps without a date.
 
@@ -92,6 +93,14 @@ Run `/add <agent|platform> <kind> [--id <id>]` or `/login <agentId>` as an owner
 The wizard begins with a plan showing the steps, what each asks for, and when it saves credentials and configuration. Follow numbered progress in the originating conversation and reply directly to each prompt. Secret prompts go to the owner's DM and identify the origin. The gateway excludes secret replies from message history and attempts deletion where supported. Enter secrets in an interactive terminal to hide input there.
 
 Rerun the same command and ID to resume an interrupted attempt from its saved checkpoint. To cancel, send `/cancel` in the originating chat or in the DM with the pending secret prompt. In a terminal, enter `/cancel` or press Ctrl+C. Cancellation reports credentials saved and any agent it left disabled. An explicitly cancelled attempt starts again at step 1. Re-login temporarily disables an enabled agent. If cancelled, that agent stays disabled until sign-in succeeds again. Successful setup saves configuration for the running gateway to reload.
+
+### Remove an instance
+
+Run `/remove <platform|agent> <id>` and reply to the plan with `yes` within 10 minutes. Any other reply or `/cancel` cancels. To remove the platform you are currently using, switch to another platform or run `corepack pnpm exec tsugimori remove <platform|agent> <id> [--dir <dir>] [--yes]`. The CLI prints the plan and prompts unless you pass `--yes`. Run it under the gateway's OS account when the gateway is running.
+
+Cancel an active setup for that instance before removing it. To remove the default agent, first set `defaultAgent` to another enabled agent in `tsugimori.json`. Without an explicit setting, the first enabled agent is the default. Chats whose agent override is removed fall back to the workspace default.
+
+The gateway detaches the instance without a restart. Removal keeps credentials and runtime directories that other configured instances use. It saves a SQLite snapshot, the removed settings and credential lines, and the moved directories under `data/backups/remove-<category>-<id>-<timestamp>/`. Configured homes must share the backup filesystem so removal can move them. The backup includes credentials and chat data, so keep it private. You can delete it once you are satisfied with the removal. If removal stops partway through, use the completed steps and backup path in its report to check what changed.
 
 ## Configuration
 

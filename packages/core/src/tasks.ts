@@ -360,12 +360,19 @@ export class Tasks {
     }
   }
 
-  async interrupt(adapters: ReadonlySet<string>, agents: ReadonlySet<string>) {
+  async interrupt(
+    adapters: ReadonlySet<string>,
+    agents: ReadonlySet<string>,
+    removeAgent?: string,
+  ) {
     const active: Promise<void>[] = [];
     for (const work of this.#work) {
       if (
         adapters.has(work.chat.adapterId) ||
-        (work.route && agents.has(work.route.agentId))
+        (work.route && agents.has(work.route.agentId)) ||
+        (removeAgent !== undefined &&
+          !work.route &&
+          this.route(work.chat).agentId === removeAgent)
       ) {
         work.abort.abort();
         if (work.execution) active.push(work.execution);

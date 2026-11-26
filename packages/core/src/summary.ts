@@ -1,6 +1,6 @@
 import type { SummaryProvider } from '@tsugimori/context';
 import type { ChatRef, ExecScope } from '@tsugimori/plugin-sdk';
-import type { MessageRecord, Store } from '@tsugimori/storage';
+import type { MessageRecord, RemovalTarget, Store } from '@tsugimori/storage';
 import type { Tracer } from '@tsugimori/trace';
 
 import { setImmediate } from 'node:timers/promises';
@@ -54,6 +54,7 @@ export class BackgroundSummaries implements SummaryProvider {
   readonly #delayed = new Map<string, NodeJS.Timeout>();
   readonly #pending = new Map<string, SummaryJob>();
   readonly #stop = new AbortController();
+  #active?: { abort: AbortController; done: Promise<void>; job: SummaryJob };
   #drain?: Promise<void>;
 
   constructor(deps: SummaryDependencies) {
@@ -98,6 +99,18 @@ export class BackgroundSummaries implements SummaryProvider {
     await this.#drain;
   }
 
+  async interrupt({ category, id }: RemovalTarget) {
+    const matches = (job: SummaryJob) =>
+      (category === 'agent' ? job.agentId : job.chat.adapterId) === id;
+    for (const [key, job] of this.#pending)
+      if (matches(job)) this.#pending.delete(key);
+    const active = this.#active;
+    if (active && matches(active.job)) {
+      active.abort.abort();
+      await Promise.allSettled([active.done]);
+    }
+  }
+
   async #run() {
     try {
       while (this.#pending.size && !this.#stop.signal.aborted) {
@@ -110,15 +123,20 @@ export class BackgroundSummaries implements SummaryProvider {
         if (!next) return;
         const [key, job] = next;
         this.#pending.delete(key);
+        const abort = new AbortController();
+        const done = this.#update(job, abort.signal);
+        this.#active = { abort, done, job };
         try {
-          await this.#update(job);
+          await done;
         } catch {
-          if (!this.#stop.signal.aborted)
+          if (!this.#stop.signal.aborted && !abort.signal.aborted)
             this.#deps.log({
               level: 'error',
               event: 'summary.update_failed',
               taskId: job.taskId,
             });
+        } finally {
+          this.#active = undefined;
         }
       }
     } finally {
@@ -126,7 +144,7 @@ export class BackgroundSummaries implements SummaryProvider {
     }
   }
 
-  async #update(job: SummaryJob) {
+  async #update(job: SummaryJob, interrupted: AbortSignal) {
     const { store, runtime, trace } = this.#deps;
     const { taskId } = job;
     const chat = store.resolveChat(job.chat);
@@ -213,6 +231,7 @@ export class BackgroundSummaries implements SummaryProvider {
         : 'English (en)';
     const signal = AbortSignal.any([
       this.#stop.signal,
+      interrupted,
       AbortSignal.timeout(summary?.timeoutMs ?? 120_000),
     ]);
 

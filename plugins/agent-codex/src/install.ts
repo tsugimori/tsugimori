@@ -197,7 +197,7 @@ export async function installCodex(
   }
 }
 
-function packageDirectory(workspace: string, version: string) {
+export function packageDirectory(workspace: string, version: string) {
   return join(workspace, 'runtime', 'codex', version);
 }
 

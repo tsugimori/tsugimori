@@ -15,6 +15,8 @@ import type {
   HistoryQuery,
   InboundRecord,
   NewMessage,
+  RemovalRows,
+  RemovalTarget,
   ScheduleAddress,
   ScheduleRecord,
   ScheduleRun,
@@ -36,6 +38,7 @@ import {
   count,
   desc,
   eq,
+  getTableName,
   gt,
   gte,
   inArray,
@@ -117,6 +120,71 @@ function summaryRepair(seq: number) {
     revision: sql`${chatSummaries.revision} + 1`,
     text: sql`case when ${chatSummaries.throughSeq} >= ${seq} then '' else ${chatSummaries.text} end`,
     throughSeq: sql`case when ${chatSummaries.throughSeq} >= ${seq} then 0 else ${chatSummaries.throughSeq} end`,
+  };
+}
+
+// Children precede their parents so platform cleanup can keep foreign keys on.
+const platformTables = [
+  approvals,
+  grants,
+  messages,
+  chatSummaries,
+  agentSessions,
+  tasks,
+  schedules,
+  previews,
+  workspaceSettings,
+  setupSecrets,
+  unavailableCommandScopes,
+  users,
+  owners,
+  adapterCursors,
+  pairingCodes,
+  chats,
+] as const;
+
+const activeTaskStatuses = ['queued', 'running', 'sending'] as const;
+const activeScheduleStatuses = ['active', 'paused'] as const;
+
+function setupScope({ category, id }: RemovalTarget) {
+  return inArray(setupRuns.id, [
+    JSON.stringify(['add', category, id]),
+    JSON.stringify(['login', category, id]),
+  ]);
+}
+
+function refsMatch(
+  table:
+    typeof tasks | typeof schedules | typeof chats | typeof workspaceSettings,
+  refs: readonly ChatRef[],
+) {
+  return sql`exists (select 1 from json_each(${JSON.stringify(refs)})
+    where json_extract(value, '$.adapterId') = ${table.adapterId}
+      and json_extract(value, '$.chatId') = ${table.chatId})`;
+}
+
+function platformDependents(
+  db: Pick<ReturnType<typeof createDatabase>['db'], 'select'>,
+  id: string,
+) {
+  const taskIds = db
+    .select({ id: tasks.id })
+    .from(tasks)
+    .where(eq(tasks.adapterId, id));
+  const scheduleIds = db
+    .select({ id: schedules.id })
+    .from(schedules)
+    .where(eq(schedules.adapterId, id));
+  return {
+    runs: inArray(scheduleRuns.scheduleId, scheduleIds),
+    spans: or(
+      sql`json_extract(${traceSpans.attrs}, '$.adapterId') = ${id}`,
+      inArray(sql`json_extract(${traceSpans.attrs}, '$.taskId')`, taskIds),
+      inArray(
+        sql`json_extract(${traceSpans.attrs}, '$.scheduleId')`,
+        scheduleIds,
+      ),
+    ),
   };
 }
 
@@ -348,6 +416,283 @@ export class SqliteStore implements Store {
   readonly #db;
   readonly #sqlite;
 
+  backup(path: string) {
+    closeSync(openSync(path, 'wx', 0o600));
+    this.#sqlite.prepare('VACUUM INTO ?').run(path);
+  }
+
+  instanceSetupRuns(target: RemovalTarget) {
+    return this.#db.select().from(setupRuns).where(setupScope(target)).all();
+  }
+
+  releaseRemoval(id: string, lease: string) {
+    this.#db
+      .delete(setupRuns)
+      .where(and(eq(setupRuns.id, id), eq(setupRuns.lease, lease)))
+      .run();
+  }
+
+  #agentRemoval(id: string, fileRoutes: readonly ChatRef[]) {
+    const byAgent = eq(chats.agentId, id);
+    const workspaceRoute = sql`json_extract(${workspaceSettings.settings}, '$.agentId') = ${id}`;
+    const settings = this.#db
+      .select({
+        adapterId: workspaceSettings.adapterId,
+        chatId: workspaceSettings.chatId,
+      })
+      .from(workspaceSettings)
+      .where(workspaceRoute)
+      .all();
+    const routes = this.#db
+      .select({
+        adapterId: chats.adapterId,
+        chatId: chats.chatId,
+      })
+      .from(chats)
+      .where(
+        or(
+          byAgent,
+          and(
+            isNull(chats.agentId),
+            refsMatch(chats, [...fileRoutes, ...settings]),
+          ),
+        ),
+      )
+      .all();
+    const activeTasks = and(
+      inArray(tasks.status, activeTaskStatuses),
+      or(
+        eq(tasks.agentId, id),
+        and(
+          eq(tasks.status, 'queued'),
+          isNull(tasks.agentId),
+          refsMatch(tasks, routes),
+        ),
+      ),
+    );
+    const activeSchedules = and(
+      inArray(schedules.status, activeScheduleStatuses),
+      sql`json_extract(${schedules.action}, '$.kind') = 'agent'`,
+      refsMatch(schedules, routes),
+    );
+    const pendingApprovals = and(
+      eq(approvals.status, 'pending'),
+      inArray(
+        approvals.taskId,
+        this.#db
+          .select({ id: tasks.id })
+          .from(tasks)
+          .where(eq(tasks.agentId, id)),
+      ),
+    );
+    return {
+      activeSchedules,
+      activeTasks,
+      pendingApprovals,
+      routes,
+      settings,
+      workspaceRoute,
+    };
+  }
+
+  inspectInstanceData(
+    target: RemovalTarget,
+    fileRoutes: readonly ChatRef[],
+  ): RemovalRows {
+    const { id } = target;
+    const db = this.#db;
+    const setupCount = db.$count(setupRuns, setupScope(target)).sync();
+    if (target.category === 'agent') {
+      const {
+        activeSchedules,
+        activeTasks,
+        pendingApprovals,
+        routes,
+        settings,
+      } = this.#agentRemoval(id, fileRoutes);
+      return {
+        chats: [],
+        counts: {
+          agent_sessions: db
+            .$count(agentSessions, eq(agentSessions.agentId, id))
+            .sync(),
+          setup_runs: setupCount,
+          chat_session_pointers: db
+            .$count(chats, eq(chats.sessionAgentId, id))
+            .sync(),
+          pending_approvals: db.$count(approvals, pendingApprovals).sync(),
+        },
+        routes,
+        schedules: db
+          .select({ id: schedules.id })
+          .from(schedules)
+          .where(activeSchedules)
+          .orderBy(schedules.id)
+          .all()
+          .map((row) => row.id),
+        tasks: db
+          .select({ id: tasks.id })
+          .from(tasks)
+          .where(activeTasks)
+          .orderBy(tasks.id)
+          .all()
+          .map((row) => row.id),
+        workspaceSettings: settings,
+      };
+    }
+    const { runs, spans } = platformDependents(db, id);
+    return {
+      chats: db
+        .select({ chatId: chats.chatId })
+        .from(chats)
+        .where(eq(chats.adapterId, id))
+        .orderBy(chats.chatId)
+        .all()
+        .map((row) => row.chatId),
+      counts: {
+        ...Object.fromEntries(
+          platformTables.map((table) => [
+            getTableName(table),
+            db.$count(table, eq(table.adapterId, id)).sync(),
+          ]),
+        ),
+        schedule_runs: db.$count(scheduleRuns, runs).sync(),
+        setup_runs: setupCount,
+        trace_spans: db.$count(traceSpans, spans).sync(),
+      },
+      routes: [],
+      schedules: db
+        .select({ id: schedules.id })
+        .from(schedules)
+        .where(
+          and(
+            eq(schedules.adapterId, id),
+            inArray(schedules.status, activeScheduleStatuses),
+          ),
+        )
+        .orderBy(schedules.id)
+        .all()
+        .map((row) => row.id),
+      tasks: db
+        .select({ id: tasks.id })
+        .from(tasks)
+        .where(
+          and(
+            eq(tasks.adapterId, id),
+            inArray(tasks.status, activeTaskStatuses),
+          ),
+        )
+        .orderBy(tasks.id)
+        .all()
+        .map((row) => row.id),
+      workspaceSettings: [],
+    };
+  }
+
+  deleteInstanceData(
+    target: RemovalTarget,
+    fileRoutes: readonly ChatRef[],
+    now: number,
+  ) {
+    const { id } = target;
+    return this.#db.transaction<Record<string, number>>(
+      (tx) => {
+        const changed = (result: { changes: number | bigint }) =>
+          Number(result.changes);
+        const setupCount = changed(
+          tx.delete(setupRuns).where(setupScope(target)).run(),
+        );
+        if (target.category === 'agent') {
+          const {
+            activeSchedules,
+            activeTasks,
+            pendingApprovals,
+            routes,
+            workspaceRoute,
+          } = this.#agentRemoval(id, fileRoutes);
+          const updates: Record<string, number> = {
+            setup_runs: setupCount,
+            agent_sessions: changed(
+              tx
+                .delete(agentSessions)
+                .where(eq(agentSessions.agentId, id))
+                .run(),
+            ),
+            chat_session_pointers: changed(
+              tx
+                .update(chats)
+                .set({ sessionAgentId: null, sessionModel: null })
+                .where(eq(chats.sessionAgentId, id))
+                .run(),
+            ),
+            chats: changed(
+              tx
+                .update(chats)
+                .set({
+                  agentId: null,
+                  model: null,
+                  serviceTier: null,
+                  thinking: null,
+                })
+                .where(refsMatch(chats, routes))
+                .run(),
+            ),
+            chat_workspace_settings: changed(
+              tx
+                .update(workspaceSettings)
+                .set({
+                  settings: sql`json_remove(${workspaceSettings.settings}, '$.agentId', '$.model', '$.thinking', '$.serviceTier', '$.fast')`,
+                })
+                .where(workspaceRoute)
+                .run(),
+            ),
+            approvals: changed(
+              tx
+                .update(approvals)
+                .set({ status: 'cancelled', decidedAt: now })
+                .where(pendingApprovals)
+                .run(),
+            ),
+            schedules: changed(
+              tx
+                .update(schedules)
+                .set({ status: 'cancelled', nextDueAt: null })
+                .where(activeSchedules)
+                .run(),
+            ),
+            tasks: changed(
+              tx
+                .update(tasks)
+                .set({
+                  finishedAt: now,
+                  status: sql`case when ${tasks.status} = 'sending' then 'delivery-unknown' else 'cancelled' end`,
+                })
+                .where(activeTasks)
+                .run(),
+            ),
+          };
+          return updates;
+        }
+        const { runs, spans } = platformDependents(tx, id);
+        const deleted = {
+          schedule_runs: changed(tx.delete(scheduleRuns).where(runs).run()),
+          setup_runs: setupCount,
+          trace_spans: changed(tx.delete(traceSpans).where(spans).run()),
+        };
+        return {
+          ...deleted,
+          ...Object.fromEntries(
+            platformTables.map((table) => [
+              getTableName(table),
+              changed(tx.delete(table).where(eq(table.adapterId, id)).run()),
+            ]),
+          ),
+        };
+      },
+      { behavior: 'immediate' },
+    );
+  }
+
   claimSetupRun(run: SetupRun, now: number) {
     return this.#db.transaction(
       (tx) => {
@@ -355,7 +700,30 @@ export class SqliteStore implements Store {
           tx
             .select({ id: setupRuns.id })
             .from(setupRuns)
-            .where(gt(setupRuns.leaseUntil, now))
+            .where(
+              and(
+                gt(setupRuns.leaseUntil, now),
+                run.mode === 'remove'
+                  ? or(
+                      setupScope({
+                        category: run.category,
+                        id: run.draft.entry.id,
+                      }),
+                      eq(setupRuns.mode, 'remove'),
+                    )
+                  : or(
+                      inArray(setupRuns.mode, ['add', 'login']),
+                      eq(
+                        setupRuns.id,
+                        JSON.stringify([
+                          'remove',
+                          run.category,
+                          run.draft.entry.id,
+                        ]),
+                      ),
+                    ),
+              ),
+            )
             .get()
         )
           return;

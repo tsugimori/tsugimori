@@ -223,6 +223,7 @@ test(
         'model',
         'preview',
         'previews',
+        'remove',
         'status',
         'thinking',
       ],

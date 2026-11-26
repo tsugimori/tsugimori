@@ -28,6 +28,7 @@ interface Dependencies {
 }
 
 interface MenuState {
+  adapterId: string;
   applied: Map<string, string>;
   groups: Set<string>;
   pending: Promise<void>;
@@ -157,6 +158,16 @@ export class CommandMenus {
     await Promise.all([...this.#menus.values()].map(({ pending }) => pending));
   }
 
+  async detach(adapterId: string) {
+    const pending: Promise<void>[] = [];
+    for (const [key, state] of this.#menus) {
+      if (state.adapterId !== adapterId) continue;
+      this.#menus.delete(key);
+      pending.push(state.pending);
+    }
+    await Promise.all(pending);
+  }
+
   stop() {
     this.#stopping = true;
   }
@@ -181,6 +192,7 @@ export class CommandMenus {
       unavailable.set(chatId, scopes);
     }
     const state: MenuState = {
+      adapterId: id,
       applied: new Map(),
       groups: new Set(),
       pending: Promise.resolve(),

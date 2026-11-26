@@ -675,10 +675,14 @@ function compactionDetails(
 export default definePlugin({
   name: 'agent-claude-sdk',
   checks: claudeChecks,
-  credentialNames: (entry) =>
-    [entry.options?.tokenEnv, entry.options?.apiKeyEnv ?? apiKeyName].filter(
-      (value): value is string => typeof value === 'string',
-    ),
+  credentialNames: ({ options }) => {
+    const { apiKeyEnv, tokenEnv } = options ?? {};
+    return apiKeyEnv === undefined && tokenEnv === undefined
+      ? [apiKeyName]
+      : [apiKeyEnv, tokenEnv].filter(
+          (name): name is string => typeof name === 'string',
+        );
+  },
   setupSteps: claudeSetup,
   agents: {
     'claude-sdk': Object.assign(
