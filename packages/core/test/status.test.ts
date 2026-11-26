@@ -35,6 +35,7 @@ const fullSnapshots = {
     'Schedules: 2 active, next 13:40 #abcdef *raw* 1234567890123456789012🙂…',
     '',
     '🖥 System',
+    'Webhook: Unconfigured',
     'telegram:main, Codex App Server running',
     'Sandbox enabled · checks passing',
   ],
@@ -54,6 +55,7 @@ const fullSnapshots = {
     '排程：2 項啟用，下次 13:40 #abcdef *raw* 1234567890123456789012🙂…',
     '',
     '🖥 系統',
+    'Webhook：未設定',
     'telegram:main、Codex App Server 運作中',
     '沙箱已啟用 · 環境檢查正常',
   ],
@@ -76,6 +78,7 @@ const labels = {
     'Approvals',
     'Schedules',
     'System',
+    'Webhook',
   ],
   'zh-TW': [
     'tsugimori',
@@ -93,6 +96,7 @@ const labels = {
     '待核准',
     '排程',
     '系統',
+    'Webhook',
   ],
 };
 
@@ -122,7 +126,7 @@ for (const locale of ['en', 'zh-TW'] as const) {
     const expected = fullSnapshots[locale];
     assert.deepEqual(card.text.split('\n'), [
       ...expected.slice(0, 8),
-      ...expected.slice(-4),
+      ...expected.slice(-5),
     ]);
   });
 
@@ -223,10 +227,11 @@ for (const locale of ['en', 'zh-TW'] as const) {
       ),
     );
     assert.deepEqual(
-      render().split('\n').slice(-6),
+      render().split('\n').slice(-7),
       zh
         ? [
             '🖥 系統',
+            'Webhook：未設定',
             'telegram:main、Codex App Server、claude · Claude Agent SDK 運作中',
             'telegram:backup 重試中（第 2 次），下次 13:40',
             'telegram:new 啟動中',
@@ -235,6 +240,7 @@ for (const locale of ['en', 'zh-TW'] as const) {
           ]
         : [
             '🖥 System',
+            'Webhook: Unconfigured',
             'telegram:main, Codex App Server, claude · Claude Agent SDK running',
             'telegram:backup retrying (attempt 2), next retry 13:40',
             'telegram:new starting',
@@ -397,7 +403,7 @@ test('omits the empty chat section when running with no plugins', (t) => {
   assert.equal(
     statusCard({ ...deps, runtime, sandboxEnabled: false }, chat, target, now)
       .text,
-    '🟢 tsugimori c731004 · up 4m (started 13:29)\n\n🖥 System\nSandbox disabled · checks passing',
+    '🟢 tsugimori c731004 · up 4m (started 13:29)\n\n🖥 System\nWebhook: Unconfigured\nSandbox disabled · checks passing',
   );
 });
 

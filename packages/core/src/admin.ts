@@ -6,6 +6,7 @@ import type {
   AdminTask,
   AdminToolCall,
   ChatRef,
+  WebhookStatus,
 } from '@tsugimori/plugin-sdk';
 import type {
   ChatRecord,
@@ -30,6 +31,7 @@ interface Dependencies {
   reloadListeners: Set<(event: AdminEvent) => void>;
   route: Tasks['route'];
   store: Store;
+  webhook(): WebhookStatus;
 }
 
 function startOfDay(now: number, timezone: string) {
@@ -155,6 +157,7 @@ export function adminReader({
   agentInfo,
   config,
   reloadListeners,
+  webhook,
   route,
   store,
 }: Dependencies): AdminReader {
@@ -302,6 +305,7 @@ export function adminReader({
         .sort((a, b) => (b.lastActivity ?? 0) - (a.lastActivity ?? 0));
       return {
         chats: chats.slice(0, 200),
+        webhook: webhook(),
         totals: {
           chats: chats.length,
           ...store.adminTaskCounts(startOfDay(now, config().timezone), now),

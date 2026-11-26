@@ -96,14 +96,6 @@
             },
             "then": {
               "properties": {
-                "listen": {
-                  "type": "string",
-                  "pattern": "^(127\\.0\\.0\\.1|\\[::1\\]):([0-9]{1,5})$",
-                  "default": "127.0.0.1:8789"
-                },
-                "publicUrl": {
-                  "$ref": "#/definitions/webhookBaseUrl"
-                },
                 "replyTokenTtlMs": {
                   "type": "integer",
                   "minimum": 1,
@@ -371,10 +363,61 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "listen": {
+          "type": "string",
+          "pattern": "^(127\\.0\\.0\\.1|\\[::1\\]):([0-9]{1,5})$"
+        },
+        "provider": {
+          "enum": ["cloudflare", "manual"]
+        },
         "publicBaseUrl": {
-          "$ref": "#/definitions/webhookBaseUrl"
+          "$ref": "#/definitions/webhookBaseUrl",
+          "description": "Required for manual ingress. Derived during Cloudflare setup."
+        },
+        "cloudflare": {
+          "type": "object",
+          "description": "Options validated by the Cloudflare webhook provider.",
+          "properties": {
+            "hostname": {
+              "type": "string"
+            },
+            "tunnelId": {
+              "type": "string"
+            },
+            "accountId": {
+              "type": "string"
+            },
+            "zoneId": {
+              "type": "string"
+            },
+            "tokenEnv": {
+              "type": "string"
+            }
+          }
         }
-      }
+      },
+      "anyOf": [
+        {
+          "required": ["provider"]
+        },
+        {
+          "required": ["publicBaseUrl"]
+        }
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "provider": {
+                "const": "manual"
+              }
+            }
+          },
+          "then": {
+            "required": ["publicBaseUrl"]
+          }
+        }
+      ]
     },
     "preview": {
       "type": "object",

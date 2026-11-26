@@ -1,4 +1,4 @@
-import type { RemovalPlan, RemovalTarget } from '@tsugimori/core';
+import type { Gateway, RemovalPlan, RemovalTarget } from '@tsugimori/core';
 import type { Server, Socket } from 'node:net';
 
 import {
@@ -19,15 +19,19 @@ import { createInterface } from 'node:readline';
 
 import { terminalIO } from './setup.ts';
 
+type WebhookInfo = ReturnType<Gateway['webhookInfo']>;
+
 interface Controller {
   execute(plan: RemovalPlan): Promise<string>;
   plan(target: RemovalTarget): Promise<RemovalPlan>;
+  webhookInfo?(platformId?: string): Promise<WebhookInfo>;
 }
 
 type Response =
   | { locale: RemovalPlan['locale']; plan: string }
   | { error: string }
-  | { result: string };
+  | { result: string }
+  | { webhook: WebhookInfo };
 
 type SocketClaim =
   | { close?: never; socket: Socket }
@@ -55,16 +59,16 @@ function listen(server: Server, path: string) {
   });
 }
 
-async function endpoint(workspace: string) {
+async function endpoint(workspace: string, create = true) {
   const root = await realpath(workspace);
   const data = join(root, 'data');
-  await mkdir(data, { recursive: true, mode: 0o700 });
+  if (create) await mkdir(data, { recursive: true, mode: 0o700 });
   if ((await realpath(data)) !== data)
     throw new SetupError(
       'The workspace data directory must not be a symbolic link.',
     );
   const directory = join(data, '.remove');
-  await mkdir(directory, { recursive: true, mode: 0o700 });
+  if (create) await mkdir(directory, { recursive: true, mode: 0o700 });
   const stat = await lstat(directory);
   if (
     !stat.isDirectory() ||
@@ -88,8 +92,7 @@ async function endpoint(workspace: string) {
   };
 }
 
-function removeTarget(line: string): RemovalTarget {
-  const target: unknown = JSON.parse(line);
+function removeTarget(target: unknown): RemovalTarget {
   if (
     !target ||
     typeof target !== 'object' ||
@@ -111,7 +114,24 @@ async function serve(socket: Socket, controller: Controller) {
   try {
     const request = await lines.next();
     if (request.done) return;
-    const plan = await controller.plan(removeTarget(request.value));
+    const payload: unknown = JSON.parse(request.value);
+    if (
+      payload &&
+      typeof payload === 'object' &&
+      'action' in payload &&
+      payload.action === 'webhook-status' &&
+      controller.webhookInfo
+    ) {
+      const id =
+        'platformId' in payload && typeof payload.platformId === 'string'
+          ? payload.platformId
+          : undefined;
+      socket.end(
+        JSON.stringify({ webhook: await controller.webhookInfo(id) }) + '\n',
+      );
+      return;
+    }
+    const plan = await controller.plan(removeTarget(payload));
     const preview: Response = {
       plan: formatRemovalPlan(plan),
       locale: plan.locale,
@@ -234,6 +254,42 @@ export async function listenForRemoval(
     );
   }
   return claimed.close;
+}
+
+export async function readGatewayWebhook(
+  workspace: string,
+  platformId?: string,
+) {
+  let socket: Socket;
+  try {
+    const { directoryHandle, path } = await endpoint(workspace, false);
+    try {
+      socket = await open(path);
+    } finally {
+      await directoryHandle?.close();
+    }
+  } catch (error) {
+    if (errorCode(error, 'ENOENT') || errorCode(error, 'ECONNREFUSED')) return;
+    throw error;
+  }
+  const input = createInterface({ input: socket, crlfDelay: Infinity });
+  socket.setTimeout(2_000, () => socket.destroy());
+  try {
+    socket.write(
+      JSON.stringify({ action: 'webhook-status', platformId }) + '\n',
+    );
+    const line = await input[Symbol.asyncIterator]().next();
+    if (!line.done) {
+      const response: Response = JSON.parse(line.value);
+      if ('webhook' in response) return response.webhook;
+    }
+    throw new SetupError(
+      'Could not read webhook status from the running gateway.',
+    );
+  } finally {
+    input.close();
+    socket.destroy();
+  }
 }
 
 async function confirm(locale: RemovalPlan['locale'], yes: boolean) {

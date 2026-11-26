@@ -1,4 +1,5 @@
 import type { ChatRef, ResourcePattern, ResourceRef } from './index.ts';
+import type { WebhookStatus } from './webhooks.ts';
 
 export interface AccessIdentity {
   aud: string;
@@ -186,6 +187,7 @@ export interface AdminOverview {
     pendingApprovals: number;
     tasksToday: number;
   };
+  webhook: WebhookStatus;
 }
 
 export interface AdminSchedules {

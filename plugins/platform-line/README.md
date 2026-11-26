@@ -13,27 +13,24 @@ Add an entry under `platforms` in `tsugimori.json`.
   "enabled": true,
   "secretEnv": "LINE_CHANNEL_SECRET",
   "tokenEnv": "LINE_CHANNEL_ACCESS_TOKEN",
-  "listen": "127.0.0.1:8789",
-  "publicUrl": "https://webhooks.example.com",
   "replyTokenTtlMs": 50000
 }
 ```
 
-The example shows the defaults for all optional fields except `publicUrl`, which has no default. `id` must be unique among platform entries. Set the channel secret and access token under the named variables in the process environment or workspace `.env`. Use separate credential names for multiple instances. Instances with the same `listen` address share one server and route by `/line/<id>/`. `listen` accepts only `127.0.0.1` or `[::1]` with a valid port. Use a fixed port for proxy routing. `publicUrl` is an HTTPS base URL, optionally with a path prefix, and overrides the workspace-level `webhooks.publicBaseUrl`. `replyTokenTtlMs` accepts 1–60,000 milliseconds. All options shown are on the entry itself.
+The example shows the defaults for the optional fields. `id` must be unique among platform entries. Set the channel secret and access token in the process environment or workspace `.env` under the named variables. Use separate credential names for multiple instances. `replyTokenTtlMs` accepts 1–60,000 milliseconds.
 
 ## Guided setup and webhook
 
-1. Create a LINE Messaging API channel. Run `corepack pnpm exec tsugimori add platform line --dir ./ws`, or use `/add platform line` from an existing owner chat. Without `--id`, setup asks for an instance name and suggests a random six-character hex ID.
-2. Enter the channel secret and long-lived channel access token at the secret prompts. Setup checks the access token against the bot info endpoint. Type `yes` to confirm the bot name. Setup saves the credentials to `.env` using the names above with an appended `_<ID_HEX>` suffix (the uppercase UTF-8 hex encoding of the instance ID). The first signed webhook verifies that the channel secret matches.
-3. When neither `publicUrl` nor `webhooks.publicBaseUrl` is set, setup asks for the public HTTPS base URL and saves it as `publicUrl`. Reply `skip` to show only the path. With base `https://webhooks.example.com` and instance `main`, setup shows `https://webhooks.example.com/line/main/`. Setup reads the webhook URL configured in LINE. When it differs, setup offers to set it and sends a test request after you reply `yes`.
-4. Route public HTTPS at `/line/<id>/` to the same path on the configured loopback listener using a reverse proxy or named Cloudflare Tunnel. One ingress rule with `path: ^/line/` covers every instance on that listener. If the base URL has a path prefix, strip it before forwarding. The endpoint must be reachable by LINE without interactive login.
-5. In the LINE Developers Console, verify the Webhook URL and enable **Use webhook**. To receive group and room messages, also enable **Allow bot to join group chats**. Set the LINE owner's native user ID in `owner` by adapter ID or platform kind, or pair in a DM once the webhook is live. [Owner configuration](../../README.md#workspace-and-conversations)
+1. Set up and verify [gateway webhook ingress](../../README.md#webhook-ingress). Create a LINE Messaging API channel, then run `/add platform line` in an owner chat. Without `--id`, setup suggests a random six-character hex instance ID.
+2. Enter the channel secret and long-lived channel access token at the secret prompts. Confirm the bot name reported by LINE. Setup saves verified credentials to `.env` with the uppercase UTF-8 hex instance ID appended to the variable names.
+3. Setup gets the URL from the gateway, for example `https://hooks.example.com/line/main/`. It sets an empty LINE endpoint automatically and asks before replacing a different endpoint. Setup runs a LINE webhook test and reports the connection only if that test passes. If the test fails, see the reason and verify the endpoint in the LINE Developers Console.
+4. Enable **Use webhook** in the LINE Developers Console when prompted. To receive group and room messages, also enable **Allow bot to join group chats**. Set the owner's native user ID in `owner` by adapter ID or platform kind, or pair in a DM once the webhook is live. See [owner configuration](../../README.md#workspace-and-conversations).
+
+Terminal setup with `corepack pnpm exec tsugimori add platform line --dir ./ws` also requires verified ingress. If the gateway is stopped, set and verify the LINE endpoint in the LINE Developers Console after the gateway starts.
 
 ## Checks and status
 
-`tsugimori doctor` checks for the channel secret, probes bot info with the access token, and temporarily binds the configured loopback listener. When the address is in use, it sends an unsigned request to `/line/<id>/` and reports ok if the running gateway serves that path. It shows the full webhook URL when a base URL is configured. The core checks for address conflicts between LINE, admin web, and named previews. LINE entries can share an address. The gateway rejects conflicts on startup and reload. The doctor probe checks local binding and credentials. Verify public routing and the channel secret with the LINE Developers Console.
-
-In `/status`, **System** shows the LINE instance state and any retry or failure details. In **This chat**, the card can show the latest approval decision because LINE uses metered push. The card does not show LINE account quota.
+`tsugimori doctor` checks the channel secret and access token, reads the gateway's ingress status, and compares LINE's configured endpoint with the gateway URL when ingress is healthy. `/status` shows gateway ingress and LINE attachment status in **System**. In **This chat**, the card can show the latest approval decision because LINE uses metered push.
 
 ## Delivery and limits
 

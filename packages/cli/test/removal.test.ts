@@ -18,6 +18,7 @@ import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import { main } from '../src/index.ts';
+import { readGatewayWebhook } from '../src/removal.ts';
 
 async function workspace(t: TestContext, kind: string, long = false) {
   const parent = await mkdtemp(join(tmpdir(), 'tsm-remove-cli-'));
@@ -123,6 +124,11 @@ test('CLI removal in a running workspace waits for the gateway to stop the adapt
   });
   try {
     await Promise.race([active.promise, daemon]);
+    assert.deepEqual(await readGatewayWebhook(root, 'old'), {
+      attached: true,
+      paths: [],
+      status: { state: 'unconfigured' },
+    });
     await main(['remove', 'platform', 'old', '--dir', root, '--yes'], registry);
     assert.deepEqual(stops, ['old']);
     assert.match(

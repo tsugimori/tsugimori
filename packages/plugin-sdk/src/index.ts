@@ -22,7 +22,24 @@ export type {
   SetupStep,
 } from './setup.ts';
 export { agentHome, credentialKey, SetupError, yesNoChoices } from './setup.ts';
-export { parseWebhookBaseUrl, webhookBaseUrlPattern } from './webhooks.ts';
+import type { WebhookIngress, WebhookProvider } from './webhooks.ts';
+
+export {
+  defaultWebhookListen,
+  parseWebhookBaseUrl,
+  parseWebhookListen,
+  webhookBaseUrlPattern,
+  webhookListenPattern,
+  WebhookProviderError,
+} from './webhooks.ts';
+export type {
+  WebhookConfig,
+  WebhookIngress,
+  WebhookProvider,
+  WebhookProviderContext,
+  WebhookRoute,
+  WebhookStatus,
+} from './webhooks.ts';
 export {
   containsMention,
   textMentionMatches,
@@ -574,13 +591,17 @@ export type AgentInstanceConfig = PluginInstanceConfig & {
 export interface PluginFactoryContext {
   credential(name: string): string | undefined;
   fetch?: typeof globalThis.fetch;
+  webhookIngress?: WebhookIngress;
   workspace: string;
 }
 
-export type PlatformFactory = (
-  config: PlatformInstanceConfig,
-  ctx: PluginFactoryContext,
-) => PlatformAdapter | Promise<PlatformAdapter>;
+export interface PlatformFactory {
+  (
+    config: PlatformInstanceConfig,
+    ctx: PluginFactoryContext,
+  ): PlatformAdapter | Promise<PlatformAdapter>;
+  requires?: readonly ['webhook'];
+}
 
 export interface AgentFactory {
   (
@@ -643,6 +664,7 @@ export interface PluginDefinition {
   setupComplete?: SetupCompletion;
   setupSteps?: readonly SetupStep[];
   tools?: readonly ToolDefinition[];
+  webhookProviders?: readonly WebhookProvider[];
 }
 
 export function definePlugin(plugin: PluginDefinition): PluginDefinition {

@@ -27,7 +27,7 @@ Use `"preview": {}` in `tsugimori.json` for Quick Tunnels with the default 60-mi
 
 - `maxTtlMinutes` accepts 1–1,440 and defaults to 60.
 - `named.zoneId`, `tunnelId`, `domain`, and `accessAud` identify the DNS zone, named tunnel, preview domain, and Access application. Replace the example values with your own.
-- `named.listen` defaults to `127.0.0.1:8788` and accepts an IPv4 loopback port from 1–65,535. Give it a distinct address from enabled web and LINE listeners.
+- `named.listen` defaults to `127.0.0.1:8788` and accepts an IPv4 loopback port from 1–65,535. Give it a distinct address from enabled admin web and webhook listeners.
 - Configure `accessTeam` and at least one of `ownerEmail` or `ownerSub`. If both identities are set, both must match. Absent team and identity fields inherit from `web` individually. The preview audience is configured explicitly.
 - `tokenEnv` defaults to `CLOUDFLARE_API_TOKEN`. Put a zone-scoped DNS Edit token in the process environment or workspace `.env`. Quick Tunnels require no configured credentials.
 
@@ -38,6 +38,16 @@ Use `"preview": {}` in `tsugimori.json` for Quick Tunnels with the default 60-mi
 3. Configure the preview section and run `tsugimori doctor`. The gateway reloads named configuration and workspace credentials while running. Replacing the named provider closes its existing previews.
 
 Setup is manual. `doctor` checks whether `cloudflared --version` succeeds and, for named previews, whether the token can list zone DNS records and the Access identity and router port are configured. This probe checks DNS read access. Creating and removing records requires DNS edit access. `/status` counts failed environment checks in **System**. Use `/previews` to see active previews on the adapter or `corepack pnpm exec tsugimori previews [dir]` to list them locally.
+
+## Webhook ingress
+
+Use `/webhook setup` in an owner chat and choose **Cloudflare Tunnel**. Enter the API token in the private prompt, then enter the dedicated hostname, such as `hooks.example.com`. Setup discovers the Cloudflare zone and asks which healthy tunnel to use when several are available.
+
+The tunnel must be named and remotely managed. To migrate a locally managed tunnel, open the [Cloudflare One dashboard](https://one.dash.cloudflare.com/), go to **Networks → Tunnels**, select the tunnel, and choose **Migrate**.
+
+The token needs **Account → Cloudflare Tunnel → Edit**, **Zone → DNS → Edit**, and **Zone → Zone → Read** permissions for the account and zone that host the route. Setup stores the token in the workspace `.env`, using `CLOUDFLARE_API_TOKEN` by default.
+
+Setup adds a hostname rule to the shared webhook listener and creates a proxied CNAME for the tunnel. A conflicting DNS record owned by another service stays in place and blocks setup. Leave the webhook hostname publicly reachable so LINE and the gateway's probe can reach it. The public URL is derived from the hostname and saved after the probe succeeds. `/webhook check` reconciles the route again, and `tsugimori doctor` checks the token, tunnel, rule, and DNS record.
 
 ## Opening and closing previews
 

@@ -74,10 +74,12 @@ export class LineApi {
   async webhookEndpoint(signal: AbortSignal) {
     try {
       const body = record(await this.#request(webhookEndpoint, signal));
-      const endpoint = nonempty(body?.endpoint);
-      if (!endpoint || typeof body?.active !== 'boolean')
+      if (typeof body?.endpoint !== 'string')
         throw new Error('LINE returned invalid webhook endpoint information');
-      return { endpoint, active: body.active };
+      return {
+        endpoint: body.endpoint,
+        active: typeof body.active === 'boolean' ? body.active : undefined,
+      };
     } catch (error) {
       if (!(error instanceof LineApiError) || error.status !== 404) throw error;
     }

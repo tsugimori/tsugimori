@@ -3,6 +3,8 @@ import type {
   InboundMessage,
   PluginInstanceConfig,
   SetupContext,
+  WebhookIngress,
+  WebhookRoute,
 } from '@tsugimori/plugin-sdk';
 import type { AddressInfo } from 'node:net';
 import type { TestContext } from 'node:test';
@@ -14,14 +16,13 @@ import {
 } from '@tsugimori/plugin-sdk';
 import assert from 'node:assert/strict';
 import { createHmac } from 'node:crypto';
-import { createServer } from 'node:http';
+import { createServer, type Server } from 'node:http';
 import { test } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 
 import type { LineText } from '../src/api.ts';
 
 import line, { LineAdapter } from '../src/index.ts';
-import { closeServer, listen, listenAddress } from '../src/webhook.ts';
 
 const secret = 'test-secret';
 const token = 'test-access-token';
@@ -78,11 +79,57 @@ function fakeApi(
   return { calls, fetch };
 }
 
-async function loopback() {
-  const server = createServer();
+function listen(server: Server, address: { host: string; port: number }) {
+  return new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(address, () => {
+      server.off('error', reject);
+      resolve();
+    });
+  });
+}
+
+async function closeServer(server: Server) {
+  if (!server.listening) return;
+  await new Promise<void>((resolve, reject) => {
+    server.close((error) => (error ? reject(error) : resolve()));
+    server.closeAllConnections();
+  });
+}
+
+async function fakeIngress(t: TestContext) {
+  const routes = new Map<string, WebhookRoute>();
+  const server = createServer((req, res) => {
+    const route = routes.get(
+      req.url?.split('?', 1)[0]?.replace(/\/$/, '') ?? '',
+    );
+    if (route) route(req, res);
+    else res.writeHead(404).end();
+  });
   await listen(server, { host: '127.0.0.1', port: 0 });
-  const port = (server.address() as AddressInfo).port;
-  return { port, server };
+  t.after(() => closeServer(server));
+  return {
+    ingress: {
+      async register(path, route) {
+        const key = path.replace(/\/$/, '');
+        routes.set(key, route);
+        return async () => {
+          routes.delete(key);
+        };
+      },
+      url: () => undefined,
+      status: () => ({ state: 'unconfigured' }),
+    } satisfies WebhookIngress,
+    port: (server.address() as AddressInfo).port,
+  };
+}
+
+function publicIngress(baseUrl: string): WebhookIngress {
+  return {
+    register: async () => assert.fail('Unexpected registration'),
+    status: () => ({ state: 'ok', baseUrl }),
+    url: (path) => baseUrl + path,
+  };
 }
 
 function message(
@@ -125,14 +172,13 @@ async function fixture(
     replyTokenTtlMs?: number;
   } = {},
 ) {
-  const { server, port } = await loopback();
-  await closeServer(server);
+  const { ingress, port } = await fakeIngress(t);
   let now = 1000;
   const adapter = new LineAdapter(
     { fetch: api.fetch, now: () => now },
     'main',
     {
-      listen: `127.0.0.1:${port}`,
+      ingress,
       secret,
       token,
       replyTokenTtlMs: options.replyTokenTtlMs,
@@ -537,13 +583,8 @@ test('typing calls the loading endpoint in direct messages only and ignores fail
   assert.equal(loading[0]?.body?.chatId, userId);
 });
 
-test('the default LINE webhook listens on IPv4 loopback port 8789', () => {
-  assert.deepEqual(listenAddress(), { host: '127.0.0.1', port: 8789 });
-});
-
 test('LINE instances share a listener and keep routes, credentials, and event state separate across reloads', async (t) => {
-  const { port, server } = await loopback();
-  await closeServer(server);
+  const { ingress, port } = await fakeIngress(t);
   const host = '127.0.0.1';
   const address = `${host}:${port}`;
   const otherSecret = 'test-second-secret';
@@ -553,16 +594,15 @@ test('LINE instances share a listener and keep routes, credentials, and event st
   const first = new LineAdapter(firstApi, 'main', {
     secret,
     token,
-    listen: address,
+    ingress,
   });
   const other = new LineAdapter(otherApi, 'other:bot', {
     secret: otherSecret,
     token: otherToken,
-    listen: address,
+    ingress,
   });
   t.after(async () => {
     await Promise.all([first.stop(), other.stop()]);
-    await closeServer(server);
   });
   const firstEvents: string[] = [];
   const otherEvents: string[] = [];
@@ -615,30 +655,28 @@ test('LINE instances share a listener and keep routes, credentials, and event st
   assert.deepEqual(firstEvents, ['initial', 'after-reload']);
   assert.deepEqual(otherEvents, ['initial', 'while-stopped']);
   await Promise.all([first.stop(), other.stop()]);
-  await listen(server, { host, port });
+  assert.equal(await post('/line/other%3Abot/', otherSecret, 'stopped'), 404);
 });
 
-test('startup rejects public and busy addresses, honors cancellation, and releases its port on stop', async (t) => {
-  const { port, server } = await loopback();
-  t.after(() => closeServer(server));
+test('LINE reports ingress bind failures and honors startup cancellation', async (t) => {
+  const { ingress } = await fakeIngress(t);
   const api = fakeApi();
   const ctx: AdapterContext = { async emit() {} };
-  const address = `127.0.0.1:${port}`;
-  const options = { secret, token, listen: address };
-  const busy = new LineAdapter(api, 'busy', options);
-  t.after(() => busy.stop());
+  const options = { secret, token, ingress };
+  const busy = new LineAdapter(api, 'busy', {
+    ...options,
+    ingress: {
+      ...ingress,
+      async register() {
+        throw Object.assign(new Error('busy'), { code: 'EADDRINUSE' });
+      },
+    },
+  });
   await assert.rejects(
     busy.start(ctx),
     (error) =>
       error instanceof PlatformStartError &&
       /already in use/.test(error.message),
-  );
-  await assert.rejects(
-    new LineAdapter(api, 'public', {
-      ...options,
-      listen: '0.0.0.0:8789',
-    }).start(ctx),
-    /loopback|127\.0\.0\.1/,
   );
   const controller = new AbortController();
   const entered = Promise.withResolvers<void>();
@@ -663,13 +701,9 @@ test('startup rejects public and busy addresses, honors cancellation, and releas
   await entered.promise;
   controller.abort();
   await assert.rejects(starting, { name: 'AbortError' });
-  await closeServer(server);
-  await busy.start(ctx);
-  await busy.stop();
-  await listen(server, { host: '127.0.0.1', port });
 });
 
-test('setup hides credentials, validates the token, confirms the bot and prints the webhook path', async () => {
+test('setup hides credentials, validates the token, and confirms the bot', async () => {
   const api = fakeApi();
   const entry: PluginInstanceConfig = { id: 'main', kind: 'line' };
   const outputs: string[] = [];
@@ -704,11 +738,8 @@ test('setup hides credentials, validates the token, confirms the bot and prints 
     },
   };
   const setup = line.setupSteps?.[0];
-  const publicUrl = line.setupSteps?.[1];
-  const completion = line.setupComplete;
   assert.ok(setup);
-  assert.ok(publicUrl);
-  assert.ok(completion);
+  assert.equal(line.setupSteps?.length, 1);
   assert.deepEqual(line.credentialNames?.(entry), [
     'LINE_CHANNEL_SECRET',
     'LINE_CHANNEL_ACCESS_TOKEN',
@@ -740,93 +771,25 @@ test('setup hides credentials, validates the token, confirms the bot and prints 
   assert.deepEqual(line.credentialNames?.({ ...entry, ...patch?.entry }), [
     ...writes.keys(),
   ]);
-  const savedEntry = { ...entry, ...patch?.entry };
-  const urlAnswers = ['http://webhooks.example.com', 'skip'];
-  await publicUrl.run({
-    ...context,
-    entry: savedEntry,
-    async prompt(options) {
-      assert.equal(options.secret, undefined);
-      prompts.push(options);
-      return urlAnswers.shift()!;
-    },
-  });
-  assert.match(prompts[3]!.text, /public HTTPS base URL/);
-  assert.match(prompts[4]!.text, /valid HTTPS base URL/);
-  assert.deepEqual(
-    prompts[4]?.choices?.map(({ value }) => value),
-    ['skip'],
-  );
-  assert.equal(patch?.entry?.publicUrl, undefined);
-  const summary = await completion.run({ ...context, entry: savedEntry });
-  assert.match(summary, /\/line\/main\/\..*HTTPS[\s\S]*Use webhook/);
-  assert.ok(!summary.includes(secret));
-  assert.ok(!summary.includes(token));
   assert.ok(!outputs.join(' ').includes(secret));
   assert.ok(!outputs.join(' ').includes(token));
-
-  const { port, server } = await loopback();
-  try {
-    const config = { ...entry, ...patch?.entry, listen: `127.0.0.1:${port}` };
-    const checks = await line.checks?.({ ...context, entry: config });
-    assert.equal(checks?.find(({ id }) => id === 'line-token')?.status, 'ok');
-    assert.match(
-      checks?.find(({ id }) => id === 'line-listen')?.detail ?? '',
-      /already in use/,
-    );
-    await closeServer(server);
-    const open = await line.checks?.({ ...context, entry: config });
-    assert.equal(open?.find(({ id }) => id === 'line-listen')?.status, 'ok');
-  } finally {
-    await closeServer(server);
-  }
-
-  const running = createServer((request, response) => {
-    response
-      .writeHead(
-        request.url === '/line/main/' && request.method === 'POST' ? 401 : 404,
-      )
-      .end();
-  });
-  await new Promise<void>((resolve) => running.listen(0, '127.0.0.1', resolve));
-  try {
-    const { port: busy } = running.address() as { port: number };
-    const config = { ...entry, ...patch?.entry, listen: `127.0.0.1:${busy}` };
-    const served = await line.checks?.({
-      ...context,
-      entry: config,
-      configuredPlatforms: [config],
-    });
-    const item = served?.find(({ id }) => id === 'line-listen');
-    assert.equal(item?.status, 'ok');
-    assert.match(item?.detail ?? '', /running gateway/);
-    const other = { ...config, id: 'other' };
-    const unserved = await line.checks?.({
-      ...context,
-      entry: other,
-      configuredPlatforms: [other],
-    });
-    assert.equal(
-      unserved?.find(({ id }) => id === 'line-listen')?.status,
-      'warn',
-    );
-  } finally {
-    await closeServer(running);
-  }
-
-  const base = 'https://webhooks.example.com/teams/';
-  await publicUrl.run({
+  const checks = await line.checks?.({
     ...context,
-    entry: savedEntry,
-    prompt: async () => base,
+    entry: { ...entry, ...patch?.entry },
+    webhookIngress: {
+      ...publicIngress('https://hooks.example.com'),
+      status: () => ({
+        state: 'failed',
+        reason: 'Public route is unavailable.',
+      }),
+    },
   });
-  assert.equal(patch?.entry?.publicUrl, base);
-  await publicUrl.run({
-    ...context,
-    entry: savedEntry,
-    webhooks: { publicBaseUrl: base },
-    prompt: async () => assert.fail('The workspace URL already applies'),
-  });
+  assert.equal(checks?.find(({ id }) => id === 'line-token')?.status, 'ok');
+  assert.equal(checks?.find(({ id }) => id === 'line-webhook')?.status, 'fail');
+  assert.equal(
+    checks?.find(({ id }) => id === 'line-webhook')?.detail,
+    'Public route is unavailable.',
+  );
 });
 
 test('LINE completion confirms an endpoint change before setting and testing it', async () => {
@@ -838,36 +801,63 @@ test('LINE completion confirms an endpoint change before setting and testing it'
   for (const scenario of [
     {
       current: endpoint,
+      active: true,
       answer: undefined,
-      methods: ['GET'],
-      summary: /matches/,
+      methods: ['GET', 'POST'],
+      testSuccess: true,
+      summary: /已接上.*LINE 測試通過/,
+      reminder: false,
+    },
+    {
+      current: endpoint,
+      active: false,
+      answer: undefined,
+      methods: ['GET', 'POST'],
+      testSuccess: true,
+      summary: /已接上.*LINE 測試通過/,
+      reminder: true,
     },
     {
       current: 'https://old.example.com/',
       answer: 'no',
       methods: ['GET'],
-      summary: /differs/,
+      testSuccess: false,
+      summary: /保留了原有/,
+      reminder: false,
     },
     {
-      current: undefined,
+      current: 'https://old.example.com/',
       answer: 'yes',
       methods: ['GET', 'PUT', 'POST'],
       testSuccess: true,
-      summary: /test passed/,
+      summary: /已接上.*LINE 測試通過/,
+      reminder: true,
     },
     {
       current: undefined,
-      answer: 'yes',
+      answer: undefined,
+      methods: ['GET', 'PUT', 'POST'],
+      testSuccess: true,
+      summary: /已接上.*LINE 測試通過/,
+      reminder: true,
+    },
+    {
+      current: '',
+      answer: undefined,
       methods: ['GET', 'PUT', 'POST'],
       testSuccess: false,
-      summary: /test did not pass/,
+      summary: /測試未通過/,
+      reminder: false,
     },
   ]) {
     const api = fakeApi(({ body, method, path }) => {
       if (method === 'GET') {
         assert.equal(path, endpointPath);
-        return scenario.current
-          ? Response.json({ endpoint: scenario.current, active: true })
+        return scenario.current !== undefined
+          ? Response.json({
+              endpoint: scenario.current,
+              active: scenario.active,
+            })
           : Response.json({}, { status: 404 });
       }
       assert.deepEqual(body, { endpoint });
@@ -884,7 +874,8 @@ test('LINE completion confirms an endpoint change before setting and testing it'
       platform: process.platform,
       workspace: '/unused',
       entry: { id: 'main', kind: 'line' },
-      webhooks: { publicBaseUrl: 'https://webhooks.example.com/teams/' },
+      webhookIngress: publicIngress('https://webhooks.example.com/teams'),
+      locale: 'zh-TW',
       fetch: api.fetch,
       signal: AbortSignal.timeout(2000),
       runCommand: async () => assert.fail('Unexpected command'),
@@ -896,7 +887,6 @@ test('LINE completion confirms an endpoint change before setting and testing it'
           ['yes', 'no'],
         );
         assert.ok(text.includes(endpoint));
-        assert.match(text, /Type yes to confirm/);
         assert.ok(scenario.answer);
         asked++;
         return scenario.answer;
@@ -904,7 +894,11 @@ test('LINE completion confirms an endpoint change before setting and testing it'
     });
     assert.equal(asked, scenario.answer === undefined ? 0 : 1);
     assert.match(summary, scenario.summary);
-    assert.equal(summary.split('\n')[0], `Webhook URL: ${endpoint}`);
+    assert.equal(summary.includes('Use webhook'), scenario.reminder);
+    if (!scenario.testSuccess) {
+      assert.doesNotMatch(summary, /已接上/);
+      assert.match(summary, /已儲存.*\/webhook check/);
+    }
     assert.deepEqual(
       api.calls.map(({ method }) => method),
       scenario.methods,

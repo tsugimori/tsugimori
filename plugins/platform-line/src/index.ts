@@ -3,7 +3,10 @@ import type {
   InboundMessage,
   OutboundMessage,
   PlatformAdapter,
+  PlatformFactory,
   SendPart,
+  WebhookIngress,
+  WebhookRoute,
 } from '@tsugimori/plugin-sdk';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 
@@ -29,7 +32,7 @@ import {
   validToken,
 } from './setup.ts';
 import { mapEvent } from './updates.ts';
-import { listenAddress, registerWebhook, webhook } from './webhook.ts';
+import { webhook, webhookPath } from './webhook.ts';
 
 const messagesPerRequest = 5;
 const profileTtlMs = 5 * 60_000;
@@ -68,7 +71,7 @@ class Lru<Value> {
 }
 
 interface LineOptions {
-  listen?: string;
+  ingress: WebhookIngress;
   replyTokenTtlMs?: number;
   secret: string;
   token: string;
@@ -77,7 +80,7 @@ interface LineOptions {
 interface Listener {
   controller: AbortController;
   signal: AbortSignal;
-  start: ReturnType<typeof registerWebhook>;
+  start: Promise<() => Promise<void>>;
   stop?: Promise<void>;
 }
 
@@ -138,7 +141,7 @@ export class LineAdapter implements PlatformAdapter {
       ? AbortSignal.any([ctx.signal, controller.signal])
       : controller.signal;
     const route = (request: IncomingMessage, response: ServerResponse) => {
-      if (signal.aborted) {
+      if (request.method !== 'POST' || signal.aborted) {
         response.writeHead(404).end();
         return;
       }
@@ -169,12 +172,8 @@ export class LineAdapter implements PlatformAdapter {
     }
   }
 
-  async #start(
-    route: Parameters<typeof registerWebhook>[2],
-    signal: AbortSignal,
-  ) {
+  async #start(route: WebhookRoute, signal: AbortSignal) {
     signal.throwIfAborted();
-    const address = listenAddress(this.#options.listen);
     try {
       this.#botIdentity = await this.#api.identity(
         AbortSignal.any([signal, AbortSignal.timeout(8000)]),
@@ -195,7 +194,25 @@ export class LineAdapter implements PlatformAdapter {
     }
     signal.throwIfAborted();
     try {
-      return await registerWebhook(address, this.id, route, signal);
+      const path = webhookPath(this.id);
+      const release = await this.#options.ingress.register(path, route, signal);
+      try {
+        const releaseAlias = await this.#options.ingress.register(
+          path + 'webhook',
+          (request, response) => {
+            if (request.url?.split('?', 1)[0] === path + 'webhook')
+              route(request, response);
+            else response.writeHead(404).end();
+          },
+          signal,
+        );
+        return async () => {
+          await Promise.all([release(), releaseAlias()]);
+        };
+      } catch (error) {
+        await release();
+        throw error;
+      }
     } catch (error) {
       signal.throwIfAborted();
       const failure = lineListenFailure(error);
@@ -371,6 +388,23 @@ export class LineAdapter implements PlatformAdapter {
   }
 }
 
+const line: PlatformFactory = (config, ctx) => {
+  const [secretEnv, tokenEnv] = lineCredentials(config);
+  const secret = ctx.credential(secretEnv);
+  const token = ctx.credential(tokenEnv);
+  if (!secret?.trim() || !validToken(token))
+    throw new Error('LINE needs a channel secret and channel access token.');
+  if (!ctx.webhookIngress)
+    throw new Error('LINE needs gateway webhook ingress.');
+  return new LineAdapter({ fetch: ctx.fetch }, config.id, {
+    secret,
+    token,
+    ingress: ctx.webhookIngress,
+    replyTokenTtlMs: config.replyTokenTtlMs as number | undefined,
+  });
+};
+line.requires = ['webhook'];
+
 export default definePlugin({
   name: 'platform-line',
   checks: lineChecks,
@@ -378,21 +412,5 @@ export default definePlugin({
   configSchema: lineConfigSchema,
   credentialNames: lineCredentials,
   setupSteps: lineSetup,
-  adapters: {
-    line(config, ctx) {
-      const [secretEnv, tokenEnv] = lineCredentials(config);
-      const secret = ctx.credential(secretEnv);
-      const token = ctx.credential(tokenEnv);
-      if (!secret?.trim() || !validToken(token))
-        throw new Error(
-          'LINE needs a channel secret and channel access token.',
-        );
-      return new LineAdapter({ fetch: ctx.fetch }, config.id, {
-        secret,
-        token,
-        listen: config.listen as string | undefined,
-        replyTokenTtlMs: config.replyTokenTtlMs as number | undefined,
-      });
-    },
-  },
+  adapters: { line },
 });

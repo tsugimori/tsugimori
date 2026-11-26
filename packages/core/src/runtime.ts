@@ -254,7 +254,11 @@ export class Runtime {
     );
   }
 
-  async apply(snapshot: WorkspaceConfig, removal?: RemovalTarget) {
+  async apply(
+    snapshot: WorkspaceConfig,
+    removal?: RemovalTarget,
+    configureWebhooks?: () => Promise<void>,
+  ) {
     const { workspace, registry } = this.#deps;
     const config = parseConfig(JSON.stringify(snapshot.config), registry);
     const env = new Map(snapshot.env);
@@ -288,6 +292,7 @@ export class Runtime {
     const reports = await measure('core', () => checks.core(current));
     const conflicts = reports.filter(({ id }) => id === 'listener-conflict');
     if (conflicts.length) throw new ConfigError(failureText(conflicts));
+    await configureWebhooks?.();
     reports.push(
       ...(await measure('features', () => checks.features(current, registry))),
     );

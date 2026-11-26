@@ -2,6 +2,7 @@ import type {
   AgentQuotaWindow,
   ChatRef,
   TextEntity,
+  WebhookStatus,
 } from '@tsugimori/plugin-sdk';
 import type { ScheduleAddress, Store } from '@tsugimori/storage';
 import type { Tracer } from '@tsugimori/trace';
@@ -14,6 +15,7 @@ import type { Tasks } from './tasks.ts';
 
 import { formatServiceTier } from './agent-settings.ts';
 import { gatewayBuild } from './version.ts';
+import { webhookCheckItem } from './webhooks.ts';
 
 const messages = {
   en: {
@@ -172,6 +174,7 @@ interface StatusDependencies {
   store: Pick<Store, 'approvalStatus' | 'getSummaryStatus' | 'scheduleStatus'>;
   tasks: Pick<Tasks, 'status'>;
   trace: Pick<Tracer, 'latestSessionSpan' | 'sessionHistory'>;
+  webhook?: WebhookStatus;
 }
 
 export function statusCard(
@@ -181,6 +184,7 @@ export function statusCard(
     sandboxEnabled,
     showRecentApproval,
     startedAt,
+    webhook = { state: 'unconfigured' },
     store,
     tasks,
     trace,
@@ -238,9 +242,13 @@ export function statusCard(
     ...platforms.map((entry) => ({ name: entry.id, entry })),
     ...agents.map((entry) => ({ name: agentName(entry), entry })),
   ];
-  const failures = runtime.environmentReports.filter(
-    ({ status }) => status === 'fail',
-  ).length;
+  const ingress = webhookCheckItem(webhook);
+  const failures = [
+    ingress,
+    ...runtime.environmentReports.filter(
+      ({ capabilities }) => !capabilities?.includes('webhook'),
+    ),
+  ].filter(({ status }) => status === 'fail').length;
   const health = components.some(({ entry }) => entry.state === 'unavailable')
     ? '🔴'
     : failures ||
@@ -393,6 +401,18 @@ export function statusCard(
   }
 
   section('🖥', m.system);
+  text += '\n';
+  inlineField(
+    'Webhook',
+    [
+      locale === 'zh-TW'
+        ? (ingress.localized?.[locale]?.detail ?? ingress.detail)
+        : ingress.detail,
+      webhook.baseUrl,
+    ]
+      .filter(Boolean)
+      .join(separator),
+  );
   const runningNames = components
     .filter(({ entry }) => entry.state === 'running')
     .map(({ name }) => name);

@@ -3,6 +3,13 @@ import type { AdminWorkspace } from '@tsugimori/plugin-sdk';
 export type Locale = AdminWorkspace['locale'];
 
 const en = {
+  webhook: 'Webhook',
+  webhookState: {
+    ok: 'OK',
+    checking: 'Checking',
+    unconfigured: 'Unconfigured',
+    failed: 'Failed',
+  },
   agents: 'Agents',
   live: 'Live',
   reconnecting: 'Reconnecting…',
@@ -144,6 +151,13 @@ const en = {
 };
 
 const zh: typeof en = {
+  webhook: 'Webhook',
+  webhookState: {
+    ok: '正常',
+    checking: '檢查中',
+    unconfigured: '未設定',
+    failed: '失敗',
+  },
   agents: '代理',
   live: '即時',
   reconnecting: '重新連線中…',

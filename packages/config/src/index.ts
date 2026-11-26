@@ -1,9 +1,14 @@
 import type {
   AgentInstanceConfig,
   PlatformInstanceConfig,
+  WebhookConfig,
 } from '@tsugimori/plugin-sdk';
 
-import { parseWebhookBaseUrl } from '@tsugimori/plugin-sdk';
+import {
+  defaultWebhookListen,
+  parseWebhookBaseUrl,
+  parseWebhookListen,
+} from '@tsugimori/plugin-sdk';
 import { Ajv } from 'ajv';
 import { readFileSync, watch as watchDirectory } from 'node:fs';
 import { readFile } from 'node:fs/promises';
@@ -75,7 +80,7 @@ export interface Config {
     ownerSub?: string;
     toolDetails?: { enabled?: boolean; maxChars?: number };
   };
-  webhooks?: { publicBaseUrl?: string };
+  webhooks?: WebhookConfig;
 }
 
 export interface PluginKinds {
@@ -86,6 +91,7 @@ export interface PluginKinds {
 export interface WorkspaceConfig {
   config: Config;
   env: ReadonlyMap<string, string>;
+  warnings?: readonly string[];
 }
 
 export const noPluginKinds: PluginKinds = {
@@ -101,6 +107,7 @@ const validate = new Ajv({
 export function parseConfig(
   contents: string,
   kinds: PluginKinds = noPluginKinds,
+  warn: (message: string) => void = () => {},
 ): Config {
   let value: unknown;
   try {
@@ -123,12 +130,52 @@ export function parseConfig(
   }
   checkEntries(value.platforms, kinds.platformKinds, 'platform');
   checkEntries(value.agents, kinds.agentKinds, 'agent');
-  validateWebhookUrl(value.webhooks?.publicBaseUrl, '/webhooks/publicBaseUrl');
-  for (const [index, entry] of value.platforms.entries()) {
-    if (entry.kind === 'line')
-      validateWebhookUrl(entry.publicUrl, `/platforms/${index}/publicUrl`);
+  if (value.webhooks) {
+    value.webhooks.provider ??= 'manual';
+    validateWebhookUrl(value.webhooks.publicBaseUrl, '/webhooks/publicBaseUrl');
+    if (!parseWebhookListen(value.webhooks.listen))
+      throw new ConfigError(
+        'Invalid tsugimori.json: /webhooks/listen must use 127.0.0.1 or [::1] and a valid port',
+      );
   }
+  const legacy = legacyWebhookListen(value);
+  for (const [index, entry] of value.platforms.entries()) {
+    if (entry.kind !== 'line') continue;
+    if (Object.hasOwn(entry, 'listen'))
+      warn(
+        index === legacy?.index
+          ? `platforms/${index}/listen is used as webhooks.listen for this release; move it to webhooks.listen`
+          : `platforms/${index}/listen is ignored; use webhooks.listen`,
+      );
+    if (Object.hasOwn(entry, 'publicUrl'))
+      warn(
+        `platforms/${index}/publicUrl is ignored; use webhooks.publicBaseUrl`,
+      );
+  }
+  if (legacy && value.webhooks) value.webhooks.listen = legacy.listen;
   return value;
+}
+
+function legacyWebhookListen(config: Config) {
+  if (config.webhooks?.listen !== undefined) return;
+  const fallback = parseWebhookListen(defaultWebhookListen)!;
+  for (const [index, entry] of config.platforms.entries()) {
+    if (entry.kind !== 'line' || typeof entry.listen !== 'string') continue;
+    const address = parseWebhookListen(entry.listen);
+    if (
+      address &&
+      (address.host !== fallback.host || address.port !== fallback.port)
+    )
+      return { index, listen: entry.listen };
+  }
+}
+
+export function webhookListen(config: Config) {
+  return (
+    config.webhooks?.listen ??
+    legacyWebhookListen(config)?.listen ??
+    defaultWebhookListen
+  );
 }
 
 function validateWebhookUrl(value: unknown, path: string) {
@@ -200,7 +247,12 @@ export async function loadConfig(
   workspace: string,
   kinds: PluginKinds = noPluginKinds,
 ): Promise<WorkspaceConfig> {
-  const config = await loadSettings(workspace, kinds);
+  const warnings: string[] = [];
+  const config = parseConfig(
+    await readFile(join(workspace, configFilename), 'utf8'),
+    kinds,
+    (warning) => warnings.push(warning),
+  );
   let env: ReadonlyMap<string, string>;
   try {
     env = parseEnv(await readFile(join(workspace, envFilename), 'utf8'));
@@ -213,7 +265,7 @@ export async function loadConfig(
       throw error;
     env = new Map();
   }
-  return { config, env };
+  return { config, env, warnings };
 }
 
 export function configuredOwner(

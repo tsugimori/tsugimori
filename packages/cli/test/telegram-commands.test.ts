@@ -226,6 +226,7 @@ test(
         'remove',
         'status',
         'thinking',
+        'webhook',
       ],
     );
     assert.ok(

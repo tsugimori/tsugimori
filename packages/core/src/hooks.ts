@@ -17,6 +17,7 @@ export type Logger = (entry: {
   migratedToChatId?: string;
   nextDelayMs?: number | null;
   reason?: string;
+  reasonCode?: string;
   retryAfterMs?: number;
   scheduleId?: string;
   scope?: string;

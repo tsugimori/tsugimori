@@ -87,6 +87,22 @@
       </strong>
     </a>
   </div>
+  <p class="meta webhook-status">
+    <span
+      class:ok={data.webhook.state === 'ok'}
+      class:fail={data.webhook.state === 'failed'}
+      aria-hidden="true"
+    >
+      ●
+    </span>
+    {m.webhook}{ctx.locale === 'zh-TW' ? '：' : ': '}{m.webhookState[
+      data.webhook.state
+    ]}{data.webhook.reason
+      ? (ctx.locale === 'zh-TW' ? '：' : ': ') + data.webhook.reason
+      : ''}
+    {#if data.webhook.baseUrl}
+      · {data.webhook.baseUrl}{/if}
+  </p>
   <div class="section-head">
     <h2>
       {m.chats}
@@ -157,3 +173,15 @@
 {#if data.chats.length < data.totals.chats}<p class="meta limit-note">
     {m.limited(number(data.chats.length), number(data.totals.chats))}
   </p>{/if}
+
+<style>
+  .webhook-status {
+    overflow-wrap: anywhere;
+  }
+  .webhook-status .ok {
+    color: var(--ok);
+  }
+  .webhook-status .fail {
+    color: var(--err);
+  }
+</style>

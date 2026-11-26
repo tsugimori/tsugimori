@@ -5,7 +5,13 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 
-import { noPluginKinds, parseConfig, parseEnv, watch } from '../src/index.ts';
+import {
+  noPluginKinds,
+  parseConfig,
+  parseEnv,
+  watch,
+  webhookListen,
+} from '../src/index.ts';
 
 test('validates workspace JSON and accepts disabled, unregistered plugin kinds', () => {
   const config = parseConfig(
@@ -50,22 +56,26 @@ test('preserves per-agent compaction thresholds and rejects invalid counts', () 
     assert.throws(() => compactAt(invalid), /\/agents\/0\/compactAt/);
 });
 
-test('validates public webhook base URLs at workspace and LINE instance scope', () => {
+test('validates public webhook base URLs and maps legacy configurations to manual', () => {
   const workspace = (publicBaseUrl: unknown) =>
     parseConfig(JSON.stringify({ webhooks: { publicBaseUrl } }));
-  const line = (publicUrl: unknown) =>
-    parseConfig(
-      JSON.stringify({
-        platforms: [{ kind: 'line', id: 'main', enabled: false, publicUrl }],
-      }),
-    );
-  assert.equal(
-    workspace('https://webhooks.example.com').webhooks?.publicBaseUrl,
-    'https://webhooks.example.com',
+  const config = workspace('https://webhooks.example.com');
+  assert.equal(config.webhooks?.publicBaseUrl, 'https://webhooks.example.com');
+  assert.equal(config.webhooks?.provider, 'manual');
+  assert.throws(
+    () => parseConfig('{"webhooks":{"provider":"manual"}}'),
+    /required/,
   );
-  assert.equal(
-    line('https://webhooks.example.com/prefix/').platforms[0]?.publicUrl,
-    'https://webhooks.example.com/prefix/',
+  assert.throws(
+    () => parseConfig('{"webhooks":{"listen":"127.0.0.1:8789"}}'),
+    /required/,
+  );
+  assert.throws(
+    () =>
+      parseConfig(
+        '{"webhooks":{"provider":"cloudflare","listen":"127.0.0.1:65536"}}',
+      ),
+    /webhooks\/listen/,
   );
   for (const value of [
     null,
@@ -78,8 +88,33 @@ test('validates public webhook base URLs at workspace and LINE instance scope', 
     'https://%00/path',
   ]) {
     assert.throws(() => workspace(value), /\/webhooks\/publicBaseUrl/);
-    assert.throws(() => line(value), /\/platforms\/0\/publicUrl/);
   }
+});
+
+test('warns about legacy LINE settings and adopts the first valid nondefault listener', () => {
+  const platforms = [
+    { kind: 'line', id: 'main', listen: '0.0.0.0:42', publicUrl: false },
+    { kind: 'line', id: 'team', listen: '[::1]:9876', publicUrl: 'invalid' },
+  ];
+  const kinds = { ...noPluginKinds, platformKinds: new Set(['line']) };
+  const warnings: string[] = [];
+  const load = (webhooks?: object) =>
+    parseConfig(JSON.stringify({ platforms, webhooks }), kinds, (warning) =>
+      warnings.push(warning),
+    );
+  assert.equal(webhookListen(load()), '[::1]:9876');
+  assert.deepEqual(warnings, [
+    'platforms/0/listen is ignored; use webhooks.listen',
+    'platforms/0/publicUrl is ignored; use webhooks.publicBaseUrl',
+    'platforms/1/listen is used as webhooks.listen for this release; move it to webhooks.listen',
+    'platforms/1/publicUrl is ignored; use webhooks.publicBaseUrl',
+  ]);
+  warnings.length = 0;
+  assert.equal(
+    webhookListen(load({ provider: 'cloudflare', listen: '127.0.0.1:12345' })),
+    '127.0.0.1:12345',
+  );
+  assert.ok(warnings.every((message) => message.includes('is ignored')));
 });
 
 test('validates and preserves optional per-agent service tiers', () => {

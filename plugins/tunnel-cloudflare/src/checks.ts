@@ -1,7 +1,11 @@
 import { definePlugin } from '@tsugimori/plugin-sdk';
 
+import { cloudflareApi, cloudflareToken } from './api.ts';
+import { cloudflareWebhook } from './webhooks.ts';
+
 export default definePlugin({
   name: 'tunnel-cloudflare',
+  webhookProviders: [cloudflareWebhook],
   async checks({ credential, entry, fetch, runCommand }) {
     let cloudflared = false;
     try {
@@ -43,21 +47,15 @@ export default definePlugin({
     if (!named) return items;
     const web = entry.options?.web as
       Pick<typeof named, 'accessTeam' | 'ownerEmail' | 'ownerSub'> | undefined;
-    const token = credential(named.tokenEnv ?? 'CLOUDFLARE_API_TOKEN');
+    const token = cloudflareToken(credential, named.tokenEnv);
     let valid = false;
     if (token) {
       try {
-        const result = await fetch(
-          `https://api.cloudflare.com/client/v4/zones/${named.zoneId}/dns_records?per_page=5`,
-          {
-            headers: { authorization: `Bearer ${token}` },
-            redirect: 'error',
-            signal: AbortSignal.timeout(5_000),
-          },
-        );
-        valid =
-          result.ok &&
-          ((await result.json()) as { success?: boolean }).success === true;
+        await cloudflareApi(
+          token,
+          fetch,
+        )(`/zones/${named.zoneId}/dns_records?per_page=5`);
+        valid = true;
       } catch {
         // Report only the state. Request details can contain credentials.
       }

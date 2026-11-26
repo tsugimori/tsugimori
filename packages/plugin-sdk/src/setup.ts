@@ -6,6 +6,7 @@ import type {
   PluginInstanceConfig,
   RunResult,
 } from './index.ts';
+import type { WebhookConfig } from './webhooks.ts';
 
 interface CommandInput {
   close(): void;
@@ -50,7 +51,7 @@ export interface CheckContext extends PluginFactoryContext {
   runCommand: CommandRunner;
   /** Startup checks can leave network probes to the adapter's start method. */
   startup?: boolean;
-  webhooks?: Readonly<{ publicBaseUrl?: string }>;
+  webhooks?: Readonly<WebhookConfig>;
 }
 
 export interface CheckItem {
@@ -66,6 +67,7 @@ export interface CheckItem {
 export interface SetupPatch {
   entry?: Partial<PluginInstanceConfig> & Record<string, unknown>;
   ownerId?: string;
+  webhooks?: Partial<WebhookConfig>;
 }
 
 export interface PromptChoice {

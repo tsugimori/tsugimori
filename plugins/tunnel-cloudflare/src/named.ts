@@ -12,6 +12,12 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
 
 import {
+  cloudflareApi,
+  cloudflareId,
+  cloudflareTunnelId,
+  record,
+} from './api.ts';
+import {
   close,
   listen,
   originPath,
@@ -46,14 +52,6 @@ interface Route {
 }
 
 const marker = 'tsugimori';
-const recordId = /^[\da-f]{32}$/i;
-
-function record(value: unknown) {
-  return value && typeof value === 'object' && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : {};
-}
-
 export class NamedTunnel implements TunnelProvider {
   readonly id = 'cloudflare-named';
   readonly #deps: NamedDependencies;
@@ -63,19 +61,21 @@ export class NamedTunnel implements TunnelProvider {
   readonly #deleting = new Map<string, Promise<void>>();
   readonly #pending = new Set<string>();
   readonly #server;
+  readonly #api: ReturnType<typeof cloudflareApi>;
   #started?: Promise<number>;
   #timer?: NodeJS.Timeout;
 
   constructor(deps: NamedDependencies, config: NamedConfig) {
     if (
-      !recordId.test(config.zoneId) ||
-      !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(config.tunnelId) ||
+      !cloudflareId.test(config.zoneId) ||
+      !cloudflareTunnelId.test(config.tunnelId) ||
       !/^[a-z0-9-]+(?:\.[a-z0-9-]+)+$/.test(config.domain) ||
       !config.token
     )
       throw new Error('Invalid Cloudflare named tunnel configuration');
     this.#deps = deps;
     this.#config = config;
+    this.#api = cloudflareApi(config.token, deps.fetch);
     this.#server = createServer((request, response) => {
       void (async () => {
         const host = request.headers.host
@@ -153,7 +153,7 @@ export class NamedTunnel implements TunnelProvider {
       signal,
     );
     const dnsId = record(data.result).id;
-    if (typeof dnsId !== 'string' || !recordId.test(dnsId))
+    if (typeof dnsId !== 'string' || !cloudflareId.test(dnsId))
       throw new ToolFailure('Cloudflare returned an invalid DNS record ID');
     if (signal.aborted || endpoint.closed?.aborted) {
       await this.#remove(dnsId);
@@ -218,7 +218,7 @@ export class NamedTunnel implements TunnelProvider {
           type === 'CNAME' &&
           comment === marker &&
           typeof id === 'string' &&
-          recordId.test(id) &&
+          cloudflareId.test(id) &&
           typeof name === 'string' &&
           this.#ownedHost(name) &&
           !live.has(name.toLowerCase())
@@ -247,25 +247,16 @@ export class NamedTunnel implements TunnelProvider {
     body?: object,
     signal?: AbortSignal,
   ) {
-    const timeout = AbortSignal.timeout(8_000);
-    const response = await (this.#deps.fetch ?? fetch)(
-      `https://api.cloudflare.com/client/v4/zones/${this.#config.zoneId}/dns_records${path}`,
-      {
+    try {
+      return await this.#api(
+        `/zones/${this.#config.zoneId}/dns_records${path}`,
         method,
-        headers: {
-          Authorization: `Bearer ${this.#config.token}`,
-          'Content-Type': 'application/json',
-        },
-        body: body ? JSON.stringify(body) : undefined,
-        redirect: 'error',
-        signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
-      },
-    );
-    if (method === 'DELETE' && response.status === 404) return {};
-    const data = record(await response.json());
-    if (!response.ok || data.success !== true)
+        body,
+        signal,
+      );
+    } catch {
       throw new ToolFailure('Cloudflare DNS operation failed');
-    return data;
+    }
   }
 
   #remove(id: string) {

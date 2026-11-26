@@ -325,6 +325,7 @@ const agents: AdminAgent[] = [
   },
 ];
 const overview: AdminOverview = {
+  webhook: { state: 'unconfigured' },
   chats: [chat, dm],
   totals: { chats: 2, failedToday: 1, pendingApprovals: 1, tasksToday: 42 },
 };

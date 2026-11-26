@@ -44,6 +44,10 @@ const descriptions = {
     en: 'Show or set reasoning effort (default to reset)',
     'zh-TW': '查看或設定推理強度（default 還原）',
   },
+  webhook: {
+    en: 'Configure or check webhook ingress',
+    'zh-TW': '設定或檢查 Webhook',
+  },
 };
 
 export type Command = { args: string; name: keyof typeof descriptions };

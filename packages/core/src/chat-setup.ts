@@ -112,7 +112,8 @@ export class ChatSetup {
         command !== 'add' &&
         command !== 'login' &&
         command !== 'remove' &&
-        command !== 'status',
+        command !== 'status' &&
+        command !== 'webhook',
       ) ||
       /\b(?:\d{5,}:[A-Za-z0-9_-]{25,}|sk-ant-oat[A-Za-z0-9_-]{20,})\b/.test(
         message.text,
@@ -246,6 +247,15 @@ export class ChatSetup {
           cancelSignal: cancel.signal,
           measure: (step, run) =>
             trace.span('setup.step', { adapterId, step }, run),
+          waitForAttach: async (id) => {
+            const wait = AbortSignal.any([signal, AbortSignal.timeout(15_000)]);
+            try {
+              while (!runtime.getAdapter(id))
+                await delay(50, undefined, { signal: wait });
+            } catch (error) {
+              if (signal.aborted) throw error;
+            }
+          },
           waitForDetach: async (id) => {
             const wait = AbortSignal.any([signal, AbortSignal.timeout(15_000)]);
             while (runtime.getAgent(id))
@@ -373,6 +383,10 @@ export class ChatSetup {
         if (cancel.signal.aborted) return;
         const finish = (text: string) =>
           show([text, result.summary].filter(Boolean).join('\n'));
+        if (result.category === 'webhook' || result.summaryOnly) {
+          if (result.summary) await show(result.summary);
+          return;
+        }
         if (!result.enabled) {
           await finish(m.disabled(result.id));
           return;

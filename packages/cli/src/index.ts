@@ -21,6 +21,7 @@ import {
   removalMessages,
   SetupCancelled,
   systemInstallPlan,
+  Webhooks,
 } from '@tsugimori/core';
 import { SetupError } from '@tsugimori/core';
 import sandbox from '@tsugimori/exec-local-sandbox';
@@ -31,9 +32,10 @@ import tunnel, { NamedTunnel, QuickTunnel } from '@tsugimori/tunnel-cloudflare';
 import { AdminServer, createAccessVerifier } from '@tsugimori/web';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import { isDeepStrictEqual, parseArgs } from 'node:util';
 
-import { listenForRemoval, runRemoval } from './removal.ts';
+import { listenForRemoval, readGatewayWebhook, runRemoval } from './removal.ts';
 import { doctorText, runSetup, terminalIO } from './setup.ts';
 
 const usage =
@@ -161,8 +163,25 @@ export async function main(
     );
     const io = terminalIO();
     try {
-      const setup = new GuidedSetup({ ...deps, registry, store, workspace });
-      const result = await setup.run(request, io);
+      const requiresWebhook =
+        request.mode === 'add' &&
+        request.category === 'platform' &&
+        registry.requiresWebhook(request.kind);
+      const webhook = requiresWebhook
+        ? cliWebhookSetup(workspace, registry, deps, io.signal)
+        : undefined;
+      const setup = new GuidedSetup({
+        ...deps,
+        registry,
+        store,
+        workspace,
+        webhookIngress: webhook?.ingress,
+      });
+      const result = await setup.run(request, {
+        ...io,
+        webhookStatus: webhook?.status,
+        waitForAttach: webhook?.waitForAttach,
+      });
       console.log(
         [
           `Saved ${result.id}. A running gateway will attach it after reloading the workspace.`,
@@ -187,7 +206,8 @@ export async function main(
     case 'doctor': {
       const checks = new EnvironmentChecks(deps, workspace);
       const snapshot = await loadConfig(workspace, registry);
-      const items = await checks.all(snapshot, registry);
+      const liveWebhook = await readGatewayWebhook(workspace);
+      const items = await checks.all(snapshot, registry, liveWebhook?.status);
       await systemInstallPlan(
         checks.context({ id: 'core', kind: 'core' }, snapshot.env),
         items,
@@ -259,6 +279,58 @@ export async function main(
   }
 }
 
+function cliWebhookSetup(
+  workspace: string,
+  registry: PluginRegistry,
+  deps: SetupDependencies,
+  signal: AbortSignal,
+) {
+  let live: Awaited<ReturnType<typeof readGatewayWebhook>>;
+  let offline: ReturnType<Webhooks['status']> = { state: 'unconfigured' };
+  return {
+    async status() {
+      live = await readGatewayWebhook(workspace);
+      if (live) return live.status;
+      const ingress = new Webhooks({ ...deps, registry, workspace });
+      try {
+        await ingress.configure(await loadConfig(workspace, registry));
+        offline = await ingress.check();
+        return offline;
+      } finally {
+        await ingress.stop();
+      }
+    },
+    async waitForAttach(id: string) {
+      if (!live) return;
+      const wait = AbortSignal.any([signal, AbortSignal.timeout(15_000)]);
+      try {
+        do {
+          live = await readGatewayWebhook(workspace, id);
+          if (!live || live.attached) return;
+          await delay(50, undefined, { signal: wait });
+        } while (!wait.aborted);
+      } catch (error) {
+        if (!wait.aborted || signal.aborted) throw error;
+      }
+    },
+    ingress: {
+      status: () => live?.status ?? offline,
+      url(path: string) {
+        const key = path.replace(/\/$/, '') || '/';
+        if (
+          live?.status.state === 'ok' &&
+          live.status.baseUrl &&
+          live.paths.includes(key)
+        )
+          return live.status.baseUrl + path;
+      },
+      async register() {
+        throw new Error('Webhook routes are registered by the gateway');
+      },
+    },
+  };
+}
+
 async function initialize(workspace: string, registry: PluginRegistry) {
   for (const dir of ['data', 'rules', 'platforms', 'chats']) {
     await mkdir(join(workspace, dir), { recursive: true });
@@ -321,6 +393,7 @@ async function start(
   const close = await listenForRemoval(workspace, {
     plan: async (target) => (await gateway()).removal.plan(target),
     execute: async (plan) => (await gateway()).removeInstance(plan),
+    webhookInfo: async (id) => (await gateway()).webhookInfo(id),
   });
   try {
     await startGateway(workspace, registry, deps, ready.resolve);

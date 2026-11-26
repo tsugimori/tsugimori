@@ -7,6 +7,40 @@ const messages = {
       success: 'Owner paired.',
       invalid: 'Pairing code is invalid or expired.',
     },
+    webhook: {
+      states: {
+        unconfigured: 'Unconfigured',
+        checking: 'Checking',
+        ok: 'OK',
+        failed: 'Failed',
+      },
+      heading: 'Webhook',
+      setup: 'Set up',
+      setupWebhook: 'Set up webhook',
+      check: 'Check again',
+      providers: 'Choose a webhook ingress provider.',
+      manual: 'Enter a URL manually',
+      askUrl: 'Enter the public HTTPS base URL that forwards to the gateway.',
+      invalidUrl:
+        'Enter a valid HTTPS base URL without credentials, a query, or a fragment.',
+      missingProvider: (id: string) => `Webhook provider ${id} is unavailable.`,
+      unreachable: (error: string) =>
+        `The gateway is unreachable from the public URL: ${error}`,
+      wrongTarget: (status: number) =>
+        `The public URL responded, but it did not reach this tsugimori gateway (HTTP ${status}). Check the tunnel or reverse proxy route.`,
+      suffix: ' (needs webhook)',
+      blocked: (kind: string, state: string) =>
+        `${kind} needs a publicly reachable webhook. Webhook is currently ${state}. Set up webhook ingress first.`,
+      failed: (reason: string) => `check failed: ${reason}`,
+      verify: 'Verify the public webhook route',
+      saved: 'Webhook ingress is configured and the public check passed.',
+      checked: (age: string) => `Checked ${age}`,
+      use: 'Use /webhook, /webhook setup, or /webhook check.',
+      changed:
+        'Webhook settings changed during setup. Run /webhook setup again.',
+      occupied:
+        'The webhook listener is already in use. Run /webhook check in the running gateway.',
+    },
     addUsage:
       'Usage: /add <agent|platform> <kind> [--id <id>]. Omit --id to choose a name during setup.',
     loginUsage: 'Usage: /login <agentId>',
@@ -156,6 +190,37 @@ const messages = {
   'zh-TW': {
     environment: '環境檢查有問題：',
     pairing: { success: '已完成主人配對。', invalid: '配對碼無效或已過期。' },
+    webhook: {
+      states: {
+        unconfigured: '未設定',
+        checking: '檢查中',
+        ok: '正常',
+        failed: '檢查失敗',
+      },
+      heading: 'Webhook',
+      setup: '設定',
+      setupWebhook: '設定 webhook',
+      check: '重新檢查',
+      providers: '選擇 Webhook 入口服務。',
+      manual: '手動填網址',
+      askUrl: '請輸入會轉送到閘道器的公開 HTTPS 基底網址。',
+      invalidUrl: '請輸入不含憑證、查詢參數或片段的有效 HTTPS 基底網址。',
+      missingProvider: (id: string) => `無法使用 Webhook 入口服務 ${id}。`,
+      unreachable: (error: string) => `從公開網址連不到 gateway：${error}`,
+      wrongTarget: (status: number) =>
+        `公開網址有回應，但不是這個 tsugimori（HTTP ${status}）。請檢查 tunnel 或反向代理的路由`,
+      suffix: '（需先設定 webhook）',
+      blocked: (kind: string, state: string) =>
+        `${kind} 需要可以從外部連進來的 webhook，目前 webhook ${state}。請先完成 webhook 設定。`,
+      failed: (reason: string) => `檢查失敗：${reason}`,
+      verify: '驗證公開的 Webhook 路由',
+      saved: 'Webhook 已設定，公開路由驗證通過。',
+      checked: (age: string) => `${age}檢查`,
+      use: '請使用 /webhook、/webhook setup 或 /webhook check。',
+      changed: '設定期間 Webhook 設定已變更，請重新執行 /webhook setup。',
+      occupied:
+        'Webhook 監聽位址已使用。請在執行中的閘道器使用 /webhook check。',
+    },
     addUsage:
       '用法：/add <agent|platform> <kind> [--id <id>]。省略 --id 可在設定時選擇名稱。',
     loginUsage: '用法：/login <agentId>',

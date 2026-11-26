@@ -10,6 +10,7 @@ import type {
   PrincipalRef,
   ResourceRef,
   TextRange,
+  WebhookConfig,
 } from '@tsugimori/plugin-sdk';
 
 export interface ChatRecord extends ChatRef {
@@ -139,10 +140,11 @@ export type ApprovalContinuation =
   | { args: unknown; kind: 'tool'; name: string };
 
 export interface SetupRun {
-  category: 'agent' | 'platform';
+  category: 'agent' | 'platform' | 'webhook';
   draft: {
     entry: PluginInstanceConfig & Record<string, unknown>;
     ownerId?: string;
+    webhooks?: WebhookConfig;
   };
   id: string;
   lease: string | null;

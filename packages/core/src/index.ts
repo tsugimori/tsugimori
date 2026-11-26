@@ -13,6 +13,7 @@ import type {
   ScheduledInboundEvent,
   SetupDependencies,
   TunnelProvider,
+  WebhookStatus,
 } from '@tsugimori/plugin-sdk';
 import type {
   ApprovalRecord,
@@ -77,6 +78,7 @@ import { systemMessages } from './system-messages.ts';
 import { reply, Tasks } from './tasks.ts';
 import { ToolDetails } from './tool-details.ts';
 import { shouldTrigger } from './trigger.ts';
+import { Webhooks } from './webhooks.ts';
 
 export { EnvironmentChecks, PluginRegistry, shouldTrigger };
 export { runCommand } from './commands.ts';
@@ -109,6 +111,28 @@ function commandChoices(values: Iterable<string>): PromptChoice[] {
   return [...new Set(values)].map((value) => ({ value, label: value }));
 }
 
+function webhookStatusLine(status: WebhookStatus, locale: Config['locale']) {
+  const m = systemMessages(locale).webhook;
+  const age = status.checkedAt
+    ? new Intl.RelativeTimeFormat(locale, { numeric: 'auto' }).format(
+        -Math.max(
+          0,
+          Math.round((Date.now() - Date.parse(status.checkedAt)) / 60_000),
+        ),
+        'minute',
+      )
+    : undefined;
+  return [
+    m.heading + (locale === 'zh-TW' ? '：' : ': ') + m.states[status.state],
+    status.provider,
+    status.baseUrl,
+    age && m.checked(age),
+    status.reason,
+  ]
+    .filter(Boolean)
+    .join(' · ');
+}
+
 const choicesPerPage = 80;
 
 export class Gateway {
@@ -116,6 +140,8 @@ export class Gateway {
   readonly #registry: PluginRegistry;
   readonly #trace: Tracer;
   readonly #runtime: Runtime;
+  readonly #webhooks: Webhooks;
+  #configWarnings: readonly string[] = [];
   readonly #hooks: HookRunner;
   readonly #auth: Auth;
   readonly #outbound: Outbound;
@@ -166,6 +192,7 @@ export class Gateway {
       config: () => this.#runtime.config,
       agentInfo: (id) => this.#runtime.adminAgentInfo(id),
       reloadListeners: this.#adminReload,
+      webhook: () => this.#webhooks.status(),
       route: (chat, current) => this.#tasks.route(chat, current),
     });
     this.#registry = registry;
@@ -174,10 +201,18 @@ export class Gateway {
       new Tracer(store, {
         onError: () => log({ level: 'error', event: 'trace.flush_failed' }),
       });
+    this.#webhooks = new Webhooks({
+      ...setup,
+      registry,
+      workspace,
+      log,
+      trace: this.#trace,
+      onStatus: () => this.#notifyAdminReload(),
+    });
     this.#runtime = new Runtime({
       workspace,
       registry,
-      checks: new EnvironmentChecks(setup, workspace),
+      checks: new EnvironmentChecks(setup, workspace, this.#webhooks),
       trace: this.#trace,
       store,
       log,
@@ -242,7 +277,13 @@ export class Gateway {
     });
     this.#chatSetup = new ChatSetup({
       choices: this.#chatChoices,
-      setup: new GuidedSetup({ ...setup, store, workspace, registry }),
+      setup: new GuidedSetup({
+        ...setup,
+        store,
+        workspace,
+        registry,
+        webhooks: this.#webhooks,
+      }),
       isOwner: (adapterId, userId) => this.#auth.isOwner({ adapterId, userId }),
       runtime: this.#runtime,
       log,
@@ -438,6 +479,7 @@ export class Gateway {
     });
     this.#state = 'running';
     this.#scheduler.start();
+    this.#webhooks.start();
     if (this.#previews) this.#previews.start();
     else store.closePreviewsOnRestart(Date.now());
     log({ level: 'info', event: 'gateway.started' });
@@ -479,7 +521,15 @@ export class Gateway {
     this.#applyingConfig = true;
     try {
       await this.#expiry;
-      await this.#runtime.apply(snapshot, removal);
+      await this.#runtime.apply(snapshot, removal, () =>
+        this.#webhooks.configure(snapshot, this.#state === 'running'),
+      );
+      const warnings = snapshot.warnings ?? [];
+      if (!isDeepStrictEqual(warnings, this.#configWarnings)) {
+        for (const reason of warnings)
+          this.#deps.log({ level: 'warn', event: 'config.warning', reason });
+        this.#configWarnings = warnings;
+      }
       this.#commandMenus.refresh();
       this.#restoreApprovalPrompts();
       if (this.#deps.namedPreview) {
@@ -492,15 +542,29 @@ export class Gateway {
       this.#applyingConfig = false;
     }
     if (this.#state === 'running') {
-      for (const listener of this.#adminReload) {
-        try {
-          listener({ kind: 'reload' });
-        } catch {
-          this.#deps.log({ level: 'error', event: 'admin.listener_failed' });
-        }
-      }
+      this.#notifyAdminReload();
       this.#scheduler.tick();
       this.#reportPlatformNotices();
+    }
+  }
+
+  webhookInfo(platformId?: string) {
+    return {
+      status: this.#webhooks.status(),
+      paths: this.#webhooks.paths(),
+      attached:
+        platformId !== undefined && !!this.#runtime.getAdapter(platformId),
+    };
+  }
+
+  #notifyAdminReload() {
+    if (this.#state !== 'running') return;
+    for (const listener of this.#adminReload) {
+      try {
+        listener({ kind: 'reload' });
+      } catch {
+        this.#deps.log({ level: 'error', event: 'admin.listener_failed' });
+      }
     }
   }
 
@@ -695,6 +759,7 @@ export class Gateway {
         await this.#summaries.stop();
         await this.#expiry;
         await this.#runtime.stop();
+        await this.#webhooks.stop();
         await this.idle();
         await this.#scheduler.idle();
         await this.#previews?.stop();
@@ -903,7 +968,8 @@ export class Gateway {
     const privateCommand =
       command?.name === 'pair' ||
       command?.name === 'login' ||
-      command?.name === 'add';
+      command?.name === 'add' ||
+      command?.name === 'webhook';
     const stored = this.#trace.span('inbound.received', { ...chat }, () =>
       store.recordInbound(
         {
@@ -1547,6 +1613,7 @@ export class Gateway {
       text: string,
       choices: readonly PromptChoice[] = [],
       fallback?: string,
+      choiceCommand = name,
     ) => {
       if (!choices.length) {
         if (finish) await finish(text);
@@ -1562,7 +1629,9 @@ export class Gateway {
               text,
               fallback ??
                 m.choices.values(
-                  choices.map(({ value }) => `/${name} ${value}`).join(' · '),
+                  choices
+                    .map(({ value }) => `/${choiceCommand} ${value}`)
+                    .join(' · '),
                 ),
             ].join('\n'),
           ),
@@ -1606,13 +1675,13 @@ export class Gateway {
                     adapterId: adapter.id,
                     userId: message.userId,
                   }),
-                  { name, args: choice.value },
+                  { name: choiceCommand, args: choice.value },
                   edit,
                 ),
             );
           },
           {
-            command: name,
+            command: choiceCommand,
             deliver: (outbound) => this.#outbound.send(adapter, outbound),
             expires: true,
           },
@@ -1645,6 +1714,32 @@ export class Gateway {
             .join('\n'),
         );
         break;
+      case 'webhook': {
+        const w = m.webhook;
+        if (args === 'setup') {
+          await send(w.providers, [
+            ...(this.#webhooks.provider('cloudflare')
+              ? [{ value: 'setup cloudflare', label: 'Cloudflare Tunnel' }]
+              : []),
+            { value: 'setup manual', label: w.manual },
+          ]);
+        } else if (args === 'setup manual' || args === 'setup cloudflare') {
+          const kind = args.slice('setup '.length);
+          if (!this.#webhooks.provider(kind))
+            await send(w.missingProvider(kind));
+          else await setup({ mode: 'add', category: 'webhook', kind });
+        } else if (args === 'check') {
+          await send(
+            webhookStatusLine(await this.#webhooks.check(true), locale),
+          );
+        } else if (!args) {
+          await send(webhookStatusLine(this.#webhooks.status(), locale), [
+            { value: 'setup', label: w.setup },
+            { value: 'check', label: w.check },
+          ]);
+        } else await send(w.use);
+        break;
+      }
       case 'add': {
         if (!args) {
           await send(m.addUsage, [
@@ -1666,12 +1761,26 @@ export class Gateway {
             args === 'agent'
               ? this.#registry.agentKinds
               : this.#registry.platformKinds;
+          const choices = [...kinds].map((kind) => ({
+            value: `${args} ${kind}`,
+            label:
+              kind +
+              (args === 'platform' &&
+              this.#registry.requiresWebhook(kind) &&
+              this.#webhooks.status().state !== 'ok'
+                ? m.webhook.suffix
+                : ''),
+          }));
           await send(
             kinds.size ? m.choices.addKind(args) : m.choices.noPlugins(args),
-            [...kinds].map((kind) => ({
-              value: `${args} ${kind}`,
-              label: kind,
-            })),
+            choices,
+            m.choices.values(
+              choices
+                .map(
+                  ({ label, value }) => `/add ${value.split(' ')[0]} ${label}`,
+                )
+                .join(' · '),
+            ),
           );
           break;
         }
@@ -1682,6 +1791,28 @@ export class Gateway {
         if (!match?.[2]) {
           await send(m.addUsage);
           break;
+        }
+        if (
+          match[1] === 'platform' &&
+          this.#registry.requiresWebhook(match[2])
+        ) {
+          const status = this.#webhooks.status();
+          if (status.state !== 'ok') {
+            const w = m.webhook;
+            const state = status.reason
+              ? w.failed(status.reason)
+              : w.states[status.state];
+            await send(
+              w.blocked(match[2] === 'line' ? 'LINE' : match[2], state),
+              [
+                { value: 'setup', label: w.setupWebhook },
+                { value: 'check', label: w.check },
+              ],
+              undefined,
+              'webhook',
+            );
+            break;
+          }
         }
         await setup({
           mode: 'add',
@@ -1907,6 +2038,7 @@ export class Gateway {
               (adapter.capabilities.outboundPush ?? 'free') !== 'free',
             sandboxEnabled: this.#execution.enabled,
             startedAt: this.#startedAt,
+            webhook: this.#webhooks.status(),
             store,
             tasks: this.#tasks,
             trace: this.#trace,
@@ -1935,3 +2067,5 @@ export { systemInstallPlan } from './system-setup.ts';
 
 export { SetupError } from '@tsugimori/plugin-sdk';
 export type { SetupDependencies } from '@tsugimori/plugin-sdk';
+
+export { Webhooks } from './webhooks.ts';

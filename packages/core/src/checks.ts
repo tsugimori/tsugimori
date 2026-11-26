@@ -5,8 +5,11 @@ import type {
   PluginDefinition,
   PluginInstanceConfig,
   SetupDependencies,
+  WebhookIngress,
+  WebhookStatus,
 } from '@tsugimori/plugin-sdk';
 
+import { webhookListen } from '@tsugimori/config';
 import { constants } from 'node:fs';
 import { access, lstat } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
@@ -14,6 +17,8 @@ import { dirname, resolve } from 'node:path';
 import type { PluginRegistry } from './registry.ts';
 
 import { runCommand } from './commands.ts';
+import { systemMessages } from './system-messages.ts';
+import { webhookCheckItem, Webhooks } from './webhooks.ts';
 
 export interface CheckReport extends CheckItem {
   target: string;
@@ -22,10 +27,16 @@ export interface CheckReport extends CheckItem {
 export class EnvironmentChecks {
   readonly #workspace: string;
   readonly #deps: SetupDependencies;
+  readonly #webhooks?: WebhookIngress;
 
-  constructor(deps: SetupDependencies, workspace: string) {
+  constructor(
+    deps: SetupDependencies,
+    workspace: string,
+    webhooks?: WebhookIngress,
+  ) {
     this.#workspace = workspace;
     this.#deps = deps;
+    this.#webhooks = webhooks;
   }
 
   context(
@@ -41,7 +52,7 @@ export class EnvironmentChecks {
       arch: this.#deps.arch ?? process.arch,
       fetch: this.#deps.fetch ?? globalThis.fetch,
       runCommand: this.#deps.runCommand ?? runCommand,
-      configuredPlatforms: config?.platforms,
+      webhookIngress: this.#webhooks,
       webhooks: config?.webhooks,
     };
   }
@@ -171,9 +182,45 @@ export class EnvironmentChecks {
     return Promise.all(checks).then((items) => items.flat());
   }
 
-  async all(snapshot: WorkspaceConfig, registry: PluginRegistry) {
+  async all(
+    snapshot: WorkspaceConfig,
+    registry: PluginRegistry,
+    liveWebhook?: WebhookStatus,
+  ) {
     const items = await this.core(snapshot);
     items.push(...(await this.features(snapshot, registry)));
+    const { locale } = snapshot.config;
+    const ingress = new Webhooks({
+      ...this.#deps,
+      registry,
+      workspace: this.#workspace,
+    });
+    let status: WebhookStatus;
+    try {
+      await ingress.configure(snapshot);
+      status =
+        liveWebhook ?? this.#webhooks?.status() ?? (await ingress.check());
+      if (
+        !liveWebhook &&
+        !this.#webhooks &&
+        status.reasonCode === 'listen_in_use'
+      ) {
+        status = {
+          ...status,
+          state: 'checking',
+          reason: systemMessages(locale).webhook.occupied,
+        };
+      }
+      items.push(
+        { ...webhookCheckItem(status), target: 'core' },
+        ...(await ingress.providerChecks(snapshot)).map((item) => ({
+          ...item,
+          target: 'webhook',
+        })),
+      );
+    } finally {
+      await ingress.stop();
+    }
     for (const [category, entries] of [
       ['agent', snapshot.config.agents],
       ['platform', snapshot.config.platforms],
@@ -183,7 +230,14 @@ export class EnvironmentChecks {
           items.push(
             ...(await this.plugin(
               registry.forInstance(category, entry.kind),
-              this.context(entry, snapshot.env, snapshot.config),
+              {
+                ...this.context(entry, snapshot.env, snapshot.config),
+                webhookIngress: {
+                  status: () => status,
+                  register: ingress.register.bind(ingress),
+                  url: ingress.url.bind(ingress),
+                },
+              },
               `${category}/${entry.id}`,
               category,
             )),
@@ -209,10 +263,13 @@ export function listenerConflicts(config: Config): CheckReport[] {
 
   if (config.web?.enabled !== false) add('web.listen', config.web?.listen);
   add('preview.named.listen', config.preview?.named?.listen);
-  for (const entry of config.platforms) {
-    if (entry.kind === 'line' && entry.enabled !== false)
-      add(`LINE ${entry.id} listen`, entry.listen ?? '127.0.0.1:8789', 'line');
-  }
+  if (
+    config.webhooks ||
+    config.platforms.some(
+      (entry) => entry.kind === 'line' && entry.enabled !== false,
+    )
+  )
+    add('webhooks.listen', webhookListen(config));
 
   return [...listeners]
     .filter(

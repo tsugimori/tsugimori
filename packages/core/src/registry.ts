@@ -4,9 +4,11 @@ import type {
   ExecBackend,
   PlatformFactory,
   PluginDefinition,
+  WebhookProvider,
 } from '@tsugimori/plugin-sdk';
 
 export class PluginRegistry implements PluginKinds {
+  readonly #webhooks = new Map<string, WebhookProvider>();
   readonly #platforms = new Map<string, PlatformFactory>();
   readonly #exec = new Map<string, ExecBackend>();
   readonly #agents = new Map<string, AgentFactory>();
@@ -15,6 +17,11 @@ export class PluginRegistry implements PluginKinds {
   constructor(plugins: readonly PluginDefinition[] = []) {
     this.plugins = [...plugins];
     for (const plugin of plugins) {
+      for (const provider of plugin.webhookProviders ?? []) {
+        if (provider.id === 'manual' || this.#webhooks.has(provider.id))
+          throw new Error(`Duplicate webhook provider: ${provider.id}`);
+        this.#webhooks.set(provider.id, provider);
+      }
       for (const backend of plugin.execBackends ?? []) {
         if (this.#exec.has(backend.id))
           throw new Error(`Duplicate execution backend: ${backend.id}`);
@@ -48,6 +55,14 @@ export class PluginRegistry implements PluginKinds {
         ? plugin.execBackends?.some((backend) => backend.id === id)
         : plugin.name === id,
     );
+  }
+
+  webhookProvider(id: string) {
+    return this.#webhooks.get(id);
+  }
+
+  requiresWebhook(kind: string) {
+    return this.#platforms.get(kind)?.requires?.includes('webhook') === true;
   }
 
   execution(id: string) {

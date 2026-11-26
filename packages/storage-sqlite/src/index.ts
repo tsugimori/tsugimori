@@ -812,10 +812,12 @@ export class SqliteStore implements Store {
                 gt(setupRuns.leaseUntil, now),
                 run.mode === 'remove'
                   ? or(
-                      setupScope({
-                        category: run.category,
-                        id: run.draft.entry.id,
-                      }),
+                      run.category === 'webhook'
+                        ? undefined
+                        : setupScope({
+                            category: run.category,
+                            id: run.draft.entry.id,
+                          }),
                       eq(setupRuns.mode, 'remove'),
                     )
                   : or(
@@ -840,7 +842,9 @@ export class SqliteStore implements Store {
           .where(eq(setupRuns.id, run.id))
           .get();
         const claimed =
-          existing?.status === 'pending'
+          existing?.status === 'pending' &&
+          (run.category !== 'webhook' ||
+            existing.draft.entry.kind === run.draft.entry.kind)
             ? { ...existing, lease: run.lease, leaseUntil: run.leaseUntil }
             : run;
         tx.insert(setupRuns)

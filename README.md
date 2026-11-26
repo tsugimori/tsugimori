@@ -132,9 +132,20 @@ See the [JSON Schema](schema/tsugimori.schema.json) and an [example workspace](e
 | `scheduler`           | Approval thresholds and limits. `minIntervalMinutes` defaults to 15 (1–1,440), `maxActivePerUser` to 20 (1–1,000), and `highCostModels` to an empty list.                                                  |
 | `exec`                | Omit to disable, or use `{}` to enable Linux local execution with the default read restrictions. [Local sandbox configuration](plugins/exec-local-sandbox/README.md#configuration)                         |
 | `web`                 | Omit to disable, or add a section to enable the loopback admin UI by default at `127.0.0.1:8787`. Direct local access requires explicit opt-in. [Web configuration](plugins/web/README.md#configuration)   |
+| `webhooks`            | Shared webhook ingress configuration. [Webhook ingress](#webhook-ingress)                                                                                                                                  |
 | `preview`             | Omit to disable, or use `{}` to enable Quick previews with a 60-minute TTL cap. A named router defaults to `127.0.0.1:8788`. [Cloudflare configuration](plugins/tunnel-cloudflare/README.md#configuration) |
 
-The gateway watches `tsugimori.json` and `.env` and can attach or detach platforms and agents without restart. The database path and admin web server configuration take effect at startup. LINE instances can share one listener address. Assign the admin web listener and the named preview router addresses distinct from each other and from LINE. `doctor` reports such conflicts, and the gateway rejects a configuration that has one. `webhooks.publicBaseUrl` sets the public HTTPS base that setup and `doctor` use to show full webhook URLs.
+The gateway watches `tsugimori.json` and `.env` and can attach or detach platforms and agents without restart. The database path and admin web server configuration take effect at startup. Give the admin web listener, named preview router, and webhook listener distinct addresses. `doctor` reports address conflicts and the gateway rejects conflicting configuration.
+
+## Webhook ingress
+
+The gateway shares one loopback listener for webhook platforms. The default is `127.0.0.1:8789`. Set `webhooks.listen` to another port on `127.0.0.1` or `[::1]` if needed.
+
+- In an owner chat, use `/webhook` to see the current provider, URL, and verification result. Use `/webhook setup` to choose a provider and `/webhook check` to ensure its route and verify it again.
+- **Cloudflare Tunnel** configures a dedicated hostname on a remotely managed tunnel and creates its proxied DNS record. See the [Cloudflare provider guide](plugins/tunnel-cloudflare/README.md#webhook-ingress).
+- **Manual** uses a public HTTPS base URL that you route to the shared listener. Forward `/.well-known/tsugimori/probe/<nonce>` and platform paths such as `/line/<id>/` without an interactive login. If the public base URL includes a path prefix, strip that prefix before forwarding. For file-based configuration, set `"webhooks": { "provider": "manual", "publicBaseUrl": "https://hooks.example.com" }`.
+- Guided setup saves the webhook section after the public probe reaches this gateway. The probe path returns 404 outside an active challenge. The gateway rechecks after startup, on webhook configuration changes, and every 30 minutes. The result appears in `/status`, `doctor`, and the admin overview.
+- Adding LINE requires a successful ingress check. Existing instances stay configured during an ingress failure. A legacy workspace-level `webhooks.publicBaseUrl` without a provider selects Manual.
 
 ## Plugins
 

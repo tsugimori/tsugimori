@@ -5,6 +5,9 @@ import type {
   SetupDependencies,
   SetupPrompt,
   SetupStep,
+  WebhookConfig,
+  WebhookIngress,
+  WebhookStatus,
 } from '@tsugimori/plugin-sdk';
 import type { SetupRun, Store } from '@tsugimori/storage';
 
@@ -12,14 +15,17 @@ import {
   loadConfig,
   loadSettings,
   updateSettings,
+  webhookListen,
   writeCredential,
 } from '@tsugimori/config';
 import { SetupError } from '@tsugimori/plugin-sdk';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 
 import type { PluginRegistry } from './registry.ts';
+import type { Webhooks } from './webhooks.ts';
 
 import { untilAborted } from './abort.ts';
 import { EnvironmentChecks, failureText, listenerConflicts } from './checks.ts';
@@ -35,7 +41,9 @@ export interface SetupIO {
   secretInput?: 'terminal';
   show(text: string): Promise<void>;
   signal: AbortSignal;
+  waitForAttach?(id: string): Promise<void>;
   waitForDetach?(id: string): Promise<void>;
+  webhookStatus?(): Promise<WebhookStatus>;
 }
 
 export class SetupCancelled extends SetupError {}
@@ -50,11 +58,17 @@ const leaseLength = 30_000;
 interface Dependencies extends SetupDependencies {
   registry: PluginRegistry;
   store: Store;
+  webhookIngress?: WebhookIngress;
+  webhooks?: Webhooks;
   workspace: string;
 }
 
 function entries(config: Config, category: Category) {
-  return category === 'agent' ? config.agents : config.platforms;
+  return category === 'agent'
+    ? config.agents
+    : category === 'platform'
+      ? config.platforms
+      : [];
 }
 
 function suggestedId(config: Config, category: Category, kind: string) {
@@ -117,11 +131,15 @@ export class GuidedSetup {
 
   constructor(deps: Dependencies) {
     this.#deps = deps;
-    this.#checks = new EnvironmentChecks(deps, deps.workspace);
+    this.#checks = new EnvironmentChecks(
+      deps,
+      deps.workspace,
+      deps.webhooks ?? deps.webhookIngress,
+    );
   }
 
   async run(request: SetupRequest, io: SetupIO) {
-    const { store, registry, workspace } = this.#deps;
+    const { store, registry, workspace, webhooks } = this.#deps;
     const { mode } = request;
     let config = await loadSettings(workspace, registry);
     const locale = io.locale ?? config.locale;
@@ -148,12 +166,32 @@ export class GuidedSetup {
         ? config.agents.find((item) => item.id === id)?.kind
         : request.kind;
     if (!kind) throw new SetupError(m.agentMissing);
-    const plugin = registry.forInstance(category, kind);
-    const steps = (plugin?.setupSteps ?? []).filter(
+    const webhook = category === 'webhook';
+    if (webhook) id = 'webhooks';
+    const provider = webhook ? webhooks?.provider(kind) : undefined;
+    const plugin = webhook ? undefined : registry.forInstance(category, kind);
+    const steps = (provider?.setupSteps ?? plugin?.setupSteps ?? []).filter(
       (step) => mode === 'add' || step.id === 'login' || step.runOnLogin,
     );
     if (!steps.length)
       throw new SetupError(m.noSteps(mode === 'login', category, kind));
+    const requiresWebhook =
+      category === 'platform' && registry.requiresWebhook(kind);
+    const webhookMessage = systemMessages(locale).webhook;
+    const requireWebhook = async () => {
+      if (!requiresWebhook) return;
+      const status = webhooks?.status() ??
+        (await io.webhookStatus?.()) ?? { state: 'unconfigured' };
+      if (status.state !== 'ok') {
+        const reason = status.reason
+          ? webhookMessage.failed(status.reason)
+          : webhookMessage.states[status.state];
+        throw new SetupError(
+          webhookMessage.blocked(kind === 'line' ? 'LINE' : kind, reason),
+        );
+      }
+    };
+    await requireWebhook();
     const completion = mode === 'add' ? plugin?.setupComplete : undefined;
     const nameQuestion = id === undefined;
     const nameOffset = nameQuestion ? 1 : 0;
@@ -175,6 +213,7 @@ export class GuidedSetup {
         : []),
       ...steps,
       ...(completion ? [completion] : []),
+      ...(webhook ? [{ title: webhookMessage.verify, asks: [] }] : []),
     ];
     const inputSignal = io.cancelSignal
       ? AbortSignal.any([io.signal, io.cancelSignal])
@@ -236,7 +275,11 @@ export class GuidedSetup {
     const existing = entries(config, category).find((item) => item.id === id);
     const key = JSON.stringify([mode, category, id]);
     const previous = store.getSetupRun(key);
-    if (previous?.status === 'pending' && previous.draft.entry.kind !== kind)
+    if (
+      !webhook &&
+      previous?.status === 'pending' &&
+      previous.draft.entry.kind !== kind
+    )
       throw new SetupError(m.pendingId);
     if (
       mode === 'add' &&
@@ -258,7 +301,20 @@ export class GuidedSetup {
       previous.draft.entry.kind === kind
     )
       entry.enabled = previous.draft.entry.enabled;
-    const draft = { entry };
+    const draft = {
+      entry,
+      ...(webhook
+        ? {
+            webhooks: {
+              ...(config.webhooks?.provider === kind
+                ? config.webhooks
+                : undefined),
+              provider: kind as WebhookConfig['provider'],
+              listen: webhookListen(config),
+            },
+          }
+        : {}),
+    };
     const run = store.claimSetupRun(
       {
         id: key,
@@ -300,6 +356,7 @@ export class GuidedSetup {
       const { config, env } = await loadConfig(workspace, registry);
       signal.throwIfAborted();
       const ctx = this.#checks.context(run.draft.entry, env, config);
+      if (webhook) ctx.webhooks = run.draft.webhooks;
       return {
         ...ctx,
         fetch: (input, init) => {
@@ -321,12 +378,19 @@ export class GuidedSetup {
       } satisfies ReturnType<EnvironmentChecks['context']>;
     };
     const check = async () =>
-      this.#checks.plugin(
-        plugin,
-        await snapshot(),
-        `${category}/${id}`,
-        category,
-      );
+      webhook
+        ? []
+        : (
+            await this.#checks.plugin(
+              plugin,
+              await snapshot(),
+              `${category}/${id}`,
+              category,
+            )
+          ).filter(
+            (item) =>
+              !requiresWebhook || !item.capabilities?.includes('webhook'),
+          );
     try {
       const disableAgent = mode === 'login' && existing?.enabled !== false;
       if (!nameQuestion) await showPlan(signal, run.step, disableAgent);
@@ -364,6 +428,9 @@ export class GuidedSetup {
           get entry() {
             return run.draft.entry;
           },
+          get webhooks() {
+            return webhook ? run.draft.webhooks : current.webhooks;
+          },
           signal,
           locale,
           show,
@@ -397,6 +464,8 @@ export class GuidedSetup {
           writeConfig(patch) {
             signal.throwIfAborted();
             run.draft.entry = { ...run.draft.entry, ...patch.entry, id, kind };
+            if (webhook && run.draft.webhooks && patch.webhooks)
+              run.draft.webhooks = { ...run.draft.webhooks, ...patch.webhooks };
             if (patch.ownerId !== undefined) run.draft.ownerId = patch.ownerId;
           },
           writeEnv: async (key, value) => {
@@ -437,6 +506,53 @@ export class GuidedSetup {
         checkpoint = structuredClone(run);
         save();
       }
+      if (webhook && webhooks && run.draft.webhooks) {
+        const initial = await loadConfig(workspace, registry);
+        const candidate = {
+          ...run.draft.webhooks,
+          listen: webhookListen(initial.config),
+        };
+        const checkAddress = (config: Config) => {
+          const conflicts = failureText(listenerConflicts(config), locale);
+          if (conflicts) throw new SetupError(conflicts);
+        };
+        checkAddress({ ...initial.config, webhooks: candidate });
+        const verify = () =>
+          webhooks.verifySetup(candidate, initial, signal, (verified) =>
+            updateSettings(workspace, registry, (current) => {
+              signal.throwIfAborted();
+              if (
+                !isDeepStrictEqual(current.webhooks, initial.config.webhooks) ||
+                webhookListen(current) !== verified.listen
+              )
+                throw new SetupError(webhookMessage.changed);
+              current.webhooks = verified;
+              checkAddress(current);
+            }),
+          );
+        const progress = m.progress(plan.length, plan.length);
+        await untilAborted(signal, () =>
+          io.show(m.stepMessage(progress, webhookMessage.verify)),
+        );
+        const status = await (io.measure
+          ? io.measure('webhook-check', verify)
+          : verify());
+        signal.throwIfAborted();
+        if (status.state !== 'ok') {
+          run.step = 0;
+          run.draft = structuredClone(draft);
+          run.status = 'cancelled';
+          checkpoint = structuredClone(run);
+          save();
+          throw new SetupError(
+            status.reason ?? webhookMessage.states[status.state],
+          );
+        }
+        run.status = 'complete';
+        checkpoint = structuredClone(run);
+        save();
+        return { category, id, enabled: true, summary: webhookMessage.saved };
+      }
       const failures = failureText(await check(), locale);
       signal.throwIfAborted();
       if (failures) {
@@ -446,6 +562,7 @@ export class GuidedSetup {
         throw new SetupError(failures);
       }
       signal.throwIfAborted();
+      await requireWebhook();
       await updateSettings(workspace, registry, (config) => {
         signal.throwIfAborted();
         const list = entries(config, category);
@@ -458,10 +575,6 @@ export class GuidedSetup {
         )
           list[index] = run.draft.entry;
         else throw new SetupError(m.changedConfig);
-        if (mode === 'add' && category === 'platform' && kind === 'line') {
-          const conflicts = failureText(listenerConflicts(config), locale);
-          if (conflicts) throw new SetupError(conflicts);
-        }
         if (run.draft.ownerId !== undefined)
           Object.defineProperty(config.owner, id, {
             value: run.draft.ownerId,
@@ -475,6 +588,8 @@ export class GuidedSetup {
       save();
       let summary: string | undefined;
       if (completion) {
+        if (requiresWebhook && io.waitForAttach)
+          await untilAborted(signal, () => io.waitForAttach!(id));
         const progress = m.progress(plan.length, plan.length);
         const complete = async () =>
           completion.run({
@@ -502,6 +617,7 @@ export class GuidedSetup {
         id,
         enabled: run.draft.entry.enabled !== false,
         summary,
+        summaryOnly: requiresWebhook && !!completion,
       };
     } catch (error) {
       if (run.status === 'complete') {

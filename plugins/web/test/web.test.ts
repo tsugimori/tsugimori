@@ -123,6 +123,7 @@ async function fixture() {
     agents: () => [],
     workspace: () => ({ locale: 'zh-TW', timezone: 'Asia/Taipei' }),
     overview: () => ({
+      webhook: { state: 'unconfigured' },
       chats: [chat],
       totals: { chats: 1, tasksToday: 4, failedToday: 2, pendingApprovals: 0 },
     }),
