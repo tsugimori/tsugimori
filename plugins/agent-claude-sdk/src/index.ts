@@ -15,6 +15,7 @@ import type {
   AgentQuotaWindow,
   AgentRequest,
   AgentSessionInfo,
+  AgentSettings,
   ContextBlock,
   PluginFactoryContext,
 } from '@tsugimori/plugin-sdk';
@@ -60,7 +61,7 @@ interface SessionSlot {
   release(): void;
 }
 
-const effortLevels = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
+const effortLevels = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
 function render(blocks: ContextBlock[]) {
   return blocks
     .map(({ content, source, trust }) =>
@@ -85,6 +86,11 @@ export class ClaudeAgent implements AgentConnector {
   readonly implementation = implementation;
   readonly kind = 'claude-sdk';
   readonly loop = 'external';
+  readonly settings: AgentSettings = {
+    perTurn: ['model', 'thinking', 'serviceTier'],
+    serviceTiers: ['fast', 'default'],
+    thinking: effortLevels,
+  };
   readonly #query?: Query;
   readonly #apiKey?: string;
   readonly #compactAt: number;
@@ -97,7 +103,13 @@ export class ClaudeAgent implements AgentConnector {
   readonly #sessionTails = new Map<string, Promise<void>>();
   readonly #compactions = new Map<string, Promise<AgentCompactResult>>();
   readonly #contextWindows = new Map<string, number>();
-  readonly #sessions = new Map<string, AgentSessionInfo>();
+  readonly #sessions = new Map<
+    string,
+    {
+      info: AgentSessionInfo;
+      settings: Pick<AgentRequest, 'model' | 'serviceTier' | 'thinking'>;
+    }
+  >();
   readonly #quota = new Map<QuotaWindow, AgentQuotaWindow>();
   readonly #reached = new Set<QuotaWindow>();
   #defaultModel?: string;
@@ -125,8 +137,24 @@ export class ClaudeAgent implements AgentConnector {
     return { ...(model && { model }), ...(effort && { effort }) };
   }
 
-  describeSession(sessionId: string) {
-    return this.#sessions.get(sessionId);
+  describeSession(
+    sessionId: string,
+    settings?: Pick<AgentRequest, 'model' | 'serviceTier' | 'thinking'>,
+  ) {
+    const session = this.#sessions.get(sessionId);
+    if (!settings || !session) return session?.info;
+    const sameModel = session.settings.model === settings.model;
+    return {
+      model: sameModel ? session.info.model : undefined,
+      effort:
+        sameModel && session.settings.thinking === settings.thinking
+          ? session.info.effort
+          : undefined,
+      serviceTier:
+        sameModel && session.settings.serviceTier === settings.serviceTier
+          ? session.info.serviceTier
+          : undefined,
+    };
   }
 
   describeQuota(): AgentQuota | undefined {
@@ -275,10 +303,7 @@ export class ClaudeAgent implements AgentConnector {
         maxTurns: command ? 1 : undefined,
         persistSession: request.purpose === 'summary' ? false : undefined,
         resume: request.resumeSessionId,
-        effort:
-          request.thinking && effortLevels.has(request.thinking)
-            ? (request.thinking as Options['effort'])
-            : undefined,
+        effort: effortLevels.find((level) => level === request.thinking),
         systemPrompt: instructions.length ? render(instructions) : undefined,
         settingSources: [],
         skills: [],
@@ -342,6 +367,10 @@ export class ClaudeAgent implements AgentConnector {
         },
         settings: {
           autoMemoryEnabled: false,
+          ...(request.serviceTier === 'fast' ||
+          request.serviceTier === 'default'
+            ? { fastMode: request.serviceTier === 'fast' }
+            : {}),
           permissions: {
             blockWritesOutsideWorkingDirectories: true,
             disableBypassPermissionsMode: 'disable',
@@ -387,10 +416,18 @@ export class ClaudeAgent implements AgentConnector {
           event.type === 'system' &&
           event.subtype === 'init'
         ) {
-          const { effort, model } = event;
+          const { effort, fast_mode_state: fast, model } = event;
           this.#sessions.set(event.session_id, {
-            ...(model && { model }),
-            ...(effort && { effort }),
+            info: {
+              ...(model && { model }),
+              ...(effort && { effort }),
+              ...(fast && { serviceTier: fast === 'off' ? 'default' : 'fast' }),
+            },
+            settings: {
+              model: request.model,
+              serviceTier: request.serviceTier,
+              thinking: request.thinking,
+            },
           });
           if (request.model === 'default') this.#defaultModel = model;
           if (!request.thinking && request.model === (this.#model ?? 'default'))
@@ -421,6 +458,8 @@ export class ClaudeAgent implements AgentConnector {
           {
             sessionId,
             model: request.model,
+            serviceTier: request.serviceTier,
+            thinking: request.thinking,
             sandbox: request.sandbox,
             workdir: request.workdir,
             signal: AbortSignal.timeout(120_000),

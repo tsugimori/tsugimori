@@ -16,8 +16,14 @@ export interface ChatRecord extends ChatRef {
   kind: 'dm' | 'group' | 'supergroup';
   migratedToChatId: string | null;
   model: string | null;
+  serviceTier: string | null;
+  thinking: string | null;
   title: string | null;
 }
+
+export type ChatRoute = Partial<
+  Pick<ChatRecord, 'agentId' | 'model' | 'serviceTier' | 'thinking'>
+>;
 
 export interface CommandScopeChat extends ChatRef {
   botId: string;
@@ -58,6 +64,7 @@ export interface SessionHistory {
 
 export interface AgentSession extends ChatRef {
   agentId: string;
+  /** The model at session creation, which keeps the session scope stable. */
   model: string;
   scopeChatId?: string | null;
   seenAfter: number[];
@@ -319,10 +326,11 @@ export interface Store {
   ): MessageRecord | undefined;
   getOwner(adapterId: string): string | undefined;
   getSchedule(id: string): ScheduleRecord | undefined;
+  /** Look up the active session, optionally restricted to its original model. */
   getSession(
     ref: ChatRef,
     agentId: string,
-    model: string,
+    model?: string,
   ): AgentSession | undefined;
   getSetupRun(id: string): SetupRun | undefined;
   getSummary(ref: ChatRef): ChatSummary | undefined;
@@ -407,7 +415,8 @@ export interface Store {
   setAllowlisted(ref: ChatRef, allowlisted: boolean): void;
   setChatRoute(
     ref: ChatRef,
-    route: Partial<Pick<ChatRecord, 'agentId' | 'model'>>,
+    route: ChatRoute,
+    invalidateSession?: boolean,
   ): void;
   setSession(session: AgentSession): void;
   setWorkspaceSettings(ref: ChatRef, settings: WorkspaceSettings): void;

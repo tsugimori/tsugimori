@@ -216,11 +216,13 @@ test(
         'allow',
         'compact',
         'deny',
+        'fast',
         'login',
         'model',
         'preview',
         'previews',
         'status',
+        'thinking',
       ],
     );
     assert.ok(
@@ -688,7 +690,12 @@ test(
       ],
     ]);
     const ref = (chatId: number) => ({ adapterId, chatId: String(chatId) });
-    const route = { agentId: 'selected', model: 'chosen' };
+    const route = {
+      agentId: 'selected',
+      model: 'chosen',
+      serviceTier: 'fast',
+      thinking: 'low',
+    };
     const recordGroup = (id: number, kind: 'group' | 'supergroup') => {
       const chat = ref(id);
       store.recordInbound(
@@ -835,6 +842,8 @@ test(
       assert.equal(chat.allowlisted, allowlisted);
       assert.equal(chat.agentId, route.agentId);
       assert.equal(chat.model, model);
+      assert.equal(chat.serviceTier, route.serviceTier);
+      assert.equal(chat.thinking, route.thinking);
       assert.deepEqual(store.getWorkspaceSettings(destination), {
         thinking: 'high',
       });

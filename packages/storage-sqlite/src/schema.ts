@@ -48,6 +48,8 @@ export const chats = sqliteTable(
     agentId: text('agent_id'),
     migratedToChatId: text('migrated_to_chat_id'),
     model: text('model'),
+    serviceTier: text('service_tier'),
+    thinking: text('thinking'),
     sessionAgentId: text('session_agent_id'),
     sessionModel: text('session_model'),
   },

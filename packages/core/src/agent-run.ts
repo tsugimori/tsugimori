@@ -23,6 +23,7 @@ interface AgentRunDependencies {
   log: Logger;
   onSession?(sessionId: string): void;
   scopeChatId?: string | null;
+  scopeModel?: string;
   task: ToolContext;
   trace: Tracer;
 }
@@ -46,6 +47,7 @@ export async function runAgent(
     onSession,
     task,
     scopeChatId,
+    scopeModel,
   }: AgentRunDependencies,
   agent: AgentConnector,
   request: AgentRequest,
@@ -61,7 +63,9 @@ export async function runAgent(
             ? { ...task.chat, chatId: scopeChatId }
             : task.chat,
           agent.id,
-          request.model,
+          id === request.resumeSessionId
+            ? (scopeModel ?? request.model)
+            : request.model,
           id,
         );
   let activeScope = request.resumeSessionId

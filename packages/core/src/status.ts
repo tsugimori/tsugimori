@@ -12,6 +12,7 @@ import { scheduleRef } from '@tsugimori/scheduler';
 import type { AttachmentStatus, Runtime } from './runtime.ts';
 import type { Tasks } from './tasks.ts';
 
+import { formatServiceTier } from './agent-settings.ts';
 import { gatewayBuild } from './version.ts';
 
 const messages = {
@@ -24,7 +25,6 @@ const messages = {
     fast: 'Fast',
     fastOn: 'on',
     fastOff: 'off',
-    default: (value: string) => `${value} (default)`,
     unset: 'default',
     context: 'Context',
     contextUsage: (counts: string, percent: number) =>
@@ -97,7 +97,6 @@ const messages = {
     fast: '快速',
     fastOn: '開',
     fastOff: '關',
-    default: (value: string) => `${value}（預設）`,
     unset: '預設',
     context: '上下文',
     contextUsage: (counts: string, percent: number) =>
@@ -263,15 +262,13 @@ export function statusCard(
     const agent = agents.find(({ id }) => id === agentId);
     field('Agent', agent ? agentName(agent) : agentId);
     const model = work.model === 'default' ? undefined : work.model;
-    const setting = (override?: string, fallback?: string) =>
-      override || (fallback ? m.default(fallback) : m.unset);
-    field(m.model, setting(model, defaults?.model));
+    field(m.model, model ?? defaults?.model ?? m.unset);
     text += separator;
-    inlineField(m.effort, setting(thinking, defaults?.effort));
+    inlineField(m.effort, thinking ?? defaults?.effort ?? m.unset);
     text += separator;
     inlineField(
       m.fast,
-      fastMode(
+      formatServiceTier(
         serviceTier === undefined ? defaults?.serviceTier : serviceTier,
         m,
       ),
@@ -455,22 +452,6 @@ function attachmentState(
       : m.unavailable;
   }
   return m[entry.state];
-}
-
-function fastMode(tier: string | null | undefined, m: StatusMessages) {
-  switch (tier) {
-    case undefined:
-    case null:
-    case '':
-      return m.unset;
-    case 'fast':
-    case 'priority':
-      return m.fastOn;
-    case 'default':
-      return m.fastOff;
-    default:
-      return tier;
-  }
 }
 
 function quotaWindow(

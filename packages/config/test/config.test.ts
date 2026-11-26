@@ -50,6 +50,20 @@ test('preserves per-agent compaction thresholds and rejects invalid counts', () 
     assert.throws(() => compactAt(invalid), /\/agents\/0\/compactAt/);
 });
 
+test('validates and preserves optional per-agent service tiers', () => {
+  const tier = (serviceTier: unknown) =>
+    parseConfig(
+      JSON.stringify({
+        agents: [{ id: 'codex', kind: 'codex', enabled: false, serviceTier }],
+      }),
+    ).agents[0]?.serviceTier;
+  assert.equal(tier(undefined), undefined);
+  for (const value of ['fast', 'default', 'provider-specific'])
+    assert.equal(tier(value), value);
+  for (const invalid of ['', '  ', 5, false, null, {}])
+    assert.throws(() => tier(invalid), /\/agents\/0\/serviceTier/);
+});
+
 test('defaults and validates conversation summary settings', () => {
   const settings = (summary: object) =>
     parseConfig(JSON.stringify({ context: { summary } })).context.summary;

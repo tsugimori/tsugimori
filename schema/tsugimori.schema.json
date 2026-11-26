@@ -147,6 +147,11 @@
             "type": "string",
             "minLength": 1
           },
+          "serviceTier": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S"
+          },
           "compactAt": {
             "type": "integer",
             "minimum": 1,

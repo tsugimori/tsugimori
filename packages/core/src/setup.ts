@@ -265,6 +265,7 @@ export class GuidedSetup {
             model: typeof entry.model === 'string' ? entry.model : 'default',
             thinking:
               typeof entry.thinking === 'string' ? entry.thinking : undefined,
+            serviceTier: entry.serviceTier,
             purpose: 'summary',
             sandbox: {
               workdir,

@@ -284,8 +284,8 @@ for (const locale of ['en', 'zh-TW'] as const) {
     assert.equal(
       settings({ model: 'gpt-6.2-sol', effort: 'high', serviceTier: 'fast' }),
       zh
-        ? '模型：gpt-6.2-sol（預設） · 推理：high（預設） · 快速：開'
-        : 'Model: gpt-6.2-sol (default) · Effort: high (default) · Fast: on',
+        ? '模型：gpt-6.2-sol · 推理：high · 快速：開'
+        : 'Model: gpt-6.2-sol · Effort: high · Fast: on',
     );
     assert.equal(
       settings({ serviceTier: 'fast' }, undefined, null),
@@ -296,8 +296,8 @@ for (const locale of ['en', 'zh-TW'] as const) {
     assert.equal(
       settings({ model: 'gpt-6.2-sol' }, 'low', 'default'),
       zh
-        ? '模型：gpt-6.2-sol（預設） · 推理：low · 快速：關'
-        : 'Model: gpt-6.2-sol (default) · Effort: low · Fast: off',
+        ? '模型：gpt-6.2-sol · 推理：low · 快速：關'
+        : 'Model: gpt-6.2-sol · Effort: low · Fast: off',
     );
     assert.equal(
       settings(undefined, 'raw effort', 'flex-tier', 'raw model'),

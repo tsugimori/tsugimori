@@ -224,7 +224,7 @@ test(
         '',
         '💬 此聊天室',
         'Agent：Claude Agent SDK',
-        '模型：claude-opus-4-8（預設） · 推理：medium（預設） · 快速：預設',
+        '模型：claude-opus-4-8 · 推理：medium · 快速：預設',
         '上下文：4k / 200k（2%）',
         '額度：5 小時 剩 75% · 每週剩 60%',
         '對話：已持續 0 秒',

@@ -176,6 +176,58 @@ test('Claude reports configured defaults and tracks SDK init metadata per sessio
   assert.deepEqual(pinned.describeSession('summary'), observed);
 });
 
+test('Claude applies model, effort and fast mode to a resumed query', async () => {
+  const optionsSeen: unknown[] = [];
+  const agent = new ClaudeAgent(
+    {
+      async *query({ options }) {
+        const settings = options?.settings;
+        optionsSeen.push({
+          model: options?.model,
+          effort: options?.effort,
+          fastMode:
+            typeof settings === 'object' ? settings.fastMode : undefined,
+          resume: options?.resume,
+        });
+        yield frame({ type: 'system', subtype: 'init' });
+        yield success;
+      },
+    },
+    'claude',
+    null,
+  );
+  const initial = { ...request(tmpdir()), serviceTier: 'fast' };
+  await collect(agent.run(initial, io));
+  const resumed = { ...initial, resumeSessionId: 'claude-native' };
+  await collect(
+    agent.run(
+      { ...resumed, model: 'other', thinking: 'max', serviceTier: 'default' },
+      io,
+    ),
+  );
+  await collect(
+    agent.run(
+      {
+        ...resumed,
+        model: 'default',
+        thinking: undefined,
+        serviceTier: 'codex-only-tier',
+      },
+      io,
+    ),
+  );
+  assert.deepEqual(optionsSeen, [
+    { model: 'fake-model', effort: 'low', fastMode: true, resume: undefined },
+    { model: 'other', effort: 'max', fastMode: false, resume: 'claude-native' },
+    {
+      model: undefined,
+      effort: undefined,
+      fastMode: undefined,
+      resume: 'claude-native',
+    },
+  ]);
+});
+
 test(
   'Claude isolates settings, routes tool permissions and streams typed SDK events',
   { timeout: 5_000 },

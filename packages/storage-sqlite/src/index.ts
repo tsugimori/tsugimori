@@ -8,6 +8,7 @@ import type {
   AgentSession,
   ApprovalRecord,
   ChatRecord,
+  ChatRoute,
   ChatSummary,
   CommandScopeChat,
   GrantQuery,
@@ -516,6 +517,8 @@ export class SqliteStore implements Store {
     const route = {
       agentId: current?.agentId ?? previous?.agentId ?? null,
       model: current?.model ?? previous?.model ?? null,
+      serviceTier: current?.serviceTier ?? previous?.serviceTier ?? null,
+      thinking: current?.thinking ?? previous?.thinking ?? null,
     };
     const destination = {
       ...route,
@@ -1110,13 +1113,13 @@ export class SqliteStore implements Store {
       .run();
   }
 
-  setChatRoute(
-    ref: ChatRef,
-    route: Partial<Pick<ChatRecord, 'agentId' | 'model'>>,
-  ) {
+  setChatRoute(ref: ChatRef, route: ChatRoute, invalidateSession = true) {
     this.#db
       .update(chats)
-      .set({ ...route, sessionAgentId: null, sessionModel: null })
+      .set({
+        ...route,
+        ...(invalidateSession && { sessionAgentId: null, sessionModel: null }),
+      })
       .where(chatScope(chats, ref))
       .run();
   }
@@ -1337,13 +1340,18 @@ export class SqliteStore implements Store {
     ).reverse();
   }
 
-  getSession(ref: ChatRef, agentId: string, model: string) {
+  getSession(ref: ChatRef, agentId: string, model?: string) {
     const chat = this.#db
       .select()
       .from(chats)
       .where(chatScope(chats, ref))
       .get();
-    if (chat?.sessionAgentId !== agentId || chat.sessionModel !== model) return;
+    if (
+      chat?.sessionAgentId !== agentId ||
+      chat.sessionModel === null ||
+      (model !== undefined && chat.sessionModel !== model)
+    )
+      return;
     return this.#db
       .select()
       .from(agentSessions)
@@ -1351,7 +1359,7 @@ export class SqliteStore implements Store {
         and(
           chatScope(agentSessions, ref),
           eq(agentSessions.agentId, agentId),
-          eq(agentSessions.model, model),
+          eq(agentSessions.model, chat.sessionModel),
         ),
       )
       .get();

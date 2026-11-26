@@ -14,6 +14,7 @@ import type {
 } from '@tsugimori/plugin-sdk';
 import type {
   ApprovalRecord,
+  ChatRoute,
   ScheduleRecord,
   ScheduleRun,
   Store,
@@ -42,6 +43,7 @@ import type { Logger } from './hooks.ts';
 import type { PreviewProviders } from './previews.ts';
 import type { PlatformNotice } from './runtime.ts';
 
+import { acceptsServiceTier, formatServiceTier } from './agent-settings.ts';
 import { approvalDecisionText, approvalMessages } from './approval-messages.ts';
 import { parseCommand } from './chat-commands.ts';
 import { ChatSetup } from './chat-setup.ts';
@@ -1144,6 +1146,67 @@ export class Gateway {
     }
   }
 
+  #chatAgentSetting(
+    chat: ChatRef,
+    name: 'fast' | 'model' | 'thinking',
+    args: string,
+  ) {
+    const { store } = this.#deps;
+    const m = systemMessages(this.#runtime.config.locale);
+    const current = store.getChat(chat);
+    const route = this.#tasks.route(chat, current);
+    const agent = route.selected?.agent;
+    const field = name === 'fast' ? 'serviceTier' : name;
+    const label = m.settingLabels[field];
+    const fastTier = args === 'on' ? 'fast' : 'default';
+    if (name === 'fast' && (!agent || !acceptsServiceTier(agent, fastTier)))
+      return m.fastUnsupported;
+
+    if (!args) {
+      const { value, source } = route[field];
+      const status = this.#tasks.status(chat);
+      const effective =
+        field === 'serviceTier'
+          ? formatServiceTier(
+              status.serviceTier === undefined
+                ? status.defaults?.serviceTier
+                : status.serviceTier,
+              m,
+            )
+          : field === 'thinking'
+            ? (value ?? status.defaults?.effort ?? m.unset)
+            : ((value === 'default' ? undefined : value) ??
+              status.defaults?.model ??
+              m.unset);
+      return m.settingCurrent(label, effective, m.settingSources[source]);
+    }
+
+    if (name === 'thinking' && args !== 'default') {
+      const levels = agent?.settings?.thinking;
+      if (!levels?.length) return m.thinkingUnsupported;
+      if (!levels.includes(args)) return m.thinkingUsage(levels.join('|'));
+    }
+    if (name === 'fast' && !['on', 'off', 'default'].includes(args))
+      return m.fastUsage;
+
+    const value = args === 'default' ? null : name === 'fast' ? fastTier : args;
+    if (current && current[field] !== value) {
+      const update: ChatRoute = { [field]: value };
+      const next = this.#tasks.route(chat, { ...current, ...update });
+      const invalidate =
+        route[field].value !== next[field].value &&
+        !agent?.settings?.perTurn?.includes(field);
+      if (invalidate) this.#tasks.invalidateSession(chat);
+      store.setChatRoute(chat, update, invalidate);
+    }
+    return value === null
+      ? m.settingCleared(label)
+      : m.settingSet(
+          label,
+          field === 'serviceTier' ? formatServiceTier(value, m) : value,
+        );
+  }
+
   async #command(
     adapter: PlatformAdapter,
     chat: ChatRef,
@@ -1201,27 +1264,50 @@ export class Gateway {
         if (name === 'deny') this.#tasks.cancelApprovals(chat);
         await send(name === 'allow' ? m.allowlisted : m.removedFromAllowlist);
         break;
-      case 'agent':
-        if (!this.#runtime.getAgent(args)) {
+      case 'agent': {
+        const next = this.#runtime.getAgent(args);
+        if (!next) {
           await send(this.#runtime.unavailable(args) || m.agentUnavailable);
           break;
         }
-        if (store.getChat(chat)?.agentId !== args) {
-          this.#tasks.invalidateSession(chat);
-          store.setChatRoute(chat, { agentId: args });
+        const current = store.getChat(chat);
+        const switching = this.#tasks.route(chat, current).agentId !== args;
+        const update: ChatRoute = { agentId: args };
+        const cleared: string[] = [];
+        if (switching) {
+          if (
+            current?.thinking &&
+            !next.agent.settings?.thinking?.includes(current.thinking)
+          ) {
+            update.thinking = null;
+            cleared.push(m.settingLabels.thinking);
+          }
+          if (
+            current?.serviceTier &&
+            !acceptsServiceTier(next.agent, current.serviceTier)
+          ) {
+            update.serviceTier = null;
+            cleared.push(m.settingLabels.serviceTier);
+          }
         }
-        await send(m.agentSet(args));
+        if (current?.agentId !== args) {
+          if (switching) this.#tasks.invalidateSession(chat);
+          store.setChatRoute(chat, update, switching);
+        }
+        await send(
+          [
+            m.agentSet(args),
+            ...(cleared.length
+              ? [m.agentOverridesCleared(cleared.join(', '))]
+              : []),
+          ].join('\n'),
+        );
         break;
+      }
       case 'model':
-        if (!args) {
-          await send(m.modelUsage);
-          break;
-        }
-        if (store.getChat(chat)?.model !== args) {
-          this.#tasks.invalidateSession(chat);
-          store.setChatRoute(chat, { model: args });
-        }
-        await send(m.modelSet(args));
+      case 'thinking':
+      case 'fast':
+        await send(this.#chatAgentSetting(chat, name, args));
         break;
       case 'compact':
         if (args) await send(m.compactUsage);

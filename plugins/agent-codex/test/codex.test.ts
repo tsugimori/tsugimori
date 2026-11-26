@@ -64,6 +64,12 @@ const approvals = new Map();
 let next = 0;
 let initialized = false;
 let quotaReads = 0;
+let settingsTurn = 0;
+const settings = process.env.TEST_CODEX_AGENT_SETTINGS && [
+  { model: 'configured-model', effort: 'low', tier: 'fast' },
+  { model: 'chat-model', effort: 'xhigh', tier: 'default' },
+  { model: 'fake-model', effort: 'medium', tier: null },
+];
 const quotaUpdate = (rateLimits) =>
   write({ method: 'account/rateLimits/updated', params: { rateLimits } });
 for await (const line of createInterface({ input: process.stdin })) {
@@ -91,12 +97,19 @@ for await (const line of createInterface({ input: process.stdin })) {
       write({ id, error: { code: Number(process.env.TEST_CODEX_QUOTA_ERROR ?? -32601) } });
     }
   } else if (method === 'config/read') {
-    answer({ config: {} });
+    answer({ config: settings ? { model: null, model_reasoning_effort: null, service_tier: null } : {} });
   } else if (method === 'model/list') {
-    answer({ data: [{ model: 'fake-model', isDefault: true }] });
+    answer({ data: [{ model: 'fake-model', isDefault: true, defaultReasoningEffort: 'medium' }] });
   } else if (method === 'thread/start' || method === 'thread/resume') {
     assert.ok(initialized);
     assert.equal(params.cwd, '/tmp/work');
+    if (settings) {
+      const expected = settings[settingsTurn];
+      assert.equal(params.model, expected.model);
+      assert.equal(params.config.model_reasoning_effort, expected.effort);
+      assert.equal(params.serviceTier, expected.tier);
+      assert.equal(method, settingsTurn === 0 ? 'thread/start' : 'thread/resume');
+    }
     assert.equal(params.config.model_auto_compact_token_limit, Number(process.env.TEST_CODEX_NATIVE_LIMIT ?? 400000));
     if (process.env.TEST_CODEX_TIMING) {
       const expected = JSON.parse(process.env.TEST_CODEX_TIMING);
@@ -150,8 +163,15 @@ for await (const line of createInterface({ input: process.stdin })) {
       type: 'workspaceWrite', writableRoots: ['/tmp/work'], networkAccess: false,
       excludeTmpdirEnvVar: true, excludeSlashTmp: true,
     });
-    assert.equal(params.model, process.env.TEST_CODEX_DEFAULT_MODEL ? undefined : 'fake-model');
-    assert.equal(params.effort, 'low');
+    if (settings) {
+      const expected = settings[settingsTurn++];
+      assert.equal(params.model, expected.model);
+      assert.equal(params.effort, expected.effort);
+      assert.equal(params.serviceTier, expected.tier);
+    } else {
+      assert.equal(params.model, process.env.TEST_CODEX_DEFAULT_MODEL ? undefined : 'fake-model');
+      assert.equal(params.effort, 'low');
+    }
     const blocks = params.input[0].text.split('\n').map((line) => JSON.parse(line));
     assert.deepEqual(blocks.map(({ source }) => source), thread.resumed ? ['message'] : ['rule', 'message']);
     const input = blocks.at(-1).content;
@@ -278,6 +298,61 @@ function request(
     resumeSessionId,
   };
 }
+
+test(
+  'applies model, effort and service tier to Codex threads and restores native defaults on resume',
+  { timeout: 5_000 },
+  async (t) => {
+    const agent = new CodexAgent(
+      {
+        inspect: noInspection,
+        spawn(_command, _args, options) {
+          return spawn(
+            process.execPath,
+            ['--input-type=module', '--eval', fakeServer],
+            {
+              ...options,
+              env: { ...options.env, TEST_CODEX_AGENT_SETTINGS: '1' },
+            },
+          );
+        },
+      },
+      'codex',
+    );
+    t.after(() => agent.stop());
+    const input = request('settings');
+    const native = (
+      await collect(
+        agent.run(
+          { ...input, model: 'configured-model', serviceTier: 'fast' },
+          io,
+        ),
+      )
+    ).find((event) => event.type === 'sessionId');
+    assert.ok(native);
+    const resume = { ...input, resumeSessionId: native.sessionId };
+    const changed = await collect(
+      agent.run(
+        {
+          ...resume,
+          model: 'chat-model',
+          thinking: 'xhigh',
+          serviceTier: 'default',
+        },
+        io,
+      ),
+    );
+    assert.deepEqual(changed[0], native);
+    const cleared = { ...resume, model: 'default', thinking: undefined };
+    const reset = await collect(agent.run(cleared, io));
+    assert.deepEqual(reset[0], native);
+    assert.deepEqual(agent.describeSession(native.sessionId, cleared), {
+      model: 'fake-model',
+      effort: 'medium',
+      serviceTier: null,
+    });
+  },
+);
 
 test(
   'passes Codex compaction config and tracks automatic and manual compaction',

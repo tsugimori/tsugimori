@@ -22,7 +22,7 @@ export class ConfigError extends Error {}
 
 export interface Config {
   $schema?: string;
-  agents: (AgentInstanceConfig & { model?: string; thinking?: string })[];
+  agents: AgentInstanceConfig[];
   context: {
     recentMessages: number;
     summary?: {

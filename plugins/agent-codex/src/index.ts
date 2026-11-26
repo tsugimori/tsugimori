@@ -8,6 +8,7 @@ import type {
   AgentQuota,
   AgentRequest,
   AgentSessionInfo,
+  AgentSettings,
   AgentTool,
   PluginFactoryContext,
 } from '@tsugimori/plugin-sdk';
@@ -66,6 +67,9 @@ interface CodexDependencies {
 }
 
 interface ThreadContext extends AgentSessionInfo {
+  requestedModel?: string;
+  requestedServiceTier?: string;
+  requestedThinking?: string;
   tokens?: number;
   window?: number;
 }
@@ -79,15 +83,20 @@ export class CodexAgent implements AgentConnector {
   readonly implementation = implementation;
   readonly kind = 'codex';
   readonly loop = 'external';
+  readonly settings: AgentSettings = {
+    perTurn: ['model', 'thinking', 'serviceTier'],
+    serviceTiers: true,
+    thinking: ['minimal', 'low', 'medium', 'high', 'xhigh'],
+  };
   readonly #deps: CodexDependencies;
   readonly #options: CodexOptions;
   readonly #threadContexts = new WeakMap<
     AppServer,
     Map<string, ThreadContext>
   >();
-  readonly #defaultModels = new WeakMap<
+  readonly #modelCatalogs = new WeakMap<
     AppServer,
-    Promise<string | undefined>
+    Promise<ReturnType<typeof asRecord>[]>
   >();
   #inspection?: ReturnType<CodexAgent['inspect']>;
   #lifecycle?: AbortController;
@@ -111,12 +120,28 @@ export class CodexAgent implements AgentConnector {
     return this.#quota;
   }
 
-  describeSession(sessionId: string): AgentSessionInfo | undefined {
+  describeSession(
+    sessionId: string,
+    settings?: Pick<AgentRequest, 'model' | 'serviceTier' | 'thinking'>,
+  ): AgentSessionInfo | undefined {
     if (!this.#server) return;
     const context = this.#threadContexts
       .get(this.#server)
       ?.get(nativeSessionId(sessionId));
-    if (context) return { serviceTier: context.serviceTier };
+    if (!context) return;
+    if (!settings) return { serviceTier: context.serviceTier };
+    const sameModel = settings.model === context.requestedModel;
+    return {
+      model: sameModel ? context.model : undefined,
+      effort:
+        sameModel && settings.thinking === context.requestedThinking
+          ? context.effort
+          : undefined,
+      serviceTier:
+        settings.serviceTier === context.requestedServiceTier
+          ? context.serviceTier
+          : undefined,
+    };
   }
 
   async start() {
@@ -308,46 +333,111 @@ export class CodexAgent implements AgentConnector {
     workdir: string,
     threadId?: string,
   ) {
-    const observed = threadId
-      ? this.#threadContexts.get(server)?.get(threadId)?.window
+    const previous = threadId
+      ? this.#threadContexts.get(server)?.get(threadId)
       : undefined;
+    const observed =
+      !model || model === previous?.model ? previous?.window : undefined;
     if (model) return windows.get(model) ?? observed;
     if (observed !== undefined) return observed;
     if (!windows.size) return;
 
+    const config = await this.#readConfig(server, workdir);
+    if (config) {
+      const configured = contextWindow(config.model_context_window);
+      if (configured !== undefined) return configured;
+      if (typeof config.model === 'string') return windows.get(config.model);
+    }
+    const entry = (await this.#models(server)).find(
+      ({ isDefault }) => isDefault === true,
+    );
+    const name = entry?.model ?? entry?.id;
+    if (typeof name === 'string') return windows.get(name);
+  }
+
+  async #readConfig(server: AppServer, workdir: string) {
     try {
       const result = await server.request('config/read', {
         cwd: workdir,
         includeLayers: false,
       });
-      const config = asRecord(result.config);
-      const configured = contextWindow(config.model_context_window);
-      if (configured !== undefined) return configured;
-      if (typeof config.model === 'string') return windows.get(config.model);
+      return asRecord(result.config);
     } catch (error) {
       if (!(error instanceof RpcError)) throw error;
+      return undefined;
     }
+  }
 
-    let defaultModel = this.#defaultModels.get(server);
-    if (!defaultModel) {
-      defaultModel = server
+  #models(server: AppServer) {
+    let catalog = this.#modelCatalogs.get(server);
+    if (!catalog) {
+      catalog = server
         .request('model/list', {})
-        .then(({ data }) => {
-          if (!Array.isArray(data)) return;
-          const entry = data
-            .map(asRecord)
-            .find(({ isDefault }) => isDefault === true);
-          const name = entry?.model ?? entry?.id;
-          if (typeof name === 'string') return name;
-        })
+        .then(({ data }) => (Array.isArray(data) ? data.map(asRecord) : []))
         .catch((error: unknown) => {
           if (!(error instanceof RpcError)) throw error;
-          return undefined;
+          this.#modelCatalogs.delete(server);
+          return [];
         });
-      this.#defaultModels.set(server, defaultModel);
+      this.#modelCatalogs.set(server, catalog);
     }
-    const name = await defaultModel;
-    return name === undefined ? undefined : windows.get(name);
+    return catalog;
+  }
+
+  async #turnSettings(
+    server: AppServer,
+    request: Pick<
+      AgentRequest,
+      'model' | 'serviceTier' | 'thinking' | 'workdir'
+    >,
+    resumeSessionId?: string,
+  ) {
+    let model = request.model === 'default' ? undefined : request.model;
+    let effort = request.thinking;
+    let serviceTier: string | null | undefined = request.serviceTier;
+    if (resumeSessionId) {
+      const previous = this.#threadContexts.get(server)?.get(resumeSessionId);
+      const modelChanged = previous?.requestedModel !== request.model;
+      const restoreModel = model === undefined && modelChanged;
+      const restoreEffort =
+        effort === undefined &&
+        (modelChanged || previous?.requestedThinking !== undefined);
+      const restoreTier =
+        serviceTier === undefined &&
+        (!previous || previous.requestedServiceTier !== undefined);
+      if (!restoreModel && !restoreEffort && !restoreTier)
+        return { model, effort, serviceTier };
+      // Omitted turn settings inherit the thread's previous overrides. Resolve the
+      // native defaults explicitly when resuming a thread with cleared settings.
+      const config = await this.#readConfig(server, request.workdir);
+      if (restoreModel && typeof config?.model === 'string')
+        model = config.model;
+      if (restoreEffort && typeof config?.model_reasoning_effort === 'string')
+        effort = config.model_reasoning_effort;
+      if (
+        restoreTier &&
+        (typeof config?.service_tier === 'string' ||
+          config?.service_tier === null)
+      )
+        serviceTier = config.service_tier;
+      if (
+        (restoreModel && model === undefined) ||
+        (restoreEffort && effort === undefined)
+      ) {
+        const lookupModel =
+          model ?? (modelChanged ? undefined : previous?.model);
+        const entry = (await this.#models(server)).find((entry) =>
+          lookupModel === undefined
+            ? entry.isDefault === true
+            : (entry.model ?? entry.id) === lookupModel,
+        );
+        const name = entry?.model ?? entry?.id;
+        if (restoreModel && typeof name === 'string') model ??= name;
+        if (restoreEffort && typeof entry?.defaultReasoningEffort === 'string')
+          effort ??= entry.defaultReasoningEffort;
+      }
+    }
+    return { model, effort, serviceTier };
   }
 
   readonly #listeners = new WeakMap<
@@ -363,7 +453,13 @@ export class CodexAgent implements AgentConnector {
   async #thread(
     request: Pick<
       AgentRequest,
-      'model' | 'purpose' | 'sandbox' | 'signal' | 'workdir'
+      | 'model'
+      | 'purpose'
+      | 'sandbox'
+      | 'serviceTier'
+      | 'signal'
+      | 'thinking'
+      | 'workdir'
     >,
     resumeSessionId?: string,
     dynamicTools?: ReturnType<typeof describeTools>,
@@ -374,7 +470,11 @@ export class CodexAgent implements AgentConnector {
     const signal = AbortSignal.any([request.signal, server.signal]);
     signal.throwIfAborted();
     const { workdir } = request;
-    const model = request.model === 'default' ? undefined : request.model;
+    const { model, effort, serviceTier } = await this.#turnSettings(
+      server,
+      request,
+      resumeSessionId,
+    );
     const summarize = request.purpose === 'summary';
     const scope = request.sandbox;
     const { support, windows } = await this.#inspection!;
@@ -404,10 +504,12 @@ export class CodexAgent implements AgentConnector {
     const threadOptions = {
       cwd: workdir,
       model,
+      serviceTier,
       approvalPolicy: scope ? 'never' : approvalPolicy,
       approvalsReviewer,
       ...(scoped ?? { sandbox: summarize ? 'read-only' : 'workspace-write' }),
       config: {
+        model_reasoning_effort: effort,
         ...compaction.config,
         ...(scope
           ? { project_doc_max_bytes: 0 }
@@ -446,10 +548,37 @@ export class CodexAgent implements AgentConnector {
       (resumeSessionId && threadId !== resumeSessionId)
     )
       throw new Error('Codex returned an invalid thread ID');
-    const { serviceTier } = result;
-    if (typeof serviceTier === 'string' || serviceTier === null)
-      this.#updateThreadContext(server, threadId, { serviceTier });
-    return { server, signal, threadId, model, summarize, compaction, window };
+    const reportedTier = result.serviceTier;
+    this.#updateThreadContext(server, threadId, {
+      model:
+        model ?? (typeof result.model === 'string' ? result.model : undefined),
+      effort:
+        effort ??
+        (typeof result.reasoningEffort === 'string'
+          ? result.reasoningEffort
+          : undefined),
+      requestedModel: request.model,
+      requestedServiceTier: request.serviceTier,
+      requestedThinking: request.thinking,
+      serviceTier:
+        serviceTier !== undefined
+          ? serviceTier
+          : typeof reportedTier === 'string' || reportedTier === null
+            ? reportedTier
+            : undefined,
+      window,
+    });
+    return {
+      server,
+      signal,
+      threadId,
+      model,
+      effort,
+      serviceTier,
+      summarize,
+      compaction,
+      window,
+    };
   }
 
   async compact(request: AgentCompactRequest): Promise<AgentCompactResult> {
@@ -520,8 +649,17 @@ export class CodexAgent implements AgentConnector {
       this.acceptsSession(request.resumeSessionId, request.tools)
         ? request.resumeSessionId.slice(stamp.length)
         : undefined;
-    const { server, signal, threadId, model, summarize, compaction, window } =
-      await this.#thread(request, resumeSessionId, dynamicTools);
+    const {
+      server,
+      signal,
+      threadId,
+      model,
+      effort,
+      serviceTier,
+      summarize,
+      compaction,
+      window,
+    } = await this.#thread(request, resumeSessionId, dynamicTools);
     const listeners = this.#listeners.get(server)!;
     if (listeners.has(threadId))
       throw new Error('Codex thread already has an active turn');
@@ -548,7 +686,8 @@ export class CodexAgent implements AgentConnector {
         threadId,
         cwd: workdir,
         model,
-        effort: request.thinking,
+        effort,
+        serviceTier,
         approvalPolicy: scope ? 'never' : approvalPolicy,
         approvalsReviewer,
         ...(scope

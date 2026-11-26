@@ -2,6 +2,7 @@ import type { Auth } from '@tsugimori/auth';
 import type { ContextAssembler } from '@tsugimori/context';
 import type {
   AgentConnector,
+  AgentRequest,
   ApprovalRequest,
   ChatRef,
   ExecBackend,
@@ -35,6 +36,7 @@ import type { TaskInput } from './supplements.ts';
 
 import { untilAborted } from './abort.ts';
 import { protectTools, runAgent, sessionScope } from './agent-run.ts';
+import { acceptsServiceTier, resolveAgentSetting } from './agent-settings.ts';
 import { approvalMessages, approvalPrompt } from './approval-messages.ts';
 import { describeError } from './errors.ts';
 import { conversationId, DeliveryError, Outbound } from './outbound.ts';
@@ -73,6 +75,7 @@ type Work = {
   route?: { agentId: string; model: string };
   sessionId?: string;
   sessionScopeChatId?: string | null;
+  sessionScopeModel?: string;
   sessionValid: boolean;
   supplements: Supplements;
   workdir?: string;
@@ -123,24 +126,27 @@ export class Tasks {
     const { store } = this.#deps;
     const key = chatKey(chat);
     const running = this.#running.get(key);
-    const { agentId, model, selected, thinking } = this.#route(
-      chat,
-      store.getChat(chat),
-    );
+    const route = this.route(chat);
+    const { agentId, selected } = route;
+    const model = route.model.value ?? 'default';
+    const perTurnModel = selected?.agent.settings?.perTurn?.includes('model');
     const activeSession =
       running?.sessionValid &&
       running.route?.agentId === agentId &&
-      running.route?.model === model
+      (perTurnModel || running.route?.model === model)
         ? running.sessionId
         : undefined;
     const storedSession =
-      selected && agentId && model
-        ? store.getSession(chat, agentId, model)
+      selected && agentId
+        ? store.getSession(chat, agentId, perTurnModel ? undefined : model)
         : undefined;
     const sessionId = activeSession ?? storedSession?.sessionId;
     const scopeChatId = activeSession
       ? running?.sessionScopeChatId
       : storedSession?.scopeChatId;
+    const scopeModel = activeSession
+      ? running?.sessionScopeModel
+      : storedSession?.model;
     let queued = running?.supplements.pendingCount ?? 0;
     for (const work of this.#work) {
       if (
@@ -157,12 +163,16 @@ export class Tasks {
         (approval) => approval.work === running && !approval.signal.aborted,
       );
     const sessionInfo = sessionId
-      ? selected?.agent.describeSession?.(sessionId)
+      ? selected?.agent.describeSession?.(sessionId, {
+          model,
+          thinking: route.thinking.value,
+          serviceTier: route.serviceTier.value,
+        })
       : undefined;
     return {
       agentId,
       model,
-      thinking,
+      thinking: route.thinking.value,
       defaults: sessionInfo
         ? {
             ...selected?.defaults,
@@ -172,13 +182,13 @@ export class Tasks {
         : selected?.defaults,
       compactAt: selected?.config.compactAt,
       quota: selected?.agent.describeQuota?.(),
-      serviceTier: sessionInfo?.serviceTier,
+      serviceTier: route.serviceTier.value ?? sessionInfo?.serviceTier,
       sessionScope:
-        sessionId && agentId && model
+        sessionId && agentId && scopeModel
           ? sessionScope(
               { ...chat, chatId: scopeChatId ?? chat.chatId },
               agentId,
-              model,
+              scopeModel,
               sessionId,
             )
           : undefined,
@@ -190,7 +200,10 @@ export class Tasks {
     };
   }
 
-  #route(chat: ChatRef, current: ChatRecord | undefined) {
+  route(
+    chat: ChatRef,
+    current: ChatRecord | undefined = this.#deps.store.getChat(chat),
+  ) {
     const { store, runtime } = this.#deps;
     const settings = store.getWorkspaceSettings(chat);
     const agentId = current?.agentId ?? settings?.agentId;
@@ -203,14 +216,27 @@ export class Tasks {
     const bound =
       selected?.config ??
       runtime.config.agents.find(({ id }) => id === configuredId);
+    const serviceTier = (tier: string | null | undefined) =>
+      tier != null && (!selected || acceptsServiceTier(selected.agent, tier))
+        ? tier
+        : undefined;
     return {
       agentId: selected?.agent.id ?? agentId ?? bound?.id,
-      model:
-        current?.model ??
-        settings?.model ??
-        bound?.model ??
-        (bound ? 'default' : undefined),
-      thinking: settings?.thinking ?? bound?.thinking,
+      model: resolveAgentSetting(current?.model, settings?.model, bound?.model),
+      thinking: resolveAgentSetting(
+        current?.thinking &&
+          (!selected ||
+            selected.agent.settings?.thinking?.includes(current.thinking))
+          ? current.thinking
+          : undefined,
+        settings?.thinking,
+        bound?.thinking,
+      ),
+      serviceTier: resolveAgentSetting(
+        serviceTier(current?.serviceTier),
+        undefined,
+        serviceTier(bound?.serviceTier),
+      ),
       selected,
       unavailable,
     };
@@ -428,10 +454,10 @@ export class Tasks {
         finish('cancelled');
         return;
       }
-      const route = this.#route(chat, current);
+      const route = this.route(chat, current);
       const { selected } = route;
       const model = selected
-        ? (input.scheduled?.model ?? route.model ?? 'default')
+        ? (input.scheduled?.model ?? route.model.value ?? 'default')
         : null;
       work.route =
         selected && model !== null
@@ -470,10 +496,15 @@ export class Tasks {
         } else finish('completed');
         return;
       }
+      const settings = {
+        model,
+        serviceTier: route.serviceTier.value,
+        thinking: route.thinking.value,
+      };
 
       if (input.compact) {
         work.progress.stage = 'compaction';
-        const text = await this.#compact(work, selected.agent, model);
+        const text = await this.#compact(work, selected.agent, settings);
         abort.signal.throwIfAborted();
         work.progress.stage = 'delivery';
         await outbound.send(adapter, reply(message, text), {
@@ -485,7 +516,7 @@ export class Tasks {
 
       ranAgent = true;
       work.progress.stage = 'context';
-      const result = await this.#run(work, selected, model);
+      const result = await this.#run(work, selected.agent, settings);
       work.acceptsSupplements = false;
       abort.signal.throwIfAborted();
       const fallback = work.pendingApprovalFallback;
@@ -534,7 +565,7 @@ export class Tasks {
         store.setSession({
           ...chat,
           agentId: selected.agent.id,
-          model,
+          model: result.scopeModel ?? model,
           sessionId: result.sessionId,
           scopeChatId: result.scopeChatId,
           throughSeq: input.seq,
@@ -600,12 +631,17 @@ export class Tasks {
   async #compact(
     { abort, adapter, chat, id }: Work,
     agent: AgentConnector,
-    model: string,
+    settings: Pick<AgentRequest, 'model' | 'serviceTier' | 'thinking'>,
   ) {
     const { context, log, runtime, store, trace } = this.#deps;
+    const { model } = settings;
     const m = systemMessages(runtime.config.locale);
     if (!agent.compact) return m.compactUnsupported;
-    const session = store.getSession(chat, agent.id, model);
+    const session = store.getSession(
+      chat,
+      agent.id,
+      agent.settings?.perTurn?.includes('model') ? undefined : model,
+    );
     if (
       !session ||
       agent.acceptsSession?.(
@@ -635,7 +671,7 @@ export class Tasks {
       const workdir = await context.workdir(chat);
       signal.throwIfAborted();
       const result = await agent.compact({
-        model,
+        ...settings,
         sessionId: session.sessionId,
         signal,
         workdir,
@@ -652,7 +688,7 @@ export class Tasks {
       attrs.sessionScope = sessionScope(
         { ...chat, chatId: session.scopeChatId ?? chat.chatId },
         agent.id,
-        model,
+        session.model,
         session.sessionId,
       );
       attrs.tokensBefore = result.tokensBefore ?? null;
@@ -675,14 +711,14 @@ export class Tasks {
 
   async #run(
     work: Work,
-    selected: NonNullable<ReturnType<Runtime['getAgent']>>,
-    model: string,
+    agent: AgentConnector,
+    settings: Pick<AgentRequest, 'model' | 'serviceTier' | 'thinking'>,
   ) {
     const { store, auth, context, runtime, trace, hooks } = this.#deps;
     const { chat, input, id, abort, supplements, adapter } = work;
     const { signal } = abort;
     const approvalPending = work.endForApproval.signal;
-    const { agent, config } = selected;
+    const { model } = settings;
     const task: ToolContext = {
       chat,
       signal,
@@ -693,7 +729,11 @@ export class Tasks {
     const definitions = this.#toolDefinitions(adapter);
     const storedSession = input.scheduled
       ? undefined
-      : store.getSession(chat, agent.id, model);
+      : store.getSession(
+          chat,
+          agent.id,
+          agent.settings?.perTurn?.includes('model') ? undefined : model,
+        );
     const session =
       storedSession &&
       agent.acceptsSession?.(storedSession.sessionId, definitions) !== false
@@ -702,6 +742,7 @@ export class Tasks {
     if (!session && !input.scheduled) store.clearSession(chat);
     work.sessionId = session?.sessionId;
     work.sessionScopeChatId = session?.scopeChatId;
+    work.sessionScopeModel = session?.model;
     work.acceptsSupplements = true;
     const assembled = await trace.span('context.assembled', attrs, async () => {
       const blocks = await context.assemble({
@@ -794,6 +835,8 @@ export class Tasks {
               sessionId === session?.sessionId
                 ? session?.scopeChatId
                 : undefined,
+            scopeModel:
+              sessionId === session?.sessionId ? session?.model : undefined,
             onSession: input.scheduled
               ? undefined
               : (sessionId) => {
@@ -802,13 +845,13 @@ export class Tasks {
                     sessionId === session?.sessionId
                       ? session?.scopeChatId
                       : undefined;
+                  work.sessionScopeModel =
+                    sessionId === session?.sessionId ? session?.model : model;
                 },
           },
           agent,
           {
-            model,
-            thinking:
-              store.getWorkspaceSettings(chat)?.thinking ?? config.thinking,
+            ...settings,
             exec: this.#deps.backend(),
             toolsDisabled: runtime.disabled('exec'),
             sandbox: this.#deps.scope(assembled.workdir),
@@ -861,6 +904,7 @@ export class Tasks {
       sessionId,
       scopeChatId:
         sessionId === session?.sessionId ? session?.scopeChatId : undefined,
+      scopeModel: sessionId === session?.sessionId ? session?.model : undefined,
       seenAfter,
       workdir: assembled.workdir,
     };

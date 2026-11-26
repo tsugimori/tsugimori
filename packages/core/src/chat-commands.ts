@@ -15,8 +15,15 @@ const descriptions = {
     en: 'Remove this chat from the allowlist',
     'zh-TW': '將這個對話移出允許清單',
   },
+  fast: {
+    en: 'Show or set fast mode (on, off, default)',
+    'zh-TW': '查看或設定快速模式（on、off、default）',
+  },
   login: { en: 'Sign in to an agent', 'zh-TW': '登入代理' },
-  model: { en: 'Switch this chat’s model', 'zh-TW': '切換這個對話的模型' },
+  model: {
+    en: 'Show or set the model (default to reset)',
+    'zh-TW': '查看或設定模型（default 還原）',
+  },
   pair: {
     en: 'Pair with the bot as its owner',
     'zh-TW': '配對並成為機器人主人',
@@ -24,6 +31,10 @@ const descriptions = {
   preview: { en: 'Close a preview', 'zh-TW': '關閉預覽' },
   previews: { en: 'List open previews', 'zh-TW': '列出開啟中的預覽' },
   status: { en: 'Show status', 'zh-TW': '查看狀態' },
+  thinking: {
+    en: 'Show or set reasoning effort (default to reset)',
+    'zh-TW': '查看或設定推理強度（default 還原）',
+  },
 };
 
 export type Command = { args: string; name: keyof typeof descriptions };

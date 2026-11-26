@@ -111,6 +111,7 @@ async function fixture(
   run: AgentConnector['run'],
   enableAgent = true,
   options: {
+    agentSettings?(id: string): AgentConnector['settings'];
     compact?: AgentConnector['compact'];
     context?: Config['context'];
     describeDefaults?: AgentConnector['describeDefaults'];
@@ -152,6 +153,7 @@ async function fixture(
           describeQuota: options.describeQuota,
           describeSession: options.describeSession,
           run,
+          settings: options.agentSettings?.(id),
           start() {
             agentStarts++;
             return Promise.resolve();
@@ -209,6 +211,7 @@ async function fixture(
   function configure(
     enabled: boolean,
     options: {
+      agents?: Config['agents'];
       compactAt?: number;
       context?: Config['context'];
       model?: string;
@@ -222,14 +225,14 @@ async function fixture(
         platforms:
           options.platform === false ? [] : [{ id: adapterId, kind: 'fake' }],
         agents: enabled
-          ? [
+          ? (options.agents ?? [
               {
                 id: 'test',
                 kind: 'fake',
                 model: options.model ?? 'first',
                 compactAt: options.compactAt,
               },
-            ]
+            ])
           : [],
         defaultAgent: 'test',
         context: options.context ?? contextSettings,
@@ -518,13 +521,13 @@ test('status caches agent defaults and refreshes them on hot reload', async (t) 
   const before = reads;
   assert.match(
     await status('route'),
-    /^Model: first · Effort: low \(default\) · Fast: on$/m,
+    /^Model: first · Effort: low · Fast: on$/m,
   );
   f.store.setWorkspaceSettings(chat, { model: 'default' });
   defaults = { model: 'new-model', effort: 'high', serviceTier: 'default' };
   assert.match(
     await status('cached'),
-    /^Model: provider-model \(default\) · Effort: low \(default\) · Fast: on$/m,
+    /^Model: provider-model · Effort: low · Fast: on$/m,
   );
   assert.equal(reads, before);
 
@@ -533,10 +536,201 @@ test('status caches agent defaults and refreshes them on hot reload', async (t) 
   await until(t, () => reloads() > loaded);
   assert.match(
     await status('refreshed'),
-    /^Model: new-model \(default\) · Effort: high \(default\) · Fast: off$/m,
+    /^Model: new-model · Effort: high · Fast: off$/m,
   );
   assert.equal(f.agentStarts, 1);
   assert.equal(f.agentStops, 0);
+});
+
+test(
+  'owner chat settings override reloaded agent defaults and keep a capable session',
+  { timeout: 5_000 },
+  async (t) => {
+    const requests: AgentRequest[] = [];
+    const f = await fixture(
+      t,
+      async function* (request) {
+        requests.push(request);
+        yield {
+          type: 'sessionId',
+          sessionId: request.resumeSessionId ?? `session-${requests.length}`,
+        };
+        yield { type: 'text.final', text: 'Reply' };
+      },
+      true,
+      {
+        agentSettings: (id) =>
+          id === 'legacy'
+            ? { thinking: ['low'] }
+            : {
+                thinking: ['low', 'high'],
+                serviceTiers: true,
+                perTurn: ['model', 'thinking', 'serviceTier'],
+              },
+        context: { recentMessages: 30, summary: { enabled: false } },
+        describeDefaults: () => ({
+          model: 'provider-model',
+          effort: 'medium',
+          serviceTier: 'fast',
+        }),
+      },
+    );
+    const { gateway, platform, store } = f;
+    const agents = [
+      {
+        id: 'test',
+        kind: 'fake',
+        model: 'configured-model',
+        thinking: 'low',
+        serviceTier: 'default',
+      },
+      { id: 'compatible', kind: 'fake' },
+      { id: 'legacy', kind: 'fake' },
+    ];
+    const configure = async () => {
+      const loaded = f.logs.filter(
+        ({ event }) => event === 'config.reloaded',
+      ).length;
+      await f.configure(true, { agents });
+      await until(
+        t,
+        () =>
+          f.logs.filter(({ event }) => event === 'config.reloaded').length >
+          loaded,
+      );
+    };
+    await configure();
+
+    let id = 0;
+    const say = async (text: string, userId = 'owner') => {
+      await platform.emit(
+        inbound(String(++id), text, { userId, mentionsBot: true }),
+      );
+      await gateway.idle();
+      return platform.sent.at(-1)?.text;
+    };
+    for (const command of ['/model member-model', '/thinking high', '/fast on'])
+      assert.equal(await say(command, 'member'), undefined);
+    assert.equal(store.getChat(chat)?.model, null);
+    assert.equal(store.getChat(chat)?.thinking, null);
+    assert.equal(store.getChat(chat)?.serviceTier, null);
+    assert.equal(await say('/model'), 'Model: configured-model (agent config)');
+    assert.equal(await say('/thinking'), 'Effort: low (agent config)');
+    assert.equal(await say('/fast'), 'Fast: off (agent config)');
+    assert.match(
+      (await say('/status')) ?? '',
+      /^Model: configured-model · Effort: low · Fast: off$/m,
+    );
+    assert.equal(
+      await say('/thinking minimal'),
+      'Usage: /thinking <low|high|default>',
+    );
+    assert.equal(await say('/fast turbo'), 'Usage: /fast <on|off|default>');
+    await say('first turn');
+    assert.equal(requests[0]?.serviceTier, 'default');
+
+    await say('/model chat-model');
+    await say('/thinking high');
+    await say('/fast on');
+    assert.equal(await say('/model'), 'Model: chat-model (this chat)');
+    assert.equal(await say('/thinking'), 'Effort: high (this chat)');
+    assert.equal(await say('/fast'), 'Fast: on (this chat)');
+    assert.match(
+      (await say('/status')) ?? '',
+      /^Model: chat-model · Effort: high · Fast: on$/m,
+    );
+    await say('overridden turn');
+    assert.equal(requests[1]?.model, 'chat-model');
+    assert.equal(requests[1]?.thinking, 'high');
+    assert.equal(requests[1]?.serviceTier, 'fast');
+    assert.equal(requests[1]?.resumeSessionId, 'session-1');
+    assert.equal(store.getSession(chat, 'test')?.model, 'configured-model');
+
+    await say('/model default');
+    await say('/thinking default');
+    await say('/fast default');
+    assert.equal(store.getChat(chat)?.model, null);
+    assert.equal(store.getChat(chat)?.thinking, null);
+    assert.equal(store.getChat(chat)?.serviceTier, null);
+    await say('cleared turn');
+    assert.equal(requests[2]?.model, 'configured-model');
+    assert.equal(requests[2]?.thinking, 'low');
+    assert.equal(requests[2]?.serviceTier, 'default');
+    assert.equal(requests[2]?.resumeSessionId, 'session-1');
+
+    agents[0]!.serviceTier = 'provider-tier';
+    await configure();
+    assert.equal(await say('/fast'), 'Fast: provider-tier (agent config)');
+    await say('reloaded turn');
+    assert.equal(requests[3]?.serviceTier, 'provider-tier');
+
+    await say('/thinking high');
+    await say('/fast off');
+    assert.equal(await say('/agent compatible'), 'Agent set to compatible.');
+    assert.equal(store.getChat(chat)?.thinking, 'high');
+    assert.equal(store.getChat(chat)?.serviceTier, 'default');
+    assert.equal(await say('/model'), 'Model: provider-model (default)');
+    await say('new agent turn');
+    assert.equal(requests[4]?.model, 'default');
+    assert.equal(requests[4]?.serviceTier, 'default');
+    assert.equal(requests[4]?.resumeSessionId, undefined);
+    assert.match(
+      (await say('/agent legacy')) ?? '',
+      /Cleared overrides unsupported by this agent: Effort, Fast\./,
+    );
+    assert.equal(store.getChat(chat)?.thinking, null);
+    assert.equal(store.getChat(chat)?.serviceTier, null);
+    assert.equal(await say('/fast'), 'This agent does not support fast mode.');
+    assert.equal(
+      await say('/fast on'),
+      'This agent does not support fast mode.',
+    );
+    assert.equal(await say('/thinking'), 'Effort: medium (default)');
+    await say('legacy turn');
+    assert.equal(requests[5]?.serviceTier, undefined);
+    assert.equal(await say('/thinking low'), 'Effort set to low.');
+    await say('new legacy session');
+    assert.equal(requests[6]?.thinking, 'low');
+    assert.equal(requests[6]?.resumeSessionId, undefined);
+  },
+);
+
+test('localizes current settings and command usage in Traditional Chinese', async (t) => {
+  const { gateway, platform } = await fixture(
+    t,
+    async function* () {
+      assert.fail('Commands do not run the agent');
+    },
+    true,
+    {
+      locale: 'zh-TW',
+      agentSettings: () => ({
+        thinking: ['minimal', 'low'],
+        serviceTiers: true,
+      }),
+    },
+  );
+  let id = 0;
+  const say = async (text: string) => {
+    await platform.emit(inbound(String(++id), text));
+    await gateway.idle();
+    return platform.sent.at(-1)?.text;
+  };
+  assert.equal(await say('/model'), '模型：first（agent 設定）');
+  assert.equal(await say('/thinking'), '推理：預設（預設）');
+  assert.equal(
+    await say('/thinking max'),
+    '用法：/thinking <minimal|low|default>',
+  );
+  assert.equal(await say('/fast high'), '用法：/fast <on|off|default>');
+  await say('/thinking minimal');
+  await say('/fast on');
+  assert.equal(await say('/thinking'), '推理：minimal（此聊天室）');
+  assert.equal(await say('/fast'), '快速：開（此聊天室）');
+  assert.match(
+    (await say('/status')) ?? '',
+    /^模型：first · 推理：minimal · 快速：開$/m,
+  );
 });
 
 async function until(t: TestContext, condition: () => boolean) {

@@ -1,11 +1,64 @@
+import { drizzle } from 'drizzle-orm/node-sqlite';
+import { migrate } from 'drizzle-orm/node-sqlite/migrator';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, stat } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, rm, stat, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
+import { fileURLToPath } from 'node:url';
 
 import { SqliteStore } from '../src/index.ts';
+
+test('upgrades old chat rows and carries settings through group migration', async (t) => {
+  const temp = await mkdtemp(join(tmpdir(), 'tsugimori-store-settings-'));
+  t.after(() => rm(temp, { recursive: true, force: true }));
+  const path = join(temp, 'store.db');
+  const migrations = fileURLToPath(new URL('../drizzle/', import.meta.url));
+  const legacyMigrations = join(temp, 'drizzle');
+  await mkdir(legacyMigrations);
+  for (const folder of (await readdir(migrations)).sort()) {
+    if (folder.endsWith('_chat_agent_settings')) break;
+    await symlink(
+      join(migrations, folder),
+      join(legacyMigrations, folder),
+      'dir',
+    );
+  }
+  const legacy = new DatabaseSync(path);
+  try {
+    migrate(drizzle({ client: legacy }), {
+      migrationsFolder: legacyMigrations,
+    });
+    legacy.exec(
+      "INSERT INTO chats (adapter_id, chat_id, kind, model) VALUES ('a', 'old', 'group', 'chosen')",
+    );
+  } finally {
+    legacy.close();
+  }
+
+  const chat = { adapterId: 'a', chatId: 'old' };
+  const store = new SqliteStore(path);
+  try {
+    assert.equal(store.getChat(chat)?.model, 'chosen');
+    assert.equal(store.getChat(chat)?.serviceTier, null);
+    assert.equal(store.getChat(chat)?.thinking, null);
+    store.setChatRoute(chat, { serviceTier: 'fast', thinking: 'xhigh' });
+    assert.equal(store.migrateChat(chat, 'new'), true);
+  } finally {
+    store.close();
+  }
+  const reopened = new SqliteStore(path);
+  try {
+    const migrated = reopened.getChat(reopened.resolveChat(chat));
+    assert.equal(migrated?.kind, 'supergroup');
+    assert.equal(migrated?.model, 'chosen');
+    assert.equal(migrated?.serviceTier, 'fast');
+    assert.equal(migrated?.thinking, 'xhigh');
+  } finally {
+    reopened.close();
+  }
+});
 
 test('applies generated migrations, enables WAL, and reopens existing data', async (t) => {
   const temp = await mkdtemp(join(tmpdir(), 'tsugimori-store-'));

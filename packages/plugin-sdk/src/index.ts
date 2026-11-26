@@ -391,6 +391,7 @@ export interface AgentRequest {
   purpose?: 'summary';
   resumeSessionId?: string;
   sandbox?: ExecScope;
+  serviceTier?: string;
   signal: AbortSignal;
   thinking?: string;
   tools: readonly AgentTool[];
@@ -407,8 +408,10 @@ export interface AgentIO {
 export interface AgentCompactRequest {
   model: string;
   sandbox?: ExecScope;
+  serviceTier?: string;
   sessionId: string;
   signal: AbortSignal;
+  thinking?: string;
   workdir: string;
 }
 
@@ -493,6 +496,14 @@ export interface AgentSessionInfo {
   serviceTier?: string | null;
 }
 
+export interface AgentSettings {
+  /** Settings that can change between turns on the same session. */
+  perTurn?: readonly ('model' | 'serviceTier' | 'thinking')[];
+  /** True if the connector accepts arbitrary provider tier names. */
+  serviceTiers?: readonly string[] | true;
+  thinking?: readonly string[];
+}
+
 export interface AgentConnector {
   acceptsSession?(id: string, tools: readonly ToolDefinition[]): boolean;
   compact?(request: AgentCompactRequest): Promise<AgentCompactResult>;
@@ -501,13 +512,17 @@ export interface AgentConnector {
   /** Return cached account quota, if available. */
   describeQuota?(): AgentQuota | undefined;
   /** Return locally observed metadata for the given agent session. */
-  describeSession?(sessionId: string): AgentSessionInfo | undefined;
+  describeSession?(
+    sessionId: string,
+    settings?: Pick<AgentRequest, 'model' | 'serviceTier' | 'thinking'>,
+  ): AgentSessionInfo | undefined;
   id: string;
   /** Human-readable, unlocalized connector name. */
   implementation?: string;
   kind: string;
   loop: 'framework' | 'external';
   run(request: AgentRequest, io: AgentIO): AsyncIterable<AgentEvent>;
+  settings?: AgentSettings;
   start?(): Promise<void>;
   stop?(): Promise<void>;
 }
@@ -527,6 +542,9 @@ export interface PlatformInstanceConfig extends PluginInstanceConfig {
 export type AgentInstanceConfig = PluginInstanceConfig & {
   [option: string]: unknown;
   compactAt?: number;
+  model?: string;
+  serviceTier?: string;
+  thinking?: string;
   version?: string;
 };
 
