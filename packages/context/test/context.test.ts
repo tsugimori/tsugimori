@@ -26,6 +26,10 @@ test('assembles ordered rules, marked recent messages, and scoped resume context
   await mkdir(rules, { recursive: true });
   await mkdir(join(workspace, 'rules'));
   await mkdir(join(workspace, 'platforms'));
+  await writeFile(join(workspace, 'AGENTS.md'), 'workspace rules');
+  await writeFile(join(workspace, 'SOUL.md'), 'persona');
+  await writeFile(join(workspace, 'WORDING.md'), 'wording');
+  await writeFile(join(workspace, 'MEMORY.md'), 'memory');
   await writeFile(join(workspace, 'rules/global.md'), 'global');
   await writeFile(join(workspace, 'platforms/fake.md'), 'platform');
   await writeFile(join(rules, '02.md'), 'chat second');
@@ -68,15 +72,21 @@ test('assembles ordered rules, marked recent messages, and scoped resume context
   };
   const blocks = await context.assemble(input);
   assert.equal(blocks[0]?.source, 'system');
+  assert.match(blocks[0]!.content, /with the guide\.read tool/);
+  assert.match(blocks[0]!.content, /answer exactly NO_REPLY\.$/);
   assert.deepEqual(
     blocks
       .slice(1)
       .map(({ trust, source, content }) => [source, trust, content]),
     [
-      ['rule', 'trusted', 'global'],
-      ['rule', 'trusted', 'platform'],
-      ['rule', 'member', 'chat first'],
-      ['rule', 'member', 'chat second'],
+      ['rule', 'trusted', '--- AGENTS.md ---\nworkspace rules'],
+      ['rule', 'trusted', '--- SOUL.md ---\npersona'],
+      ['rule', 'trusted', '--- WORDING.md ---\nwording'],
+      ['rule', 'trusted', '--- MEMORY.md ---\nmemory'],
+      ['rule', 'trusted', '--- rules/global.md ---\nglobal'],
+      ['rule', 'trusted', '--- platforms/fake.md ---\nplatform'],
+      ['rule', 'member', '--- chat rules: 01.md ---\nchat first'],
+      ['rule', 'member', '--- chat rules: 02.md ---\nchat second'],
       ['message', 'owner', 'owner message'],
       ['message', 'member', 'member message'],
     ],
@@ -85,7 +95,23 @@ test('assembles ordered rules, marked recent messages, and scoped resume context
   const replacement = join(rules, 'new.md');
   await writeFile(replacement, 'updated');
   await rename(replacement, join(rules, '01.md'));
-  assert.equal((await context.assemble(input))[3]?.content, 'updated');
+  await rm(join(workspace, 'AGENTS.md'));
+  await symlink(join(workspace, 'MEMORY.md'), join(workspace, 'AGENTS.md'));
+  await rm(join(workspace, 'WORDING.md'));
+  const reloaded = await context.assemble(input);
+  assert.deepEqual(
+    reloaded
+      .filter(({ source }) => source === 'rule')
+      .map(({ content }) => content),
+    [
+      '--- SOUL.md ---\npersona',
+      '--- MEMORY.md ---\nmemory',
+      '--- rules/global.md ---\nglobal',
+      '--- platforms/fake.md ---\nplatform',
+      '--- chat rules: 01.md ---\nupdated',
+      '--- chat rules: 02.md ---\nchat second',
+    ],
+  );
   assert.deepEqual(
     (await context.assemble({ ...input, afterSeq: old.seq })).map(
       (block) => block.content,

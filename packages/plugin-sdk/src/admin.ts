@@ -105,6 +105,7 @@ export interface AdminTask extends ChatRef {
   inputTokens?: number;
   model: string | null;
   outputTokens?: number;
+  silent?: boolean;
   sourceSeq?: number | null;
   startedAt: number | null;
   status: string;

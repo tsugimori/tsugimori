@@ -87,6 +87,10 @@ function taskDetails(
     .error;
   return {
     ...task,
+    silent: spans.some(
+      ({ attrs, name }) =>
+        name === 'outbound.silent' && attrs.reply === 'silent',
+    ),
     tools: tools.sort(
       (a, b) =>
         a.startedAt - b.startedAt ||

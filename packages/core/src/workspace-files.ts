@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { lstat, mkdir, rename, rm, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, open, realpath, rename, rm } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 
@@ -13,6 +13,10 @@ const environment = {
   GIT_CONFIG_GLOBAL: '/dev/null',
   GIT_TERMINAL_PROMPT: '0',
 };
+
+function errorCode(error: unknown) {
+  return error instanceof Error && 'code' in error ? error.code : undefined;
+}
 
 async function repository(workdir: string) {
   const gitdir = join(workdir, '.git');
@@ -130,12 +134,130 @@ export async function writeWorkspaceSettings(
   userId: string,
   record: boolean,
 ) {
-  const temporary = join(workdir, `.tsugimori-${randomUUID()}`);
+  await writeWorkspaceFile(join(workdir, 'agents.json'), contents);
+  if (record) await recordWorkspace(workdir, userId, true);
+}
+
+export async function writeWorkspaceFile(
+  path: string,
+  contents: Buffer | string,
+  mode = 0o600,
+) {
+  const temporary = join(dirname(path), `.tsugimori-${randomUUID()}`);
+  const file = await open(temporary, 'wx', mode);
   try {
-    await writeFile(temporary, contents, { flag: 'wx', mode: 0o600 });
-    await rename(temporary, join(workdir, 'agents.json'));
-    if (record) await recordWorkspace(workdir, userId, true);
+    try {
+      await file.writeFile(contents);
+    } finally {
+      await file.close();
+    }
+    await rename(temporary, path);
   } finally {
     await rm(temporary, { force: true });
+  }
+}
+
+export async function recordMemory(
+  workdir: string,
+  action: 'add' | 'remove' | 'replace',
+  reason: string,
+  approvedBy: string,
+) {
+  let step = 'inspect Git worktree';
+  const run = (args: string[], timeout = 10_000) =>
+    git(
+      'git',
+      [
+        '-c',
+        'core.hooksPath=/dev/null',
+        '-c',
+        'core.fsmonitor=false',
+        '-c',
+        'commit.gpgsign=false',
+        ...args,
+      ],
+      {
+        cwd: workdir,
+        env: {
+          PATH: environment.PATH,
+          LANG: environment.LANG,
+          HOME: process.env.HOME,
+          SSH_AUTH_SOCK: process.env.SSH_AUTH_SOCK,
+          XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME,
+          GIT_TERMINAL_PROMPT: environment.GIT_TERMINAL_PROMPT,
+        },
+        timeout,
+        killSignal: 'SIGKILL',
+      },
+    );
+  try {
+    const marker = await lstat(join(workdir, '.git')).catch(
+      (error: unknown) => {
+        if (errorCode(error) !== 'ENOENT') throw error;
+      },
+    );
+    if (!marker || (!marker.isFile() && !marker.isDirectory())) return;
+    const root = await run(['rev-parse', '--show-toplevel']);
+    if ((await realpath(root.stdout.replace(/\n$/, ''))) !== workdir) return;
+    const remotes = await run(['remote']);
+    if (!remotes.stdout.split('\n').includes('origin')) return;
+
+    step = 'stage MEMORY.md';
+    await run(['add', '--', 'MEMORY.md']);
+    step = 'commit MEMORY.md';
+    const changed = await run([
+      'diff',
+      '--cached',
+      '--quiet',
+      '--',
+      'MEMORY.md',
+    ]).then(
+      () => false,
+      (error: unknown) => {
+        if (errorCode(error) !== 1) throw error;
+        return true;
+      },
+    );
+    if (changed) {
+      const identity = [];
+      for (const [key, fallback] of [
+        ['user.name', 'tsugimori'],
+        ['user.email', 'tsugimori@localhost'],
+      ] as const) {
+        const configured = await run(['config', '--local', '--get', key]).catch(
+          (error: unknown) => {
+            if (errorCode(error) !== 1) throw error;
+          },
+        );
+        const value = configured?.stdout.replace(/\n$/, '') || fallback;
+        const field = key.slice('user.'.length);
+        identity.push(
+          '-c',
+          `author.${field}=${value}`,
+          '-c',
+          `committer.${field}=${value}`,
+        );
+      }
+      await run([
+        ...identity,
+        'commit',
+        '--quiet',
+        '--only',
+        '--cleanup=verbatim',
+        '-m',
+        `memory: ${action} via tsugimori`,
+        '-m',
+        `Reason: ${reason}\nApprover native ID: ${approvedBy}`,
+        '--',
+        'MEMORY.md',
+      ]);
+    }
+    step = 'push to origin';
+    await run(['push', 'origin', 'HEAD'], 30_000);
+  } catch (error) {
+    const code = errorCode(error);
+    const timedOut =
+      error instanceof Error && 'killed' in error && error.killed;
+    return `${step}${timedOut ? ' timed out' : typeof code === 'number' ? ` failed (exit ${code})` : ' failed'}`;
   }
 }

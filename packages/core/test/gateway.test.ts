@@ -19,9 +19,16 @@ import { SqliteStore } from '@tsugimori/storage-sqlite';
 import { Tracer } from '@tsugimori/trace';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  symlink,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { test, type TestContext } from 'node:test';
 import { setTimeout as delay, setImmediate } from 'node:timers/promises';
 
@@ -2807,6 +2814,393 @@ test(
     assert.deepEqual(delivered?.entities, [
       { type: 'mention', userId: '79', offset: 3, length: 4 },
     ]);
+  },
+);
+
+test(
+  'guide.read confines reads to workspace Markdown and records capped, redacted results',
+  { timeout: 5_000 },
+  async (t) => {
+    const f = await fixture(t, async function* ({ tools }) {
+      const guide = tools.find(({ name }) => name === 'guide.read');
+      assert.ok(guide);
+      const read = (path: string) => guide.run({ path });
+      assert.deepEqual(await read('writing/code.md'), {
+        path: 'writing/code.md',
+        content: 'Review the diff. token=fixture-credential',
+      });
+      for (const path of [
+        '.env',
+        '.hidden/x.md',
+        'data/x.md',
+        'agents/x.md',
+        'runtime/x.md',
+        'chats/a/b/rules/x.md',
+        'node_modules/x.md',
+        '../x.md',
+        'a/../AGENTS.md',
+        'writing/./code.md',
+        'writing//code.md',
+        '/writing/code.md',
+        'writing\\code.md',
+        'writing/\0code.md',
+        'writing/code.txt',
+        'writing/escape.md',
+        'linked/code.md',
+        'writing/directory.md',
+      ]) {
+        assert.deepEqual(await read(path), { error: 'forbidden' }, path);
+      }
+      assert.deepEqual(await read('missing.md'), { error: 'not_found' });
+      assert.deepEqual(await read('writing/large.md'), {
+        path: 'writing/large.md',
+        content: 'x'.repeat(65_535) + '\n[truncated: 65538 bytes total]',
+      });
+      yield { type: 'text.final', text: 'Reviewed.' };
+    });
+    const workspace = dirname(f.path);
+    const outside = await mkdtemp(join(tmpdir(), 'tsugimori-guide-outside-'));
+    t.after(() => rm(outside, { force: true, recursive: true }));
+    await mkdir(join(workspace, 'writing/directory.md'), { recursive: true });
+    await writeFile(
+      join(workspace, 'writing/code.md'),
+      'Review the diff. token=fixture-credential',
+    );
+    await writeFile(
+      join(workspace, 'writing/large.md'),
+      'x'.repeat(65_535) + '界',
+    );
+    await writeFile(join(outside, 'code.md'), 'Outside the workspace');
+    await symlink(
+      join(outside, 'code.md'),
+      join(workspace, 'writing/escape.md'),
+    );
+    await symlink(outside, join(workspace, 'linked'));
+    await f.platform.emit(inbound('guide', 'Read the guidelines'));
+    await f.gateway.idle();
+    assert.equal(f.platform.sent.at(-1)?.text, 'Reviewed.');
+    const task = f.gateway.admin.chat(chat)?.tasks[0];
+    assert.ok(task);
+    const calls = f.store.taskToolCalls([task.id]);
+    assert.equal(calls[0]?.name, 'guide.read');
+    assert.match(calls[0]?.result ?? '', /\[redacted\]/);
+    assert.doesNotMatch(calls[0]?.result ?? '', /fixture-credential/);
+    assert.match(calls.at(-1)?.result ?? '', /omitted/);
+  },
+);
+
+test(
+  'memory.propose edits only after linked owner approval and keeps unrelated file bytes',
+  { timeout: 5_000 },
+  async (t) => {
+    const wait = new AbortController();
+    const timeout = AbortSignal.timeout;
+    t.mock.method(AbortSignal, 'timeout', (ms: number) =>
+      ms === 120_000 ? wait.signal : timeout(ms),
+    );
+    const proposals = {
+      add: {
+        action: 'add',
+        text: 'Uses Taipei time',
+        reason: 'New preference',
+      },
+      replace: {
+        action: 'replace',
+        match: 'Uses Taipei time',
+        text: 'Uses UTC',
+        reason: 'Preference changed',
+      },
+      remove: {
+        action: 'remove',
+        match: 'Uses UTC',
+        reason: 'Preference expired',
+      },
+    };
+    const results: unknown[] = [];
+    let invalid = 0;
+    const f = await fixture(
+      t,
+      async function* (request) {
+        const tool = request.tools.find(
+          ({ name }) => name === 'memory.propose',
+        );
+        assert.ok(tool);
+        const action = request.context.at(-1)?.content as
+          keyof typeof proposals | 'invalid';
+        if (action === 'invalid') {
+          await assert.rejects(
+            tool.run({ ...proposals.remove, match: 'uses UTC' }),
+            /No MEMORY.md bullet exactly matches/,
+          );
+          await assert.rejects(
+            tool.run({ ...proposals.add, text: 'one\ntwo' }),
+            /single line/,
+          );
+          await assert.rejects(
+            tool.run({ ...proposals.add, text: 'a'.repeat(501) }),
+            /Invalid tool arguments/,
+          );
+          invalid++;
+        } else {
+          results.push(await tool.run(proposals[action]));
+        }
+        yield { type: 'text.final', text: 'NO_REPLY' };
+      },
+      true,
+      { outboundPush: 'metered' },
+    );
+    f.platform.platform.capabilities.inlineButtons = false;
+    const group = { chatKind: 'group' as const };
+    await f.platform.emit(inbound('allow-memory', '/allow', group));
+    const path = join(dirname(f.path), 'MEMORY.md');
+    const request = (action: string) =>
+      f.platform.emit(
+        inbound(`proposal-${action}`, action, {
+          ...group,
+          userId: 'member',
+          mentionsBot: true,
+        }),
+      );
+    const approval = async (count: number) => {
+      await until(
+        t,
+        () =>
+          f.platform.sent.filter(({ approval }) => approval).length === count,
+      );
+      const prompt = f.platform.sent.filter(({ approval }) => approval).at(-1)!;
+      await until(
+        t,
+        () =>
+          f.store.findApprovalByPrompt(chat, prompt.messageId) !== undefined,
+      );
+      assert.match(prompt.text, /Update long-term memory \(MEMORY.md\)/);
+      return prompt;
+    };
+    const decide = (id: string, replyTo: string, userId = 'owner') =>
+      f.platform.emit(inbound(id, 'approve', { ...group, replyTo, userId }));
+
+    await request('add');
+    const add = await approval(1);
+    assert.match(add.text, /\+ - Uses Taipei time\n\nReason: New preference/);
+    await assert.rejects(readFile(path), { code: 'ENOENT' });
+    await decide('member-approval', add.messageId, 'member');
+    assert.equal(
+      f.store.findApprovalByPrompt(chat, add.messageId)?.status,
+      'pending',
+    );
+    await assert.rejects(readFile(path), { code: 'ENOENT' });
+    await decide('owner-add', add.messageId);
+    await f.gateway.idle();
+    assert.equal(
+      await readFile(path, 'utf8'),
+      '# MEMORY.md\n\n- Uses Taipei time\n',
+    );
+    assert.equal(f.platform.sent.at(-1)?.replyTo, 'owner-add');
+
+    const surroundings = Buffer.from([
+      0xef, 0xbb, 0xbf, 0x23, 0x20, 0xc3, 0x0d, 0x0a,
+    ]);
+    const suffix = Buffer.from('Other notes without a newline');
+    await writeFile(
+      path,
+      Buffer.concat([
+        surroundings,
+        Buffer.from('- Uses Taipei time\r\n'),
+        suffix,
+      ]),
+    );
+    await request('replace');
+    const replace = await approval(2);
+    assert.match(replace.text, /- - Uses Taipei time\n\+ - Uses UTC/);
+    await decide('owner-replace', replace.messageId);
+    await f.gateway.idle();
+    assert.deepEqual(
+      await readFile(path),
+      Buffer.concat([surroundings, Buffer.from('- Uses UTC\r\n'), suffix]),
+    );
+
+    await request('invalid');
+    await f.gateway.idle();
+    assert.equal(invalid, 1);
+    assert.equal(f.store.listApprovals().length, 2);
+
+    await request('remove');
+    const remove = await approval(3);
+    assert.match(remove.text, /- - Uses UTC/);
+    wait.abort();
+    await f.gateway.idle();
+    assert.equal(
+      f.store.findApprovalByPrompt(chat, remove.messageId)?.status,
+      'pending',
+    );
+    assert.equal(
+      f.platform.sent.at(-1)?.text,
+      'The memory update is waiting for owner approval.',
+    );
+    await decide('owner-remove', remove.messageId);
+    await f.gateway.idle();
+    assert.deepEqual(
+      await readFile(path),
+      Buffer.concat([surroundings, suffix]),
+    );
+    assert.deepEqual(results.slice(0, 2), [
+      { path: 'MEMORY.md' },
+      { path: 'MEMORY.md' },
+    ]);
+    assert.equal((results[2] as { pending: boolean }).pending, true);
+  },
+);
+
+test(
+  'approved memory commits push only MEMORY.md and preserve the local edit on push failure',
+  { timeout: 8_000 },
+  async (t) => {
+    const results: unknown[] = [];
+    const f = await fixture(
+      t,
+      async function* (request) {
+        const tool = request.tools.find(
+          ({ name }) => name === 'memory.propose',
+        );
+        assert.ok(tool);
+        results.push(
+          await tool.run({
+            action: 'add',
+            text: request.context.at(-1)?.content,
+            reason: 'Owner requested it',
+          }),
+        );
+        yield { type: 'text.final', text: 'NO_REPLY' };
+      },
+      true,
+      { locale: 'zh-TW' },
+    );
+    const remote = await mkdtemp(join(tmpdir(), 'tsugimori-memory-remote-'));
+    t.after(() => rm(remote, { force: true, recursive: true }));
+    const workspace = dirname(f.path);
+    const git = (cwd: string, ...args: string[]) =>
+      execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8' });
+    git(remote, 'init', '--bare', '--quiet', '--initial-branch=main');
+    git(workspace, 'init', '--quiet', '--initial-branch=main');
+    git(workspace, 'remote', 'add', 'origin', remote);
+    await writeFile(join(workspace, 'staged.txt'), 'Unrelated staged content');
+    git(workspace, 'add', 'staged.txt');
+
+    const add = async (index: number, text: string) => {
+      await f.platform.emit(inbound(`memory-${index}`, text));
+      await until(
+        t,
+        () =>
+          f.platform.sent.filter(({ approval }) => approval).length === index,
+      );
+      const prompt = f.platform.sent.filter(({ approval }) => approval).at(-1)!;
+      await until(
+        t,
+        () =>
+          f.store.findApprovalByPrompt(chat, prompt.messageId) !== undefined,
+      );
+      const callbackId = prompt.buttons?.[0]?.id;
+      assert.ok(callbackId);
+      assert.match(prompt.text, /更新長期記憶（MEMORY\.md）/);
+      await f.platform.emit({
+        type: 'callback',
+        chatId: chat.chatId,
+        userId: 'owner',
+        callbackId,
+        messageId: prompt.messageId,
+        queryId: `approve-${index}`,
+      });
+      await f.gateway.idle();
+    };
+    await add(1, 'First memory');
+    assert.deepEqual(results[0], { path: 'MEMORY.md' });
+    assert.equal(
+      git(remote, 'show', 'main:MEMORY.md'),
+      '# MEMORY.md\n\n- First memory\n',
+    );
+    assert.equal(
+      git(workspace, 'diff', '--cached', '--name-only'),
+      'staged.txt\n',
+    );
+    assert.match(
+      git(remote, 'log', '-1', '--format=%an <%ae>%n%B'),
+      /^tsugimori <tsugimori@localhost>\nmemory: add via tsugimori\n\nReason: Owner requested it\nApprover native ID: owner/,
+    );
+    assert.equal(git(remote, 'ls-tree', '--name-only', 'main'), 'MEMORY.md\n');
+
+    git(workspace, 'config', '--local', 'user.name', 'Memory Owner');
+    git(workspace, 'config', '--local', 'user.email', 'owner@example.test');
+    git(workspace, 'remote', 'set-url', 'origin', join(remote, 'missing.git'));
+    await add(2, 'Second memory');
+    const expected = '# MEMORY.md\n\n- First memory\n- Second memory\n';
+    assert.equal(
+      await readFile(join(workspace, 'MEMORY.md'), 'utf8'),
+      expected,
+    );
+    assert.equal(git(workspace, 'show', 'HEAD:MEMORY.md'), expected);
+    assert.equal(
+      git(workspace, 'log', '-1', '--format=%an <%ae>'),
+      'Memory Owner <owner@example.test>\n',
+    );
+    assert.match(
+      f.platform.sent.at(-1)?.text ?? '',
+      /^已寫入，但推送失敗：push to origin failed/,
+    );
+    assert.ok(f.logs.some(({ event }) => event === 'memory.git_failed'));
+    assert.match(
+      (results[1] as { warning: string }).warning,
+      /push to origin failed/,
+    );
+  },
+);
+
+test(
+  'only an exact trimmed NO_REPLY completes silently, including split text deltas',
+  { timeout: 5_000 },
+  async (t) => {
+    const f = await fixture(t, async function* (request) {
+      const text = request.context.at(-1)!.content;
+      if (text === 'silent') {
+        for (const part of [' ', 'NO_', 'REP', 'LY', '\n'])
+          yield { type: 'text.delta', text: part };
+      } else {
+        yield { type: 'text.final', text };
+      }
+    });
+    await f.platform.emit(inbound('skipped', 'silent'));
+    await f.gateway.idle();
+    assert.equal(f.platform.sent.length, 0);
+    const task = f.gateway.admin.chat(chat)?.tasks[0];
+    assert.equal(task?.status, 'completed');
+    assert.equal(task?.silent, true);
+    assert.ok(
+      f.store.taskTrace(task!.id).some(({ attrs }) => attrs.reply === 'silent'),
+    );
+    assert.equal(f.gateway.admin.trace(task!.id)?.task.silent, true);
+    assert.ok(
+      f.store
+        .listChatMessages(chat)
+        .every(({ direction }) => direction === 'inbound'),
+    );
+
+    for (const [id, text] of [
+      ['punctuated', 'NO_REPLY.'],
+      ['longer', 'NO_REPLY is a marker'],
+    ]) {
+      await f.platform.emit(inbound(id!, text!));
+      await f.gateway.idle();
+      assert.equal(f.platform.sent.at(-1)?.text, text);
+    }
+    assert.deepEqual(
+      f.platform.sent.map(({ text }) => text),
+      ['NO_REPLY.', 'NO_REPLY is a marker'],
+    );
+    assert.ok(
+      f.gateway.admin
+        .chat(chat)
+        ?.tasks.filter(({ id }) => id !== task?.id)
+        .every(({ silent }) => silent === false),
+    );
   },
 );
 

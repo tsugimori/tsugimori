@@ -32,7 +32,7 @@ import {
   watch,
 } from '@tsugimori/config';
 import { ContextAssembler } from '@tsugimori/context';
-import { SendFailure, SetupError } from '@tsugimori/plugin-sdk';
+import { SendFailure, SetupError, ToolFailure } from '@tsugimori/plugin-sdk';
 import {
   prepareReminder,
   reminderEntities,
@@ -44,6 +44,7 @@ import { isDeepStrictEqual } from 'node:util';
 
 import type { Command } from './chat-commands.ts';
 import type { Logger } from './hooks.ts';
+import type { MemoryResult } from './memory.ts';
 import type { PreviewProviders } from './previews.ts';
 import type { RemovalPlan } from './removal.ts';
 import type { PlatformNotice } from './runtime.ts';
@@ -59,8 +60,10 @@ import { ChatSetup } from './chat-setup.ts';
 import { EnvironmentChecks, failureText } from './checks.ts';
 import { CommandMenus } from './command-menus.ts';
 import { Executions, sandboxScope } from './executions.ts';
+import { guideTools } from './guides.ts';
 import { historyTools } from './history.ts';
 import { HookRunner, logToStderr } from './hooks.ts';
+import { Memory, memoryAction } from './memory.ts';
 import { conversationId, Outbound } from './outbound.ts';
 import { Previews } from './previews.ts';
 import { PluginRegistry } from './registry.ts';
@@ -97,6 +100,7 @@ type LinkedApproval = Exclude<
   { decision: 'expired' }
 > & {
   live: boolean;
+  memoryOutcome?: Promise<MemoryResult>;
   reaction?: Promise<boolean>;
   record: ApprovalRecord;
 };
@@ -120,6 +124,7 @@ export class Gateway {
   readonly #scheduler: Scheduler;
   readonly #previews?: Previews;
   readonly #execution: Executions;
+  readonly #memory: Memory;
   readonly #chatSetup: ChatSetup;
   readonly #chatRemoval: ChatRemoval;
   readonly removal: Removal;
@@ -155,6 +160,7 @@ export class Gateway {
     log = logToStderr,
   }: GatewayDependencies) {
     this.#deps = { store, workspace, log, namedPreview };
+    this.#memory = new Memory(workspace);
     this.admin = adminReader({
       store,
       config: () => this.#runtime.config,
@@ -385,6 +391,13 @@ export class Gateway {
         ...historyTools({
           store,
           timezone: () => this.#runtime.config.timezone,
+        }),
+        ...guideTools({ log, workspace }),
+        ...this.#memory.tools(() => {
+          const { reason, separator } = approvalMessages(
+            this.#runtime.config.locale,
+          );
+          return reason + separator;
         }),
         ...(this.#previews?.tools() ?? []),
         ...this.#execution.workspaceTools(),
@@ -940,7 +953,7 @@ export class Gateway {
             decision: result.decision,
             ...result.record.promptFormat,
           });
-          await this.#approvalOutcome(adapter, result);
+          await this.#approvalOutcome(adapter, result, message);
         }
         return;
       }
@@ -1180,6 +1193,14 @@ export class Gateway {
     const record = store.getApproval(result.id);
     if (!record) return;
     const source = store.getTask(record.taskId);
+    const call = record.continuation;
+    const memoryOutcome =
+      result.approved &&
+      record.action === memoryAction &&
+      call?.kind === 'tool' &&
+      call.name === memoryAction
+        ? this.#applyMemoryApproval(source, record, call.args)
+        : undefined;
     const reaction =
       source &&
       this.#outbound.reactToApproval(
@@ -1189,9 +1210,50 @@ export class Gateway {
       );
     const live = this.#tasks.resolveApproval(result.id, {
       ...result,
+      memoryOutcome,
       reaction,
     });
-    return { ...result, live, reaction, record };
+    return { ...result, live, memoryOutcome, reaction, record };
+  }
+
+  async #applyMemoryApproval(
+    source: TaskRecord | undefined,
+    { decidedBy, id, requester }: ApprovalRecord,
+    args: unknown,
+  ): Promise<MemoryResult> {
+    if (
+      !source ||
+      decidedBy === null ||
+      !this.#canCompleteApproval(source, requester)
+    )
+      return { error: 'The requesting conversation is no longer authorized' };
+    try {
+      const result = await this.#trace.span(
+        'approval.apply',
+        { action: memoryAction, approvalId: id, taskId: source.id },
+        () => this.#memory.apply(args, decidedBy),
+      );
+      if ('warning' in result && result.warning)
+        this.#deps.log({
+          level: 'error',
+          event: 'memory.git_failed',
+          taskId: source.id,
+          reason: result.warning,
+        });
+      return result;
+    } catch (error) {
+      this.#deps.log({
+        level: 'error',
+        event: 'approval.action_failed',
+        taskId: source.id,
+      });
+      return {
+        error:
+          error instanceof ToolFailure
+            ? error.message
+            : 'Could not write MEMORY.md',
+      };
+    }
   }
 
   async #expireApprovals(now: number, adapterIds: readonly string[]) {
@@ -1239,15 +1301,30 @@ export class Gateway {
     );
   }
 
-  async #approvalOutcome(adapter: PlatformAdapter, result: LinkedApproval) {
+  async #approvalOutcome(
+    adapter: PlatformAdapter,
+    result: LinkedApproval,
+    message?: InboundMessage,
+  ) {
     const reacted = await result.reaction;
     const { store, log } = this.#deps;
     const { record, approved, scheduleApplied } = result;
     const source = store.getTask(record.taskId);
     if (!source) return;
-    if (result.live && (reacted || !source.sourceChatId)) return;
     const { locale } = this.#runtime.config;
     const m = approvalMessages(locale).outcomes;
+    if (result.memoryOutcome) {
+      const outcome = await result.memoryOutcome;
+      const text =
+        'error' in outcome
+          ? m.failed
+          : outcome.warning
+            ? m.memoryWarning(outcome.warning)
+            : m.memoryWritten;
+      await this.#notifyApproval(adapter, source, text, message);
+      return;
+    }
+    if (result.live && (reacted || !source.sourceChatId)) return;
     const continuation = record.continuation;
     let text = approved ? m.interrupted : m.denied;
     if (continuation?.kind === 'schedule') {
@@ -1289,26 +1366,35 @@ export class Gateway {
     adapter: PlatformAdapter,
     source: TaskRecord,
     text: string,
+    responseTo?: InboundMessage,
   ) {
-    if ((adapter.capabilities.outboundPush ?? 'free') !== 'free') return;
+    if (!responseTo && (adapter.capabilities.outboundPush ?? 'free') !== 'free')
+      return;
     const { store, log } = this.#deps;
-    const address = store.deliveryAddress(source);
+    const message = responseTo
+      ? undefined
+      : store.getMessage(
+          store.resolveChat(source),
+          source.sourceMessageId,
+          source.sourceChatId ?? '',
+        );
+    const address = responseTo ?? store.deliveryAddress(source);
     if (!address) return;
-    const message = store.getMessage(
-      store.resolveChat(source),
-      source.sourceMessageId,
-      source.sourceChatId ?? '',
-    );
     try {
-      await this.#outbound.send(adapter, {
-        chatId: address.chatId,
-        threadId: address.threadId,
-        replyTo:
-          message && !message.deleted && !source.sourceChatId
-            ? source.sourceMessageId
-            : undefined,
-        text,
-      });
+      await this.#outbound.send(
+        adapter,
+        responseTo
+          ? reply(responseTo, text)
+          : {
+              chatId: address.chatId,
+              threadId: address.threadId,
+              replyTo:
+                message && !message.deleted && !source.sourceChatId
+                  ? source.sourceMessageId
+                  : undefined,
+              text,
+            },
+      );
     } catch {
       log({
         level: 'error',

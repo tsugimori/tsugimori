@@ -43,7 +43,9 @@ function isMissing(error: unknown) {
   return (
     error instanceof Error &&
     'code' in error &&
-    (error.code === 'ENOENT' || error.code === 'ENOTDIR')
+    (error.code === 'ENOENT' ||
+      error.code === 'ENOTDIR' ||
+      error.code === 'ELOOP')
   );
 }
 
@@ -91,7 +93,7 @@ export class ContextAssembler {
         source: 'system',
         trust: 'trusted',
         content:
-          'Older conversation history is available in storage. Apply rules in specificity order: global, platform, then conversation.',
+          'Older conversation history is available in storage. Workspace guideline files follow; AGENTS.md lists further guideline files that you can read with the guide.read tool when a task needs them. Apply rules in specificity order: workspace, platform, then conversation.\nIf the latest message does not need a reply from you, answer exactly NO_REPLY.',
       });
       blocks.push(...(await this.#loadRules(request)));
       const summary = await this.#summary.get(request);
@@ -133,13 +135,22 @@ export class ContextAssembler {
       pathId(request.chatId),
       'rules',
     );
-    const global = join(workspace, 'rules', 'global.md');
-    const platform = join(workspace, 'platforms', `${pathId(request.kind)}.md`);
     const blocks: ContextBlock[] = [];
-    for (const path of [global, platform]) {
-      const content = await this.#readRule(path);
+    for (const path of [
+      'AGENTS.md',
+      'SOUL.md',
+      'WORDING.md',
+      'MEMORY.md',
+      'rules/global.md',
+      `platforms/${pathId(request.kind)}.md`,
+    ]) {
+      const content = await this.#readRule(join(workspace, path));
       if (content !== undefined)
-        blocks.push({ source: 'rule', trust: 'trusted', content });
+        blocks.push({
+          source: 'rule',
+          trust: 'trusted',
+          content: `--- ${path} ---\n${content}`,
+        });
     }
     if (await existsAtPath(chatRules)) {
       const entries = await readdir(chatRules, { withFileTypes: true }).catch(
@@ -155,7 +166,11 @@ export class ContextAssembler {
       for (const filename of filenames) {
         const content = await this.#readRule(join(chatRules, filename));
         if (content !== undefined)
-          blocks.push({ source: 'rule', trust: 'member', content });
+          blocks.push({
+            source: 'rule',
+            trust: 'member',
+            content: `--- chat rules: ${filename} ---\n${content}`,
+          });
       }
     }
     return blocks;

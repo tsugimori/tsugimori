@@ -21,15 +21,25 @@ Build the [live admin console](plugins/web/README.md) with `corepack pnpm --filt
 
 ## Workspace and conversations
 
-| Path                                     | Purpose                                                                                                                                      |
-| ---------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| `tsugimori.json`, `.env`                 | Validated JSON configuration and plugin credentials. Process environment values take precedence over workspace credentials of the same name. |
-| `data/tsugimori.db`                      | Default SQLite database. `init` creates the directory and applies migrations.                                                                |
-| `rules/global.md`, `platforms/<kind>.md` | Optional global and platform rules.                                                                                                          |
-| `chats/<adapter-id>/<chat-id>/`          | Per-chat working directory. It can contain `rules/*.md`, `skills/`, and `agents.json`. Directory names are encoded when needed.              |
-| `agents/<id>/home`, `runtime/`           | Default per-agent login homes and managed runtime files.                                                                                     |
+| Path                            | Purpose                                                                                                                                      |
+| ------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `tsugimori.json`, `.env`        | Validated JSON configuration and plugin credentials. Process environment values take precedence over workspace credentials of the same name. |
+| `data/tsugimori.db`             | Default SQLite database. `init` creates the directory and applies migrations.                                                                |
+| `AGENTS.md`                     | Workspace rules and a map of guidelines to read by task.                                                                                     |
+| `SOUL.md`                       | Agent identity and persona.                                                                                                                  |
+| `WORDING.md`                    | Writing rules for every output.                                                                                                              |
+| `MEMORY.md`                     | Long-term facts and preferences.                                                                                                             |
+| `rules/global.md`               | Optional legacy workspace rules.                                                                                                             |
+| `platforms/<kind>.md`           | Optional rules for the current platform.                                                                                                     |
+| `writing/`                      | Task-specific Markdown guidelines read on demand with `guide.read`.                                                                          |
+| `chats/<adapter-id>/<chat-id>/` | Per-chat working directory. It can contain `rules/*.md`, `skills/`, and `agents.json`. Directory names are encoded when needed.              |
+| `agents/<id>/home`, `runtime/`  | Default per-agent login homes and managed runtime files.                                                                                     |
 
 Keep the deployment workspace separate from the framework checkout. Chat rules take precedence over platform and global rules. Permissions come from the gateway. With Git available, the gateway records chat rule and skill changes under the initiating user's native ID. The `workspace.configure` agent tool can request owner approval for chat defaults for agent, model, and thinking. The gateway records approved settings in `agents.json` and SQLite.
+
+The deployment workspace can be a Git checkout. Use its `.gitignore` to whitelist guideline files only. The `memory.propose` tool requests linked owner approval to add, replace, or remove a bullet in `MEMORY.md`. If the workspace checkout has an `origin`, the gateway commits and pushes the approved edit. The approval result reports any Git failure, and the file edit stays in place.
+
+An agent can stay silent by returning exactly `NO_REPLY`. The gateway completes the task without sending a message and records the silent outcome in the trace and admin API.
 
 Owners are identified by native platform user ID. Set `owner` by adapter ID or platform kind, with the adapter ID taking precedence. To pair an adapter that has no owner, run `corepack pnpm exec tsugimori pair ./ws --adapter <id>` and send the printed `/pair` command to its bot in a DM within ten minutes. Owners trigger the agent in a DM or by mentioning the bot. In an allowlisted chat, members can trigger it by mentioning or replying to the bot. Ordinary messages can enter chat history even when they do not trigger a turn.
 

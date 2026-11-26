@@ -338,7 +338,7 @@ export interface ToolDefinition<A = unknown> {
   name: string;
   permission?: {
     action: string;
-    describe?(args: A, ctx: ToolContext): string;
+    describe?(args: A, ctx: ToolContext): Promise<string> | string;
     resource: (args: A, ctx: ToolContext) => ResourceRef;
     targets?: (args: A, ctx: ToolContext) => PrincipalRef[];
   };

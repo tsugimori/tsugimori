@@ -29,6 +29,9 @@ const catalogs = {
       failed: 'The approved action could not be completed.',
       interrupted:
         'The agent turn ended before it could carry out the approved action. Please submit a new request.',
+      memoryWritten: 'Updated MEMORY.md.',
+      memoryWarning: (reason: string) =>
+        `MEMORY.md was written, but pushing failed: ${reason}`,
       scheduleCreated: (ref: string, timing?: string) =>
         `Schedule #${ref} was created.${timing ? ` It runs ${timing}.` : ''}`,
       scheduleUpdated: (ref: string, timing?: string) =>
@@ -48,6 +51,7 @@ const catalogs = {
     expired: 'Expired',
     pending:
       "I'll check whether this can be scheduled; it takes effect once confirmed.",
+    memoryPending: 'The memory update is waiting for owner approval.',
     unavailable: 'Approval is unavailable.',
     reply: 'Reply directly to this message with “approve” or “deny”.',
     title: 'Approval requested',
@@ -60,6 +64,7 @@ const catalogs = {
       'codex.command': 'Run a Codex command',
       'codex.file_change': 'Apply Codex file changes',
       'codex.permissions': 'Change Codex permissions',
+      'memory.propose': 'Update long-term memory (MEMORY.md)',
       'workspace.configure': 'Change chat workspace settings',
     },
     chat: 'Location',
@@ -105,6 +110,8 @@ const catalogs = {
       completed: '核准的操作已完成。',
       failed: '核准的操作未能完成。',
       interrupted: '代理程式的回合已結束，無法執行核准的操作。請重新提出請求。',
+      memoryWritten: '已更新 MEMORY.md。',
+      memoryWarning: (reason: string) => `已寫入，但推送失敗：${reason}`,
       scheduleCreated: (ref: string, timing?: string) =>
         `已建立排程 #${ref}${timing ? `，${timing}` : ''}。`,
       scheduleUpdated: (ref: string, timing?: string) =>
@@ -115,6 +122,7 @@ const catalogs = {
     },
     expired: '已逾時',
     pending: '會確認是否能排入，確認後生效。',
+    memoryPending: '記憶更新正在等待主人同意。',
     unavailable: '這項審核已無法處理。',
     reply: '請直接回覆這則訊息，輸入「同意」或「拒絕」。',
     title: '需要你同意',
@@ -124,6 +132,7 @@ const catalogs = {
       'codex.command': '執行 Codex 指令',
       'codex.file_change': '套用 Codex 檔案變更',
       'codex.permissions': '變更 Codex 權限',
+      'memory.propose': '更新長期記憶（MEMORY.md）',
       'workspace.configure': '變更聊天室工作區設定',
     },
     chat: '位置',

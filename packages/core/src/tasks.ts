@@ -30,6 +30,7 @@ import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 
 import type { HookRunner, Logger } from './hooks.ts';
+import type { MemoryResult } from './memory.ts';
 import type { Runtime } from './runtime.ts';
 import type { BackgroundSummaries } from './summary.ts';
 import type { TaskInput } from './supplements.ts';
@@ -40,6 +41,7 @@ import { protectTools, runAgent, sessionScope } from './agent-run.ts';
 import { acceptsServiceTier, resolveAgentSetting } from './agent-settings.ts';
 import { approvalMessages, approvalPrompt } from './approval-messages.ts';
 import { describeError } from './errors.ts';
+import { memoryAction } from './memory.ts';
 import { conversationId, DeliveryError, Outbound } from './outbound.ts';
 import { Supplements } from './supplements.ts';
 import { systemMessages } from './system-messages.ts';
@@ -96,6 +98,7 @@ type ApprovalAnswer =
   | {
       approved: boolean;
       failureReason?: string;
+      memoryOutcome?: Promise<MemoryResult>;
       reaction?: Promise<boolean>;
       scheduleApplied?: boolean;
     }
@@ -529,8 +532,22 @@ export class Tasks {
       work.acceptsSupplements = false;
       abort.signal.throwIfAborted();
       const fallback = work.pendingApprovalFallback;
-      const text = [result.text, fallback].filter(Boolean).join('\n\n');
-      if (text) {
+      // An exact NO_REPLY stays silent, but a pending-approval notice is still sent.
+      const silent = result.text.trim() === 'NO_REPLY';
+      const text = [silent ? '' : result.text, fallback]
+        .filter(Boolean)
+        .join('\n\n');
+      if (silent && !text) {
+        this.#deps.trace.record('outbound.silent', {
+          ...chat,
+          taskId: id,
+          reply: 'silent',
+        });
+        await this.#deps.trace.flush().catch(() => {
+          log({ level: 'error', event: 'trace.flush_failed', taskId: id });
+        });
+        finish('completed');
+      } else if (text) {
         work.progress.stage = 'delivery';
         const scheduled = input.scheduled;
         const output = scheduled
@@ -889,7 +906,7 @@ export class Tasks {
                 undefined,
                 onPending,
               );
-              if (typeof result === 'object') {
+              if (typeof result === 'object' && 'pending' in result) {
                 // The connector's approval call can be interrupted before it returns.
                 stopForApproval();
               }
@@ -959,11 +976,15 @@ export class Tasks {
     if (result === 'timeout') {
       return {
         ...pendingApprovalResult,
-        summary: this.#markApprovalPending(work),
+        summary: this.#markApprovalPending(
+          work,
+          request.action === memoryAction,
+        ),
       };
     }
     if (!result || result === 'expired') return false;
     await result.reaction;
+    if (result.memoryOutcome) return { result: await result.memoryOutcome };
     return result.approved;
   }
 
@@ -1018,8 +1039,9 @@ export class Tasks {
     detail?.deny();
   }
 
-  #markApprovalPending(work: Work) {
-    const summary = approvalMessages(this.#deps.runtime.config.locale).pending;
+  #markApprovalPending(work: Work, memory = false) {
+    const messages = approvalMessages(this.#deps.runtime.config.locale);
+    const summary = memory ? messages.memoryPending : messages.pending;
     const push = work.adapter.capabilities.outboundPush ?? 'free';
     if (!work.endForApproval.signal.aborted) {
       if (
@@ -1060,7 +1082,8 @@ export class Tasks {
         : chat;
       const reuseGrant = schedule
         ? schedule.reuseGrant
-        : request.resource.type !== 'schedule';
+        : request.action !== memoryAction &&
+          request.resource.type !== 'schedule';
       if (reuseGrant) {
         const requester = input.message.userId;
         for (const approver of new Set([schedule?.approverId, owner])) {
