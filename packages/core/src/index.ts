@@ -274,6 +274,7 @@ export class Gateway {
       trace: this.#trace,
     });
     this.#chatRemoval = new ChatRemoval({
+      choices: this.#chatChoices,
       execute: (plan, actor, adapterId) =>
         this.removeInstance(plan, actor, adapterId),
       isOwner: (adapterId, userId) => this.#auth.isOwner({ adapterId, userId }),

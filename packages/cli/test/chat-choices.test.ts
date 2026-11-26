@@ -388,3 +388,34 @@ test(
     await f.say('/cancel');
   },
 );
+
+test(
+  'Telegram /remove confirmation offers Delete and Cancel buttons for the owner only',
+  { timeout: 6_000 },
+  async (t) => {
+    const f = await fixture(t);
+    await f.say('/remove agent second');
+    const first = await f.prompt('Press Delete or reply yes');
+    const [, cancel] = buttons(first, ['Delete', 'Cancel']);
+    assert.match(
+      (await f.press(first.id, cancel!, owner + 1)) ?? '',
+      /unavailable/,
+    );
+    await f.press(first.id, cancel!);
+    assert.match((await f.edit(first.id)).text, /Selected: Cancel/);
+    assert.deepEqual((await f.edit(first.id)).reply_markup, {
+      inline_keyboard: [],
+    });
+    await f.prompt('Removal cancelled.');
+    assert.match((await f.press(first.id, cancel!)) ?? '', /unavailable/);
+
+    const start = f.sent.length;
+    await f.say('/remove agent second');
+    const second = await f.prompt('Press Delete or reply yes', start);
+    const [remove] = buttons(second, ['Delete', 'Cancel']);
+    await f.press(second.id, remove!);
+    assert.match((await f.edit(second.id)).text, /Selected: Delete/);
+    const done = await f.prompt('Removed agent second.', start + 1);
+    assert.match(done.text, /Backup/);
+  },
+);

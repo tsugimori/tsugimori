@@ -98,7 +98,7 @@ Rerun the same command and ID to resume an interrupted attempt from its saved ch
 
 ### Remove an instance
 
-Run `/remove <platform|agent> <id>` and reply to the plan with `yes` within 10 minutes. Any other reply or `/cancel` cancels. To remove the platform you are currently using, switch to another platform or run `corepack pnpm exec tsugimori remove <platform|agent> <id> [--dir <dir>] [--yes]`. The CLI prints the plan and prompts unless you pass `--yes`. Run it under the gateway's OS account when the gateway is running.
+Run `/remove <platform|agent> <id>` and confirm within 10 minutes: press **Delete** on platforms with buttons, or reply to the plan with `yes`. **Cancel**, any other reply, or `/cancel` cancels. To remove the platform you are currently using, switch to another platform or run `corepack pnpm exec tsugimori remove <platform|agent> <id> [--dir <dir>] [--yes]`. The CLI prints the plan and prompts unless you pass `--yes`. Run it under the gateway's OS account when the gateway is running.
 
 Cancel an active setup for that instance before removing it. To remove the default agent, first set `defaultAgent` to another enabled agent in `tsugimori.json`. Without an explicit setting, the first enabled agent is the default. Chats whose agent override is removed fall back to the workspace default.
 

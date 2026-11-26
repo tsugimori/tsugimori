@@ -8,14 +8,25 @@ import type { RemovalTarget } from '@tsugimori/storage';
 
 import { SetupError } from '@tsugimori/plugin-sdk';
 
+import type { ChatChoices } from './chat-choices.ts';
 import type { Logger } from './hooks.ts';
 import type { Outbound } from './outbound.ts';
 import type { Removal, RemovalPlan } from './removal.ts';
 
+import { choiceLabel, supportsChoices } from './chat-choices.ts';
 import { formatRemovalPlan, removalMessages } from './removal-messages.ts';
+import { systemMessages } from './system-messages.ts';
 import { reply } from './tasks.ts';
 
+type Finish = (text: string, retainPrompt?: boolean) => Promise<void>;
+
+const confirmChoices = [
+  { value: 'yes', label: 'Delete', localized: { 'zh-TW': '刪除' } },
+  { value: 'no', label: 'Cancel', localized: { 'zh-TW': '取消' } },
+] as const;
+
 interface Dependencies {
+  choices: ChatChoices;
   execute(
     plan: RemovalPlan,
     actor: string,
@@ -28,6 +39,7 @@ interface Dependencies {
 }
 
 interface Pending extends ChatRef {
+  finish?: Finish;
   messageIds: ReadonlySet<string>;
   plan: RemovalPlan;
   timer: NodeJS.Timeout;
@@ -63,12 +75,41 @@ export class ChatRemoval {
         adapterId: adapter.id,
         locale,
       });
-      const receipt = await send(formatRemovalPlan(plan, true));
+      const inline = supportsChoices(adapter);
+      const text = formatRemovalPlan(plan, true, inline);
+      let finish: Finish | undefined;
+      let receipt;
+      if (inline) {
+        const buttons = await this.#deps.choices.send(
+          adapter,
+          reply(message, text),
+          message.userId,
+          confirmChoices,
+          (choice, done) => {
+            const current = this.#pending;
+            if (current?.plan !== plan) return done(m.cancelled, true);
+            return this.#decide(
+              adapter,
+              current,
+              message,
+              choice.value === 'yes',
+              choiceLabel(choice, locale),
+            );
+          },
+          { active: () => this.#pending?.plan === plan },
+        );
+        finish = buttons.finish;
+        receipt = { messageId: buttons.address.messageId };
+      } else receipt = await send(text);
       const messageIds = new Set([
         receipt.messageId,
         ...(receipt.parts?.map((part) => part.messageId) ?? []),
       ]);
       const timer = setTimeout(() => {
+        void this.#pending?.finish?.(
+          systemMessages(plan.locale).choices.expired,
+          true,
+        );
         this.stop();
         // The next command can start a fresh confirmation when the prompt expires.
         this.#deps.log({
@@ -83,6 +124,7 @@ export class ChatRemoval {
         timer,
         plan,
         messageIds,
+        finish,
       };
     } catch (error) {
       await send(error instanceof SetupError ? error.message : m.unavailable);
@@ -109,18 +151,42 @@ export class ChatRemoval {
     )
       return false;
     if (message.edited) return true;
+    await this.#decide(
+      adapter,
+      pending,
+      message,
+      !cancel && message.text.trim() === 'yes',
+    );
+    return true;
+  }
+
+  async #decide(
+    adapter: PlatformAdapter,
+    pending: Pending,
+    message: InboundMessage,
+    confirmed: boolean,
+    label?: string,
+  ) {
     this.stop();
     const m = removalMessages(pending.plan.locale);
-    const text =
-      cancel || message.text.trim() !== 'yes'
-        ? m.cancelled
-        : await this.#deps
-            .execute(pending.plan, message.userId, adapter.id)
-            .catch((error: unknown) =>
-              error instanceof SetupError ? error.message : m.unavailable,
-            );
+    const choices = systemMessages(pending.plan.locale).choices;
+    const feedback = pending.finish?.(
+      label
+        ? choices.answer(label)
+        : confirmed
+          ? choices.answer('yes')
+          : choices.cancelled,
+      true,
+    );
+    const text = !confirmed
+      ? m.cancelled
+      : await this.#deps
+          .execute(pending.plan, message.userId, adapter.id)
+          .catch((error: unknown) =>
+            error instanceof SetupError ? error.message : m.unavailable,
+          );
+    await feedback;
     await this.#deps.outbound.send(adapter, reply(message, text));
-    return true;
   }
 
   stop(adapterId?: string) {

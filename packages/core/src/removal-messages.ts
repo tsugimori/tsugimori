@@ -51,6 +51,8 @@ export function removalMessages(locale: Config['locale']) {
       ownPlatform: '無法從這個平台移除它自己。請從另一個平台或 CLI 執行。',
       prompt:
         '請回覆這則訊息 yes 以刪除，其他回覆會取消。10 分鐘後逾時，也可傳送 /cancel。',
+      promptButtons:
+        '按「刪除」或回覆這則訊息 yes 以刪除，按「取消」或其他回覆會取消。10 分鐘後逾時，也可傳送 /cancel。',
       recheck: '重新檢查移除清單',
       saved: (file: string) => `已備份 ${file}`,
       unavailable: '無法產生或完成移除作業。請查看工作區與服務狀態。',
@@ -103,6 +105,8 @@ export function removalMessages(locale: Config['locale']) {
     ownPlatform: 'Use another platform or the CLI to remove this platform.',
     prompt:
       'Reply yes to this message to delete. Any other reply cancels. This prompt expires in 10 minutes. You can also send /cancel.',
+    promptButtons:
+      'Press Delete or reply yes to this message to delete. Cancel or any other reply cancels. This prompt expires in 10 minutes. You can also send /cancel.',
     recheck: 'Recheck the removal plan',
     saved: (file: string) => `Backed up ${file}`,
     unavailable:
@@ -113,7 +117,11 @@ export function removalMessages(locale: Config['locale']) {
   };
 }
 
-export function formatRemovalPlan(plan: RemovalPlan, chat = false) {
+export function formatRemovalPlan(
+  plan: RemovalPlan,
+  chat = false,
+  buttons = false,
+) {
   const {
     category,
     chatDefaults,
@@ -192,6 +200,9 @@ export function formatRemovalPlan(plan: RemovalPlan, chat = false) {
     row(zh ? '取消進行中的任務' : 'Cancel active tasks', rows.tasks),
     row(zh ? '取消排程' : 'Cancel schedules', rows.schedules),
   );
-  if (chat) lines.push('', removalMessages(locale).prompt);
+  if (chat) {
+    const m = removalMessages(locale);
+    lines.push('', buttons ? m.promptButtons : m.prompt);
+  }
   return lines.join('\n');
 }
