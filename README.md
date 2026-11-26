@@ -32,7 +32,7 @@ For manual configuration, use the [example workspace](examples/workspace/tsugimo
 
 ## Plugin configuration
 
-Platform adapters declare `outboundPush`. `free` is the default and allows proactive sends without quota. `metered` uses quota for sends outside a current inbound reply. `none` only supports replies to a current inbound. Telegram declares `free`.
+Platform adapters declare `outboundPush`. `free` is the default and allows proactive sends without quota. `metered` uses quota for sends outside a current inbound reply. `none` only supports replies to a current inbound. Supported platforms are Telegram (`free`) and LINE (`metered`).
 
 ### Telegram
 
@@ -51,6 +51,16 @@ Telegram’s `/` menu shows `/pair` in private chats before the bot has an owner
 When Telegram reports a group upgrade, tsugimori carries the group's allowlist and agent settings to the supergroup and registers its menu there. If Telegram reports that a chat or member is unavailable, menu registration for that scope resumes when the bot receives a new message from that chat.
 
 Set the workspace `locale` to `zh-TW` for Traditional Chinese approval prompts and owner notices, including startup environment checks. The default is `en`. Telegram reminders and approval prompts use each recipient’s latest known `@username` when available, falling back to a native mention on the display name.
+
+### LINE
+
+Create a Messaging API channel, then run `corepack pnpm exec tsugimori add platform line --id main --dir ./ws` or use `/add platform line --id main` from an existing owner chat. Enter the channel secret and long-lived channel access token at the secret prompts, then confirm the bot name. Set the LINE owner ID in `owner` or use the pairing command after the webhook is live.
+
+For manual setup, add a `platforms` entry with `kind: "line"`, a unique `id`, and credentials in `LINE_CHANNEL_SECRET` and `LINE_CHANNEL_ACCESS_TOKEN`. Use `secretEnv` and `tokenEnv` to change the credential names. The `listen` address defaults to `127.0.0.1:8788`. Each additional instance needs its own loopback port.
+
+Use a reverse proxy or a named Cloudflare Tunnel to route a public HTTPS URL to the loopback listener. For instance `main`, route `/line/main/webhook` to that same path on the listener and leave it accessible to LINE without an interactive login. In the LINE Developers Console, set the Webhook URL, verify it, and turn on **Use webhook**. To receive group and room messages, also enable **Allow bot to join group chats**.
+
+A fresh reply token can send the first batch of a response. `replyTokenTtlMs` defaults to 50,000 milliseconds and accepts up to 60,000. Other batches and messages without a usable token use metered push and count toward the LINE account's messaging quota. To decide an approval, quote the prompt and reply with the displayed approval or denial word.
 
 ### Codex
 

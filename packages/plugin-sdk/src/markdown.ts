@@ -1,6 +1,6 @@
-import type { TextEntity, TextRange } from '@tsugimori/plugin-sdk';
+import type { TextEntity, TextRange } from './index.ts';
 
-import { userMentionLinks } from '@tsugimori/plugin-sdk';
+import { userMentionLinks } from './mentions.ts';
 
 type Style = 'bold' | 'italic' | 'strikethrough';
 export type MarkdownEntity = TextRange &

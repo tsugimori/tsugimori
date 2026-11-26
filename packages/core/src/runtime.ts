@@ -548,6 +548,8 @@ export class Runtime {
           loadCursor: (stream) => store.getCursor(adapter.id, stream),
           saveCursor: (stream, cursor) =>
             store.saveCursor(adapter.id, stream, cursor),
+          logDebug: (event) =>
+            log({ level: 'debug', event, adapterId: adapter.id }),
           logError: (event, error) =>
             log({
               level: 'error',

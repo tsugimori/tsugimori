@@ -21,6 +21,7 @@ import {
 } from '@tsugimori/core';
 import { SetupError } from '@tsugimori/core';
 import sandbox from '@tsugimori/exec-local-sandbox';
+import line from '@tsugimori/platform-line';
 import telegram from '@tsugimori/platform-telegram';
 import { SqliteStore } from '@tsugimori/storage-sqlite';
 import tunnel, { NamedTunnel, QuickTunnel } from '@tsugimori/tunnel-cloudflare';
@@ -38,7 +39,14 @@ class UsageError extends Error {}
 
 export async function main(
   argv: string[],
-  registry = new PluginRegistry([telegram, codex, claude, sandbox, tunnel]),
+  registry = new PluginRegistry([
+    telegram,
+    line,
+    codex,
+    claude,
+    sandbox,
+    tunnel,
+  ]),
   deps: SetupDependencies = {},
 ) {
   const [command, ...args] = argv;

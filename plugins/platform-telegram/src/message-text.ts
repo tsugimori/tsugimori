@@ -1,14 +1,15 @@
 import type {
   AdapterContext,
+  MarkdownEntity,
   OutboundMessage,
   TextRange,
 } from '@tsugimori/plugin-sdk';
 
-import { containsMention, userMentionLinks } from '@tsugimori/plugin-sdk';
-
-import type { MarkdownEntity } from './markdown.ts';
-
-import { renderMarkdown } from './markdown.ts';
+import {
+  containsMention,
+  renderMarkdown,
+  userMentionLinks,
+} from '@tsugimori/plugin-sdk';
 
 export const maxMessage = 4096;
 

@@ -17,6 +17,9 @@
       "path": "../../plugins/platform-telegram/tsconfig.build.json"
     },
     {
+      "path": "../../plugins/platform-line/tsconfig.build.json"
+    },
+    {
       "path": "../../plugins/agent-codex/tsconfig.build.json"
     },
     {

@@ -243,6 +243,9 @@ importers:
       '@tsugimori/exec-local-sandbox':
         specifier: workspace:*
         version: link:../../plugins/exec-local-sandbox
+      '@tsugimori/platform-line':
+        specifier: workspace:*
+        version: link:../../plugins/platform-line
       '@tsugimori/platform-telegram':
         specifier: workspace:*
         version: link:../../plugins/platform-telegram
@@ -364,6 +367,12 @@ importers:
         version: link:../../packages/plugin-sdk
 
   plugins/exec-local-sandbox:
+    dependencies:
+      '@tsugimori/plugin-sdk':
+        specifier: workspace:*
+        version: link:../../packages/plugin-sdk
+
+  plugins/platform-line:
     dependencies:
       '@tsugimori/plugin-sdk':
         specifier: workspace:*

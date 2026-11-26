@@ -13,7 +13,7 @@ export type Logger = (entry: {
   code?: number;
   error?: string;
   event: string;
-  level: 'error' | 'info' | 'warn';
+  level: 'debug' | 'error' | 'info' | 'warn';
   migratedToChatId?: string;
   nextDelayMs?: number | null;
   reason?: string;

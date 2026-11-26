@@ -1,3 +1,6 @@
+export type { MarkdownEntity } from './markdown.ts';
+export { renderMarkdown } from './markdown.ts';
+
 import type { CheckContext, CheckItem, SetupStep } from './setup.ts';
 
 export type {
@@ -140,16 +143,19 @@ export class SendFailure extends Error {
     options: {
       deliveryUnknown: boolean;
       parts: readonly SendPart[];
+      retryAfterMs?: number;
     },
     cause: unknown,
   ) {
     super('Platform send failed', { cause });
     this.deliveryUnknown = options.deliveryUnknown;
     this.parts = options.parts;
+    this.retryAfterMs = options.retryAfterMs;
   }
 
   readonly deliveryUnknown: boolean;
   readonly parts: readonly SendPart[];
+  readonly retryAfterMs?: number;
 }
 
 export interface AdapterCursor {
@@ -163,6 +169,7 @@ export interface AdapterContext {
     userId: string,
   ): { display: string | null; username: string | null } | undefined;
   loadCursor?(stream: string): AdapterCursor | undefined;
+  logDebug?(event: string): void;
   logError?(event: string, error?: unknown): void;
   logWarning?(event: string): void;
   ready?: Promise<void>;

@@ -80,6 +80,40 @@
             "then": {
               "required": ["tokenEnv"]
             }
+          },
+          {
+            "if": {
+              "properties": {
+                "kind": {
+                  "const": "line"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "listen": {
+                  "type": "string",
+                  "pattern": "^(127\\.0\\.0\\.1|\\[::1\\]):([0-9]{1,5})$",
+                  "default": "127.0.0.1:8788"
+                },
+                "replyTokenTtlMs": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 60000,
+                  "default": 50000
+                },
+                "secretEnv": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+                  "default": "LINE_CHANNEL_SECRET"
+                },
+                "tokenEnv": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+                  "default": "LINE_CHANNEL_ACCESS_TOKEN"
+                }
+              }
+            }
           }
         ]
       }

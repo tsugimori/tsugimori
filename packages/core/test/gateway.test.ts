@@ -1331,6 +1331,54 @@ test(
 );
 
 test(
+  'a metered platform without buttons accepts a quoted text approval',
+  { timeout: 5_000 },
+  async (t) => {
+    const calls: unknown[] = [];
+    const f = await fixture(
+      t,
+      async function* (request) {
+        const tool = request.tools.find(({ name }) => name === 'scoped_tool');
+        assert.ok(tool);
+        await tool.run({ id: 'text-approval' });
+      },
+      true,
+      {
+        outboundPush: 'metered',
+        onScopedTool: (args, userId) => calls.push({ args, userId }),
+      },
+    );
+    f.platform.platform.capabilities.inlineButtons = false;
+    const group = { chatKind: 'group' as const };
+    await f.platform.emit(inbound('allow-text-approval', '/allow', group));
+    await f.platform.emit(
+      inbound('request-text-approval', 'Use the scoped tool', {
+        ...group,
+        mentionsBot: true,
+        userId: 'member',
+      }),
+    );
+    await until(t, () =>
+      f.store.listApprovals().some(({ promptMessageId }) => promptMessageId),
+    );
+    const prompt = f.platform.sent.find(({ approval }) => approval);
+    assert.ok(prompt);
+    assert.equal(prompt.buttons, undefined);
+    assert.match(prompt.text, /Reply directly.*approve.*deny/);
+    await f.platform.emit(
+      inbound('approve-by-quote', 'approve', {
+        ...group,
+        replyTo: prompt.messageId,
+      }),
+    );
+    await f.gateway.idle();
+    assert.deepEqual(calls, [
+      { args: { id: 'text-approval' }, userId: 'member' },
+    ]);
+  },
+);
+
+test(
   'a detached framework tool runs once with the original arguments and requester',
   { timeout: 5_000 },
   async (t) => {

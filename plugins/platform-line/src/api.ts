@@ -1,0 +1,180 @@
+import { randomUUID } from 'node:crypto';
+import { setTimeout as delay } from 'node:timers/promises';
+
+export function record(value: unknown): Record<string, unknown> | undefined {
+  if (value && typeof value === 'object' && !Array.isArray(value))
+    return value as Record<string, unknown>;
+}
+
+export function nonempty(value: unknown) {
+  return typeof value === 'string' && value ? value : undefined;
+}
+
+function retryAfterMs(value: string | null) {
+  if (value === null) return;
+  if (/^\d+$/.test(value)) {
+    const ms = Number(value) * 1000;
+    return Number.isSafeInteger(ms) ? ms : undefined;
+  }
+  const date = Date.parse(value);
+  if (Number.isFinite(date)) return Math.max(0, date - Date.now());
+}
+
+export class LineApiError extends Error {
+  readonly deliveryUnknown: boolean;
+  readonly status?: number;
+  readonly retryAfterMs?: number;
+  readonly invalidReplyToken: boolean;
+
+  constructor(
+    deliveryUnknown: boolean,
+    status?: number,
+    retryAfterMs?: number,
+    invalidReplyToken = false,
+  ) {
+    super(
+      status === undefined
+        ? 'LINE API request failed'
+        : `LINE API returned HTTP ${status}`,
+    );
+    this.deliveryUnknown = deliveryUnknown;
+    this.status = status;
+    this.retryAfterMs = retryAfterMs;
+    this.invalidReplyToken = invalidReplyToken;
+  }
+}
+
+export interface LineText {
+  quoteToken?: string;
+  text: string;
+  type: 'text';
+}
+
+export class LineApi {
+  readonly #fetch: typeof globalThis.fetch;
+  readonly #token: string;
+
+  constructor(fetch: typeof globalThis.fetch, token: string) {
+    this.#fetch = fetch;
+    this.#token = token;
+  }
+
+  async identity(signal: AbortSignal) {
+    const body = record(await this.#request('/v2/bot/info', signal));
+    const id = nonempty(body?.userId);
+    const username = nonempty(nonempty(body?.basicId)?.replace(/^@/, ''));
+    const displayName = nonempty(body?.displayName);
+    if (!id || !username || !displayName)
+      throw new Error('LINE bot info returned an invalid identity');
+    return { id, username, displayName };
+  }
+
+  async profile(path: string, signal: AbortSignal) {
+    const body = record(await this.#request(path, signal));
+    return nonempty(body?.displayName);
+  }
+
+  loading(chatId: string, signal: AbortSignal) {
+    return this.#request('/v2/bot/chat/loading/start', signal, {
+      chatId,
+      loadingSeconds: 20,
+    });
+  }
+
+  async reply(replyToken: string, messages: LineText[], signal: AbortSignal) {
+    const body = await this.#request('/v2/bot/message/reply', signal, {
+      messages,
+      replyToken,
+    });
+    return sentIds(body, messages.length);
+  }
+
+  async push(to: string, messages: LineText[], signal: AbortSignal) {
+    const retryKey = randomUUID();
+    const send = () =>
+      this.#request('/v2/bot/message/push', signal, { messages, to }, retryKey);
+    let body: unknown;
+    try {
+      body = await send();
+    } catch (error) {
+      if (!(error instanceof LineApiError) || (error.status ?? 0) < 500)
+        throw error;
+      // A server error can follow acceptance. Reuse the key for this batch.
+      try {
+        await delay(250, undefined, { signal });
+        body = await send();
+      } catch (retryError) {
+        if (retryError instanceof LineApiError && retryError.deliveryUnknown)
+          throw retryError;
+        throw new LineApiError(
+          true,
+          retryError instanceof LineApiError ? retryError.status : error.status,
+          retryError instanceof LineApiError
+            ? retryError.retryAfterMs
+            : undefined,
+        );
+      }
+    }
+    return sentIds(body, messages.length);
+  }
+
+  async #request(
+    path: string,
+    signal: AbortSignal,
+    body?: object,
+    retryKey?: string,
+  ): Promise<unknown> {
+    signal.throwIfAborted();
+    const headers = new Headers({ Authorization: `Bearer ${this.#token}` });
+    if (body) headers.set('Content-Type', 'application/json');
+    if (retryKey) headers.set('X-Line-Retry-Key', retryKey);
+    let response: Response;
+    try {
+      response = await this.#fetch(new URL(path, 'https://api.line.me'), {
+        body: body && JSON.stringify(body),
+        headers,
+        method: body ? 'POST' : 'GET',
+        redirect: 'error',
+        signal,
+      });
+    } catch {
+      throw new LineApiError(!!body);
+    }
+    const accepted =
+      response.ok ||
+      (retryKey &&
+        response.status === 409 &&
+        response.headers.has('X-Line-Accepted-Request-Id'));
+    if (accepted) {
+      try {
+        return await response.json();
+      } catch {
+        throw new LineApiError(!!body);
+      }
+    }
+    const error: unknown = await response.json().catch(() => undefined);
+    throw new LineApiError(
+      !!body && response.status >= 500,
+      response.status,
+      response.status === 429
+        ? retryAfterMs(response.headers.get('Retry-After'))
+        : undefined,
+      response.status === 400 &&
+        record(error)?.message === 'Invalid reply token',
+    );
+  }
+}
+
+function sentIds(body: unknown, count: number) {
+  const messages = record(body)?.sentMessages;
+  if (!Array.isArray(messages) || messages.length !== count)
+    throw new LineApiError(true);
+  return messages.map((value: unknown) => {
+    const id = record(value)?.id;
+    if (typeof id === 'number' && Number.isSafeInteger(id) && id > 0)
+      return String(id);
+    const text = nonempty(id);
+    if (!text) throw new LineApiError(true);
+    return text;
+  });
+}
