@@ -3696,6 +3696,12 @@ test('records and redacts framework and external tool details without changing a
   assert.equal(view.tasks[0]?.sourceSeq, view.messages.at(-1)?.seq);
   assert.equal(view.tasks[0]?.inputTokens, 14);
   assert.equal(view.tasks[0]?.tools.length, 3);
+  const preview = view.tasks[0]?.tools.find(
+    ({ name }) => name === 'native.read',
+  );
+  assert.equal(preview?.argsPreview, 'authorization: [redacted]');
+  assert.equal(preview?.args, null);
+  assert.equal(preview?.result, null);
   const { chats, totals } = f.gateway.admin.overview(Date.now());
   assert.deepEqual(totals, {
     chats: 1,

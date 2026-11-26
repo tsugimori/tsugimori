@@ -128,10 +128,11 @@ async function fixture() {
     }),
     pendingApprovals: () => 0,
     approvals: () => ({ approvals: [], grants: [] }),
-    chat: (requested) =>
+    chat: (requested, before) =>
       requested.chatId === ref.chatId
         ? {
             chat,
+            older: before === undefined ? 2 : undefined,
             tasks: [],
             messages: [
               {
@@ -140,7 +141,7 @@ async function fixture() {
                 displayName: payload,
                 userId: 'u',
                 recordedAt: 1,
-                seq: 1,
+                seq: before === undefined ? 2 : 1,
                 text: payload,
               },
             ],
@@ -296,6 +297,33 @@ test('offers the APIs before the UI is built and redirects bookmarked routes', a
     assert.equal(response.status, 302);
     assert.equal(response.headers.get('location'), next);
   }
+});
+
+test('chat history works through authorized links without JavaScript', async (t) => {
+  const f = await fixture();
+  t.after(f.stop);
+  await writeFile(
+    join(f.directory, 'index.html'),
+    '<!doctype html><html><body></body></html>',
+  );
+  const url = f.url + '/chat/telegram%3Amain/room/66';
+  const app = await fetch(url, { headers });
+  assert.match(await app.text(), /<noscript>.*view=history#newest/);
+  assert.equal((await fetch(url + '?view=history')).status, 403);
+
+  const newest = await fetch(url + '?view=history', { headers });
+  assert.equal(newest.status, 200);
+  assert.equal(newest.headers.get('cache-control'), 'no-store');
+  const html = await newest.text();
+  assert.doesNotMatch(html, /<(?:script|img)\b/i);
+  assert.match(html, /&lt;img/);
+  assert.match(html, /id="m-2"/);
+  assert.match(html, /view=history&amp;before=2#newest/);
+
+  const earlier = await fetch(url + '?view=history&before=2', { headers });
+  const earlierHtml = await earlier.text();
+  assert.match(earlierHtml, /id="m-1"/);
+  assert.match(earlierHtml, /已到最早的訊息/);
 });
 
 async function open(url: string, last?: string) {

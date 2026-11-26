@@ -43,18 +43,20 @@
   });
 </script>
 
-<Header {ctx} {active} state={live.status} last={live.last} />
-<main class="wrap">
-  {#if workspace.error || !workspace.data}
-    <LoadState
-      locale={ctx.locale}
-      error={workspace.error}
-      retry={workspace.retry}
-    />
-  {/if}
-  {#if workspace.data}
-    {#key path + router.location.search}
-      <Page location={router.location} {ctx} />
-    {/key}
-  {/if}
-</main>
+<div class:chat-shell={/^\/chat(?:\/|$)/.test(path)}>
+  <Header {ctx} {active} state={live.status} last={live.last} />
+  <main class="wrap">
+    {#if workspace.error || !workspace.data}
+      <LoadState
+        locale={ctx.locale}
+        error={workspace.error}
+        retry={workspace.retry}
+      />
+    {/if}
+    {#if workspace.data}
+      {#key path + router.location.search}
+        <Page location={router.location} {ctx} />
+      {/key}
+    {/if}
+  </main>
+</div>

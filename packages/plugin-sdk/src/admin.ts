@@ -16,6 +16,7 @@ export type ToolCallStatus = 'ok' | 'error' | 'denied' | 'pending-approval';
 
 export interface AdminToolCall {
   args: string | null;
+  argsPreview?: string;
   callId: string | null;
   endedAt: number | null;
   name: string;

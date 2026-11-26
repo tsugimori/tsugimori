@@ -1,92 +1,123 @@
 <script lang="ts">
-  import type { AdminTask } from '@tsugimori/plugin-sdk';
+  import type { AdminConversation, AdminTask } from '@tsugimori/plugin-sdk';
 
   import type { ViewContext } from '../lib/format.ts';
 
   import { statusStyle, traceHref } from '../lib/display.ts';
-  import { duration, number } from '../lib/format.ts';
+  import { duration, formatTime, number } from '../lib/format.ts';
   import { i18n } from '../lib/i18n.ts';
-  import Badge from './Badge.svelte';
-  import Time from './Time.svelte';
+  import Message from './Message.svelte';
+  import TaskLanes from './TaskLanes.svelte';
   import ToolRow from './ToolRow.svelte';
 
+  type MessageItem = AdminConversation['messages'][number];
   let {
     task,
     ctx,
+    messages,
     preview = false,
-  }: { ctx: ViewContext; preview?: boolean; task: AdminTask } = $props();
+  }: {
+    ctx: ViewContext;
+    messages: readonly MessageItem[];
+    preview?: boolean;
+    task: AdminTask;
+  } = $props();
   const m = $derived(i18n(ctx.locale));
   const initialStyle = $derived(statusStyle(task.status)[0]);
   const status = $derived(
-    initialStyle === 'run' &&
-      task.tools.some((tool) => tool.status === 'pending-approval')
-      ? 'pending-approval'
-      : task.status,
+    statusStyle(
+      initialStyle === 'run' &&
+        task.tools.some((tool) => tool.status === 'pending-approval')
+        ? 'pending-approval'
+        : task.status,
+    ),
   );
   const started = $derived(task.startedAt ?? task.createdAt);
-  const usage = $derived(
-    [
-      task.inputTokens === undefined
-        ? ''
-        : m.input + ' ' + number(task.inputTokens),
-      task.outputTokens === undefined
-        ? ''
-        : m.output + ' ' + number(task.outputTokens),
-    ]
-      .filter(Boolean)
-      .join(' · '),
-  );
-  let opened = $state<boolean>();
-  let defaultOpen = $state(false);
-  $effect(() => {
-    if (initialStyle === 'run' || initialStyle === 'err') defaultOpen = true;
+  const end = $derived(task.finishedAt ?? ctx.now);
+  const compact = new Intl.NumberFormat('en-US', {
+    notation: 'compact',
+    maximumFractionDigits: 1,
   });
-  const open = $derived(
-    opened ?? (defaultOpen || initialStyle === 'run' || initialStyle === 'err'),
+  const tokenCount = (value: number | undefined) =>
+    value === undefined ? '—' : compact.format(value).toLowerCase();
+  const usage = $derived(
+    task.inputTokens !== undefined || task.outputTokens !== undefined
+      ? `${tokenCount(task.inputTokens)}/${tokenCount(task.outputTokens)}`
+      : undefined,
   );
+
+  const rows = $derived(
+    [
+      ...task.tools.map((tool) => ({
+        at: tool.startedAt,
+        key: 'tool-' + tool.seq,
+        tool,
+      })),
+      ...messages.map((message) => ({
+        at: message.recordedAt ?? started,
+        key: 'message-' + message.seq,
+        message,
+      })),
+    ].sort((a, b) => a.at - b.at),
+  );
+
+  let opened = $state<boolean>();
+  const open = $derived(opened ?? initialStyle === 'run');
 </script>
 
 <li class="task" id={'task-' + task.id}>
-  <details
-    class="task card {statusStyle(status)[0]}"
-    {open}
-    ontoggle={(event) => {
-      const isOpen = event.currentTarget.open;
-      if (isOpen !== open) opened = isOpen;
-    }}
-  >
-    <summary>
-      <b>{m.task}</b><Badge {status} locale={ctx.locale} />
-      <span class="meta">
-        {[
+  <div class="task-divider">
+    <button
+      type="button"
+      class="task-toggle"
+      aria-expanded={open}
+      aria-controls={'task-body-' + task.id}
+      onclick={() => (opened = !open)}
+    >
+      <span class="status-dot {status[0]}" aria-hidden="true"></span>
+      <span title={formatTime(started, ctx.timezone)}>
+        {m.task}
+        {m[status[1]]}
+      </span>
+      <span class="task-meta">
+        · {[
+          duration(end - started, ctx.locale),
           task.agentId,
           task.model,
-          duration((task.finishedAt ?? ctx.now) - started, ctx.locale),
           m.toolCount(number(task.tools.length)),
+          usage && usage + ' ' + m.tokens,
         ]
           .filter(Boolean)
           .join(' · ')}
       </span>
-      <span class="meta"><Time at={started} {ctx} mode="clock" /></span>
-    </summary>
-    {#if task.error || initialStyle === 'err'}<p class="alert err">
-        {task.error || m.taskError}
-      </p>{/if}
-    {#if task.tools.length}
+      {#if task.silent}<span class="task-meta">· {m.silent}</span>{/if}
+    </button>
+    <a href={traceHref(task.id)}>{m.trace} →</a>
+  </div>
+  <div id={'task-body-' + task.id}>
+    {#if open}
+      {#if task.error || initialStyle === 'err'}<p class="alert err">
+          {task.error || m.taskError}
+        </p>{/if}
+      <TaskLanes {task} start={started} {end} locale={ctx.locale} />
+    {/if}
+    {#if messages.length || (open && task.tools.length)}
       <ol class="tools">
-        {#each task.tools as tool (tool.seq)}<li>
-            <ToolRow
-              {tool}
-              task={task.id}
-              {ctx}
-              initialOpen={preview && tool.result !== null}
-            />
-          </li>{/each}
+        {#each rows as row (row.key)}
+          {#if 'message' in row}<Message message={row.message} {ctx} />
+          {:else if open}
+            <li>
+              <ToolRow
+                tool={row.tool}
+                task={task.id}
+                {ctx}
+                taskStart={started}
+                initialOpen={preview && row.tool.result !== null}
+              />
+            </li>
+          {/if}
+        {/each}
       </ol>
     {/if}
-    <div class="task-footer meta">
-      {#if usage}<span>{m.tokens} {usage}</span>{/if}
-      <a href={traceHref(task.id)}>{m.trace} →</a>
-    </div>
-  </details>
+  </div>
 </li>

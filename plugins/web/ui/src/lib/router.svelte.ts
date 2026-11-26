@@ -22,6 +22,7 @@ export function createRouter() {
         return;
       const next = new URL(link.href);
       if (next.origin !== window.location.origin) return;
+      if (next.hash && next.href === window.location.href) return;
       event.preventDefault();
       if (next.href !== window.location.href) {
         if (
@@ -35,9 +36,11 @@ export function createRouter() {
     };
     update();
     window.addEventListener('popstate', update);
+    window.addEventListener('hashchange', update);
     document.addEventListener('click', click);
     return () => {
       window.removeEventListener('popstate', update);
+      window.removeEventListener('hashchange', update);
       document.removeEventListener('click', click);
     };
   }

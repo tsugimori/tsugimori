@@ -46,6 +46,42 @@ test('Svelte server rendering covers the console components', async (t) => {
       },
     );
 
+    await t.test('chat renders three panes and compact trace rows', () => {
+      const { body } = fixtures.pages().find(({ file }) => file === 'chat');
+      const html = body.replace(/<!--.*?-->/g, '').replace(/\s+/g, ' ');
+      assert.match(html, /class="chat-list chat-pane"/);
+      assert.match(html, /class="timeline-scroll chat-pane"/);
+      assert.match(html, /class="chat-details chat-pane"/);
+      assert.match(html, /aria-current="page".*Suntai 群組.*主題 66/);
+      assert.match(html, /aria-label="搜尋聊天室"/);
+      assert.match(
+        html,
+        /id="task-fixture-silent".*aria-expanded="false".*未回覆（NO_REPLY）/,
+      );
+      assert.match(html, /id="task-fixture-running".*aria-expanded="true"/);
+      const toolRow = html.match(
+        /id="call-1"[^>]*>\s*<summary>(.*?)<\/summary>/,
+      )?.[1];
+      assert.ok(toolRow);
+      assert.match(toolRow, /\+5\.0s/);
+      assert.match(toolRow, /exec\.run/);
+      assert.match(toolRow, /command: tail -n 50 \/var\/log\/syslog/);
+      assert.match(toolRow, /1\.2 s/);
+      assert.match(html, /id="call-1".*id="msg-1285".*id="call-2"/);
+    });
+
+    await t.test(
+      'model lane covers the gaps in overlapping tool intervals',
+      () => {
+        const html = fixtures.overlappingLanes().replace(/<!--.*?-->/g, '');
+        assert.match(html, /模型/);
+        assert.match(html, /left:\s*0%;\s*width:\s*10%/);
+        assert.match(html, /left:\s*60%;\s*width:\s*40%/);
+        assert.match(html, /href="#call-1"[^>]*left:\s*10%;\s*width:\s*30%/);
+        assert.match(html, /href="#call-2"[^>]*left:\s*30%;\s*width:\s*30%/);
+      },
+    );
+
     await t.test(
       'agent cards, chat details and Taipei time include the expected fields',
       () => {

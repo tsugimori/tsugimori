@@ -48,7 +48,7 @@ The console fetches the current state and then updates it over one Server-Sent E
 
 - **Overview** (`/`) shows today's task and failure totals, pending approvals, and chat cards with message previews, tool activity, routing, and summary progress. **Chats** (`/chats`) opens the chat list directly.
 - **Agents** (`/agents`) shows agent state, model, sign-in, chat and task counts, and links to recent tasks.
-- **Chat** (`/chat/:adapter/:chatId[/:topic]`) follows the live timeline and opens task or message links. The details panel shows routing, summary coverage, approvals, and schedules. Expand a tool call to load its arguments and result in a JSON tree or raw view.
+- **Chat** (`/chat/:adapter/:chatId[/:topic]`) opens at the latest message, loads older messages as you scroll up, and follows live updates when you are near the bottom. Use the searchable chat list to switch chats. The details panel shows routing, summary coverage, approvals, and schedules. Expand a task to inspect its model and tool timing, then expand a tool call to load the full arguments and result. With JavaScript disabled, use the chat history link to browse messages and load earlier pages.
 - **Trace** (`/trace/:taskId`) shows elapsed time by span, expandable attributes, and any recorded tool details.
 - **Approvals** lists pending requests, the 50 latest handled requests, and grants. [Decisions go through the chat platform](../../README.md#approvals-and-schedules).
 - **Schedules** lists scheduled work, its status, and its next run.

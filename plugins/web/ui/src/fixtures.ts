@@ -17,6 +17,7 @@ import AgentCard from './components/AgentCard.svelte';
 import ChatDetails from './components/ChatDetails.svelte';
 import Header from './components/Header.svelte';
 import JsonView from './components/JsonView.svelte';
+import TaskLanes from './components/TaskLanes.svelte';
 import Time from './components/Time.svelte';
 import Timeline from './components/Timeline.svelte';
 import { formatTime, relative } from './lib/format.ts';
@@ -108,6 +109,7 @@ const task: AdminTask = {
         null,
         2,
       ),
+      argsPreview: 'command: tail -n 50 /var/log/syslog',
       result: JSON.stringify(
         {
           exitCode: 1,
@@ -196,11 +198,33 @@ const schedules: AdminSchedules = {
 };
 const conversation: AdminConversation = {
   chat,
-  older: 1281,
-  tasks: [task],
+  older: 1265,
+  tasks: [
+    task,
+    {
+      ...task,
+      id: 'fixture-silent',
+      sourceSeq: 1282,
+      createdAt: now - 6 * minute,
+      startedAt: now - 6 * minute,
+      finishedAt: now - 6 * minute + 800,
+      status: 'completed',
+      silent: true,
+      tools: [],
+    },
+  ],
   approvals: approvals.approvals.slice(0, 1),
   schedules: schedules.schedules,
   messages: [
+    {
+      seq: 1285,
+      direction: 'outbound',
+      recordedAt: now - 20_000,
+      text: '找到三則告警。我再查一下之前有沒有發生過。',
+      userId: null,
+      displayName: null,
+      deleted: false,
+    },
     {
       seq: 1284,
       direction: 'inbound',
@@ -240,6 +264,15 @@ const conversation: AdminConversation = {
       displayName: '月太',
       deleted: false,
     },
+    ...Array.from({ length: 16 }, (_, index) => ({
+      seq: 1280 - index,
+      direction: index % 2 === 0 ? 'inbound' : 'outbound',
+      recordedAt: now - (24 * 60 + index + 1) * minute,
+      text: index % 2 === 0 ? '請確認服務的健康檢查。' : '健康檢查已完成。',
+      userId: index % 2 === 0 ? 'example-owner' : null,
+      displayName: index % 2 === 0 ? '月太' : null,
+      deleted: false,
+    })),
   ],
 };
 const agents: AdminAgent[] = [
@@ -340,6 +373,22 @@ export function pages() {
   const header = (active: string) =>
     render(Header, { props: { active, ctx, state: 'connected', last: now } })
       .body;
+  const chatPage = (file: string, viewport?: number) => ({
+    file,
+    viewport,
+    title: '聊天室',
+    header: header('chats'),
+    chatShell: true,
+    body: render(Chat, {
+      props: {
+        data: conversation,
+        ctx,
+        preview: true,
+        previewChats: overview,
+        mobilePreview: viewport === 390,
+      },
+    }).body,
+  });
   return [
     {
       file: 'overview',
@@ -361,21 +410,9 @@ export function pages() {
       header: header('agents'),
       body: render(Agents, { props: { data: agents, ctx } }).body,
     },
-    {
-      file: 'chat',
-      title: '聊天室',
-      header: header('chats'),
-      body: render(Chat, { props: { data: conversation, ctx, preview: true } })
-        .body,
-    },
-    {
-      file: 'chat-mobile',
-      title: '聊天室',
-      header: header('chats'),
-      body: render(Chat, {
-        props: { data: conversation, ctx, preview: true, mobilePreview: true },
-      }).body,
-    },
+    chatPage('chat'),
+    chatPage('chat-narrow', 900),
+    chatPage('chat-mobile', 390),
     {
       file: 'trace',
       title: '追蹤',
@@ -413,6 +450,30 @@ export function timeline() {
         ],
         tasks: [],
       },
+    },
+  }).body;
+}
+
+export function overlappingLanes() {
+  const tool = task.tools[0]!;
+  const start = now - 40_000;
+  return render(TaskLanes, {
+    props: {
+      task: {
+        ...task,
+        tools: [
+          { ...tool, startedAt: start + 4_000, endedAt: start + 16_000 },
+          {
+            ...tool,
+            seq: 2,
+            startedAt: start + 12_000,
+            endedAt: start + 24_000,
+          },
+        ],
+      },
+      start,
+      end: now,
+      locale: ctx.locale,
     },
   }).body;
 }

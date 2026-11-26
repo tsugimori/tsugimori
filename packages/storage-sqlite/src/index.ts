@@ -1624,15 +1624,15 @@ export class SqliteStore implements Store {
       .get();
   }
 
-  taskToolCalls(taskIds: readonly string[], details = true) {
+  taskToolCalls(taskIds: readonly string[], details: boolean | 'args' = true) {
     if (!taskIds.length) return [];
     const columns = getColumns(toolCalls);
     return this.#db
       .select({
         ...columns,
         args: details ? columns.args : sql<null>`null`,
-        result: details ? columns.result : sql<null>`null`,
-        callId: details ? columns.callId : sql<null>`null`,
+        result: details === true ? columns.result : sql<null>`null`,
+        callId: details === true ? columns.callId : sql<null>`null`,
       })
       .from(toolCalls)
       .where(inArray(toolCalls.taskId, [...taskIds]))

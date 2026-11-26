@@ -116,7 +116,7 @@
   });
 </script>
 
-{#if view.error || !view.data}
+{#if !view.data || (view.error && page !== 'chat')}
   <LoadState locale={ctx.locale} error={view.error} retry={view.retry} />
 {/if}
 {#if view.data && (page === 'overview' || page === 'chats')}
@@ -133,6 +133,8 @@
     data={view.data as AdminConversation}
     ctx={pageCtx}
     hash={location.hash}
+    error={view.error}
+    retry={view.retry}
   />
 {:else if view.data && page === 'trace'}
   <Trace data={view.data as AdminTrace} ctx={pageCtx} />

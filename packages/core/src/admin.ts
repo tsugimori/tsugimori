@@ -112,6 +112,45 @@ function groupCalls(calls: readonly ToolCallRecord[]) {
   return groups;
 }
 
+function summarizeCall({
+  args,
+  endedAt,
+  name,
+  seq,
+  startedAt,
+  status,
+}: ToolCallRecord): AdminToolCall {
+  let parsed: unknown;
+  if (args !== null) {
+    try {
+      parsed = JSON.parse(args);
+    } catch {
+      // A recorded argument can be truncated in the middle of its JSON.
+    }
+  }
+  const first =
+    parsed && typeof parsed === 'object'
+      ? Object.entries(parsed).find(
+          ([, value]) => value === null || typeof value !== 'object',
+        )
+      : undefined;
+  const preview =
+    first && `${first[0]}: ${String(first[1])}`.replace(/\s+/g, ' ');
+  return {
+    args: null,
+    callId: null,
+    endedAt,
+    name,
+    result: null,
+    seq,
+    startedAt,
+    status,
+    ...(preview && {
+      argsPreview: preview.length > 160 ? preview.slice(0, 159) + '…' : preview,
+    }),
+  };
+}
+
 export function adminReader({
   agentInfo,
   config,
@@ -284,7 +323,7 @@ export function adminReader({
       const calls = groupCalls(
         store.taskToolCalls(
           page.map(({ id }) => id),
-          false,
+          'args',
         ),
       );
       return {
@@ -322,7 +361,7 @@ export function adminReader({
         tasks: page.map((task) => ({
           ...taskDetails(
             task,
-            calls.get(task.id) ?? [],
+            (calls.get(task.id) ?? []).map(summarizeCall),
             store.taskTrace(task.id),
           ),
           sourceSeq: task.sourceSeq,

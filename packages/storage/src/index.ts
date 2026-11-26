@@ -533,7 +533,7 @@ export interface Store {
   ): MessageRecord[];
   taskToolCalls(
     taskIds: readonly string[],
-    details?: boolean,
+    details?: boolean | 'args',
   ): ToolCallRecord[];
   taskTrace(taskId: string): TraceSpan[];
   updateSchedule(

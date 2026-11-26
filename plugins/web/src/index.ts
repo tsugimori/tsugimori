@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url';
 
 import { createAccessVerifier } from './access.ts';
 import { Assets } from './assets.ts';
+import { addHistoryLink, chatHistory } from './chat-history.ts';
 import { AdminEvents } from './events.ts';
 
 export { createAccessVerifier };
@@ -214,6 +215,36 @@ export class AdminServer {
       return respond(response, 302, '');
     }
     const index = await this.#assets.index();
+    if (index && path.startsWith('/chat/')) {
+      const cursor = query.get('before');
+      const before = positiveInt(cursor);
+      const source = index.toString('utf8');
+      if (query.get('view') === 'history') {
+        const [adapterId, chatId] = path
+          .split('/')
+          .slice(2, 4)
+          .map((part) => {
+            try {
+              return decodeURIComponent(part);
+            } catch {
+              return '';
+            }
+          });
+        if (!adapterId || !chatId || (cursor !== null && before === undefined))
+          return respond(response, 400, 'Invalid chat or message cursor.');
+        const { reader } = this.#deps;
+        const data = reader.chat({ adapterId, chatId }, before);
+        return data
+          ? respond(
+              response,
+              200,
+              chatHistory(source, path, data, reader.workspace()),
+              html,
+            )
+          : respond(response, 404, 'Chat not found.');
+      }
+      return respond(response, 200, addHistoryLink(source, path, before), html);
+    }
     return index
       ? respond(response, 200, index, html)
       : respond(
