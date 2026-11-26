@@ -403,6 +403,12 @@ export class Gateway {
       return;
     }
     if (event.type === 'callback') {
+      store.recordUser({
+        adapterId: chat.adapterId,
+        userId: event.userId,
+        display: event.userDisplay ?? null,
+        username: event.userUsername,
+      });
       const result = this.#resolveApproval({
         ...chat,
         callbackId: event.callbackId,

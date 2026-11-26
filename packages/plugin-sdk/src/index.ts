@@ -61,7 +61,9 @@ export type PlatformInboundEvent =
       messageId: string;
       queryId?: string;
       type: 'callback';
+      userDisplay?: string;
       userId: string;
+      userUsername?: string | null;
     });
 
 export interface ScheduledInboundEvent extends Omit<InboundMessage, 'type'> {

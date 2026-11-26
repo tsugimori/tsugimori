@@ -60,6 +60,12 @@ function mentions(entities: unknown, text: string, bot: BotIdentity) {
   });
 }
 
+function displayName(user: Record<string, unknown> | undefined) {
+  return [user?.first_name, user?.last_name]
+    .filter((part): part is string => typeof part === 'string')
+    .join(' ');
+}
+
 export function mapUpdate(
   update: Record<string, unknown>,
   bot: BotIdentity,
@@ -68,8 +74,10 @@ export function mapUpdate(
   if (callback) {
     const source = record(callback.message);
     const room = source && address(source);
-    const userId = nativeId(record(callback.from)?.id);
+    const from = record(callback.from);
+    const userId = nativeId(from?.id);
     if (room && userId !== undefined && typeof callback.id === 'string') {
+      const userDisplay = displayName(from);
       return {
         type: 'callback',
         callbackId: typeof callback.data === 'string' ? callback.data : '',
@@ -78,6 +86,8 @@ export function mapUpdate(
         threadId: room.threadId,
         messageId: room.messageId,
         userId,
+        userDisplay: userDisplay || undefined,
+        userUsername: typeof from?.username === 'string' ? from.username : null,
       };
     }
     return;
@@ -102,9 +112,7 @@ export function mapUpdate(
       : message.caption_entities;
   const reply = record(message.reply_to_message);
   const repliesToBot = nativeId(record(reply?.from)?.id) === bot.id;
-  const userDisplay = [sender?.first_name, sender?.last_name]
-    .filter((part): part is string => typeof part === 'string')
-    .join(' ');
+  const userDisplay = displayName(sender);
   return {
     ...room,
     type: 'message',

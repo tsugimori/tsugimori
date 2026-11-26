@@ -70,7 +70,7 @@ test(
       {
         update_id: 13,
         callback_query: {
-          from,
+          from: { ...from, username: 'example_sender' },
           id: 'query-1',
           data: 'approval:always:test-id',
           message: { ...address, message_id: 23 },
@@ -143,6 +143,8 @@ test(
     assert.equal(callback?.type, 'callback');
     assert.equal(callback.callbackId, 'approval:always:test-id');
     assert.equal(callback.queryId, 'query-1');
+    assert.equal(callback.userUsername, 'example_sender');
+    assert.equal(callback.userDisplay, 'Example sender');
     assert.equal(adapter.capabilities.deleteEvents, false);
     await adapter.stop();
     await adapter.start(context);
