@@ -29,8 +29,6 @@ const messages = {
     previewCloseUsage: 'Usage: /preview close <id>',
     previewClosed: 'Preview closed.',
     previewMissing: 'No open preview with that ID.',
-    status: (platforms: number, agents: number) =>
-      `Gateway running with ${platforms} platform(s) and ${agents} agent(s).`,
     platformUnavailable: (id: string) =>
       `${id} has been unable to start for five minutes. The gateway will keep retrying.`,
     platformRecovered: (id: string) => `${id} is running again.`,
@@ -95,8 +93,6 @@ const messages = {
     previewCloseUsage: '用法：/preview close <id>',
     previewClosed: '已關閉預覽。',
     previewMissing: '找不到此識別碼對應的開啟中預覽。',
-    status: (platforms: number, agents: number) =>
-      `閘道器運作中，已接上 ${platforms} 個平台與 ${agents} 個代理程式。`,
     platformUnavailable: (id: string) =>
       `${id} 已有五分鐘無法啟動，閘道器將繼續重試。`,
     platformRecovered: (id: string) => `${id} 已恢復運作。`,

@@ -4,6 +4,7 @@ import type {
   AgentIO,
   AgentRequest,
   AgentTool,
+  ChatRef,
   ToolContext,
   ToolDefinition,
 } from '@tsugimori/plugin-sdk';
@@ -11,6 +12,7 @@ import type { ApprovalContinuation } from '@tsugimori/storage';
 import type { Tracer } from '@tsugimori/trace';
 
 import { Ajv } from 'ajv';
+import { createHash } from 'node:crypto';
 
 import type { HookRunner, Logger } from './hooks.ts';
 
@@ -19,24 +21,45 @@ import { untilAborted } from './abort.ts';
 interface AgentRunDependencies {
   approvalPending?: AbortSignal;
   log: Logger;
+  onSession?(sessionId: string): void;
   task: ToolContext;
   trace: Tracer;
 }
 
+export function sessionScope(
+  { adapterId, chatId }: ChatRef,
+  agentId: string,
+  model: string,
+  sessionId: string,
+) {
+  return createHash('sha256')
+    .update(JSON.stringify([adapterId, chatId, agentId, model, sessionId]))
+    .digest('hex');
+}
+
 export async function runAgent(
-  { approvalPending, trace, log, task }: AgentRunDependencies,
+  { approvalPending, trace, log, onSession, task }: AgentRunDependencies,
   agent: AgentConnector,
   request: AgentRequest,
   io: AgentIO,
 ) {
   const { signal, taskId } = task;
   const attrs = { taskId, agentId: agent.id, model: request.model };
+  const scope = (id: string) =>
+    request.purpose
+      ? null
+      : sessionScope(task.chat, agent.id, request.model, id);
+  let activeScope = request.resumeSessionId
+    ? scope(request.resumeSessionId)
+    : null;
   const reportCompaction = (event: AgentCompactionEvent) => {
     trace.record(
       'agent.compaction',
       {
         ...attrs,
+        sessionScope: event.status === 'error' ? null : activeScope,
         trigger: event.trigger,
+        contextTokens: event.tokensAfter ?? null,
         tokensBefore: event.tokensBefore ?? null,
         tokensAfter: event.tokensAfter ?? null,
       },
@@ -76,6 +99,8 @@ export async function runAgent(
             break;
           case 'sessionId':
             sessionId = event.sessionId;
+            activeScope = scope(sessionId);
+            onSession?.(sessionId);
             break;
           case 'tool.started':
             tools.get(event.callId)?.('error');
@@ -91,13 +116,28 @@ export async function runAgent(
           case 'approval.requested':
             trace.begin('agent.approval_requested', attrs)();
             break;
-          case 'usage':
-            trace.begin('agent.usage', {
+          case 'usage': {
+            const tokens =
+              event.contextTokens === undefined &&
+              (event.inputTokens !== undefined ||
+                event.outputTokens !== undefined)
+                ? (event.inputTokens ?? 0) + (event.outputTokens ?? 0)
+                : event.contextTokens;
+            const contextTokens =
+              typeof tokens === 'number' &&
+              Number.isSafeInteger(tokens) &&
+              tokens >= 0
+                ? tokens
+                : null;
+            trace.record('agent.usage', {
               ...attrs,
+              sessionScope: contextTokens === null ? null : activeScope,
+              contextTokens,
               inputTokens: event.inputTokens ?? null,
               outputTokens: event.outputTokens ?? null,
-            })();
+            });
             break;
+          }
           case 'compaction':
             reportCompaction(event);
             break;

@@ -350,9 +350,15 @@ test('runtime isolates agent and execution failures and keeps owner-visible chat
   ]);
   assert.equal(platform.sent[0]?.chatId, ownerId);
   await platform.receive('status', '/status');
+  const status = platform.sent.at(-1)?.text ?? '';
   assert.match(
-    platform.sent.at(-1)?.text ?? '',
-    /^閘道器運作中，已接上 1 個平台與 1 個代理程式。\n[\s\S]+代理程式登入：請先登入。$/,
+    status,
+    /^代理程式 · bad 無法使用 · 請先登入。 \| good 運作中$/m,
+  );
+  assert.match(status, /^執行沙箱 · 已停用$/m);
+  assert.match(
+    status,
+    /^環境檢查 · 3 項未通過 · Git、Bubblewrap、代理程式登入$/m,
   );
   await platform.receive('unavailable', 'Hello');
   await f.gateway.idle();

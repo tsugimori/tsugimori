@@ -214,7 +214,10 @@ test('two Telegram startup 502s leave schedules due until the adapter recovers',
   await f.gateway.start();
 
   assert.equal(f.requests, 1);
-  assert.match((await f.status())!, /telegram:test.*unavailable/);
+  assert.match(
+    (await f.status())!,
+    /telegram:test retrying \(attempt 1\) · next retry /,
+  );
   const doctorOutput = t.mock.method(console, 'log', () => {});
   assert.equal(
     await main(['doctor', f.workspace], f.registry, {
@@ -247,9 +250,9 @@ test('two Telegram startup 502s leave schedules due until the adapter recovers',
   ]);
   assert.equal(f.store.getSchedule(latest)?.status, 'done');
   assert.equal(f.store.getSchedule(skip)?.status, 'done');
-  assert.equal(
-    await f.status(),
-    'Gateway running with 2 platform(s) and 0 agent(s).',
+  assert.match(
+    (await f.status())!,
+    /Platforms · telegram:test running \| fake:owner running/,
   );
   await f.gateway.stop();
   assert.deepEqual(
@@ -278,6 +281,10 @@ test('Telegram 401 stops startup retries and sends a localized owner notice once
   await f.advance(10 * 60_000);
   assert.equal(f.requests, 1);
   assert.equal(f.notices.length, 1);
+  assert.match(
+    (await f.status())!,
+    /telegram:test 無法使用 · 請檢查機器人權杖/,
+  );
 });
 
 test('Telegram retry-after delays the next attempt and the owner gets one outage and recovery notice', async (t) => {
@@ -329,9 +336,9 @@ test(
     assert.ok(aborted);
     await f.advance(600_000);
     assert.equal(f.requests, 2);
-    assert.equal(
-      await f.status(),
-      'Gateway running with 1 platform(s) and 0 agent(s).',
+    assert.match(
+      (await f.status())!,
+      /^Platforms · telegram:test disabled \| fake:owner running$/m,
     );
   },
 );

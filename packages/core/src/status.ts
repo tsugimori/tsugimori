@@ -1,0 +1,313 @@
+import type { ChatRef, TextEntity } from '@tsugimori/plugin-sdk';
+import type { ScheduleAddress, Store } from '@tsugimori/storage';
+import type { Tracer } from '@tsugimori/trace';
+
+import { defaultCompactAt } from '@tsugimori/plugin-sdk';
+import { scheduleRef } from '@tsugimori/scheduler';
+
+import type { AttachmentStatus, Runtime } from './runtime.ts';
+import type { Tasks } from './tasks.ts';
+
+import { gatewayVersion } from './version.ts';
+
+const messages = {
+  en: {
+    gateway: 'Gateway',
+    uptime: 'up',
+    started: 'Started',
+    chat: 'This chat',
+    reasoning: 'reasoning',
+    default: 'default',
+    context: 'Context',
+    unknown: 'unknown',
+    tokens: 'tokens',
+    compaction: 'Last compaction',
+    modes: {
+      manual: 'manual',
+      'post-turn': 'post-turn',
+      async: 'auto (async)',
+      native: 'auto',
+    },
+    summary: 'Summary',
+    covered: (count: number) =>
+      `${count} ${count === 1 ? 'message' : 'messages'}`,
+    updated: 'updated',
+    work: 'Work',
+    stages: {
+      preparing: 'preparing',
+      context: 'assembling context',
+      agent: 'running agent',
+      approval: 'waiting for approval',
+      compaction: 'compacting',
+      delivery: 'sending',
+      recording: 'recording workspace',
+    },
+    running: 'running',
+    runningFor: (duration: string, stage: string) =>
+      `running for ${duration} (${stage})`,
+    queued: (count: number) => `${count} queued`,
+    runningTotal: (count: number) => `${count} running total`,
+    approvals: 'Approvals',
+    pending: (chat: number, total: number) => `${chat} here / ${total} total`,
+    expires: 'next expiry',
+    schedules: 'Schedules',
+    active: (count: number) => `${count} active`,
+    due: 'next due',
+    platforms: 'Platforms',
+    agents: 'Agents',
+    unavailable: 'unavailable',
+    starting: 'starting',
+    retrying: (attempt: number) => `retrying (attempt ${attempt})`,
+    nextRetry: 'next retry',
+    sandbox: 'Exec sandbox',
+    enabled: 'enabled',
+    disabled: 'disabled',
+    health: 'Health',
+    healthy: 'all checks passed',
+    failing: (count: number) =>
+      `${count} failing ${count === 1 ? 'check' : 'checks'}`,
+    units: ['d', 'h', 'm', 's'],
+  },
+  'zh-TW': {
+    gateway: '閘道器',
+    uptime: '已運作',
+    started: '啟動時間',
+    chat: '此聊天室',
+    reasoning: '推理強度',
+    default: '預設',
+    context: '上下文',
+    unknown: '未知',
+    tokens: 'tokens',
+    compaction: '上次壓縮',
+    modes: {
+      manual: '手動',
+      'post-turn': '回合後',
+      async: '自動（非同步）',
+      native: '自動',
+    },
+    summary: '對話摘要',
+    covered: (count: number) => `涵蓋 ${count} 則訊息`,
+    updated: '更新時間',
+    work: '工作',
+    stages: {
+      preparing: '準備中',
+      context: '組裝上下文',
+      agent: '代理程式執行中',
+      approval: '等待核准',
+      compaction: '壓縮中',
+      delivery: '傳送中',
+      recording: '記錄工作區',
+    },
+    running: '運作中',
+    runningFor: (duration: string, stage: string) =>
+      `已執行 ${duration}（${stage}）`,
+    queued: (count: number) => `${count} 則排隊中`,
+    runningTotal: (count: number) => `共 ${count} 個任務執行中`,
+    approvals: '待核准',
+    pending: (chat: number, total: number) =>
+      `此聊天室 ${chat} 件／共 ${total} 件`,
+    expires: '最早到期',
+    schedules: '排程',
+    active: (count: number) => `${count} 項啟用`,
+    due: '下次執行',
+    platforms: '平台',
+    agents: '代理程式',
+    unavailable: '無法使用',
+    starting: '啟動中',
+    retrying: (attempt: number) => `重試中（第 ${attempt} 次）`,
+    nextRetry: '下次重試',
+    sandbox: '執行沙箱',
+    enabled: '已啟用',
+    disabled: '已停用',
+    health: '環境檢查',
+    healthy: '全部正常',
+    failing: (count: number) => `${count} 項未通過`,
+    units: [' 天', ' 小時', ' 分鐘', ' 秒'],
+  },
+};
+
+interface StatusDependencies {
+  runtime: Pick<Runtime, 'attachments' | 'config' | 'environmentReports'>;
+  sandboxEnabled: boolean;
+  startedAt: number;
+  store: Pick<Store, 'approvalStatus' | 'getSummaryStatus' | 'scheduleStatus'>;
+  tasks: Pick<Tasks, 'status'>;
+  trace: Pick<Tracer, 'latestSessionSpan'>;
+}
+
+export function statusCard(
+  {
+    runtime,
+    sandboxEnabled,
+    startedAt,
+    store,
+    tasks,
+    trace,
+  }: StatusDependencies,
+  chat: ChatRef,
+  target: ScheduleAddress,
+  now = Date.now(),
+) {
+  const { locale = 'en', timezone } = runtime.config;
+  const m = messages[locale];
+  const { format: formatNumber } = new Intl.NumberFormat(locale);
+  // Use the same unambiguous numeric date in both locales.
+  const { format: date } = new Intl.DateTimeFormat('sv-SE', {
+    dateStyle: 'short',
+    timeStyle: 'medium',
+    timeZone: timezone,
+    hourCycle: 'h23',
+  });
+  const elapsed = (from: number) => duration(now - from, m.units);
+  const tokenCount = (value: unknown) =>
+    typeof value === 'number' ? formatNumber(value) : m.unknown;
+  const entities: TextEntity[] = [];
+  let text = '';
+  function line(label: string, ...details: string[]) {
+    if (text) text += '\n';
+    entities.push({ type: 'bold', offset: text.length, length: label.length });
+    text += [label, ...details.filter(Boolean)].join(' · ');
+  }
+  function attachment(entry: AttachmentStatus) {
+    const { id, state } = entry;
+    let detail: string;
+    if (state === 'retrying')
+      detail = [
+        m.retrying(entry.attempt),
+        entry.retryAt >= now && `${m.nextRetry} ${date(entry.retryAt)}`,
+      ]
+        .filter(Boolean)
+        .join(' · ');
+    else if (state === 'unavailable') {
+      const { failure } = entry;
+      const localized =
+        locale === 'zh-TW' ? failure?.localized?.[locale] : undefined;
+      const reason = localized?.detail ?? localized?.hint ?? failure?.detail;
+      detail = reason
+        ? `${m.unavailable} · ${shortText(reason, 72)}`
+        : m.unavailable;
+    } else detail = m[state];
+    return `${id} ${detail}`;
+  }
+
+  line(m.gateway, `v${gatewayVersion}`, `${m.uptime} ${elapsed(startedAt)}`);
+  line(m.started, `${date(startedAt)} (${timezone})`);
+  const work = tasks.status(chat);
+  if (work.agentId) {
+    const model =
+      work.model === 'default' ? m.default : (work.model ?? m.default);
+    line(
+      m.chat,
+      work.agentId,
+      shortText(model, 80),
+      `${m.reasoning} ${shortText(work.thinking ?? m.default, 30)}`,
+    );
+    const scope = work.sessionScope;
+    const usage = scope ? trace.latestSessionSpan(scope, 'context') : undefined;
+    const used = usage?.attrs.contextTokens;
+    const limit = work.compactAt ?? defaultCompactAt;
+    line(
+      m.context,
+      typeof used === 'number'
+        ? `${formatNumber(used)} / ${formatNumber(limit)} ${m.tokens} (${formatNumber(Math.round((100 * used) / limit))}%)`
+        : m.unknown,
+    );
+    const compacted = scope
+      ? trace.latestSessionSpan(scope, 'compaction')
+      : undefined;
+    if (compacted) {
+      const { trigger, tokensBefore, tokensAfter } = compacted.attrs;
+      const mode =
+        typeof trigger === 'string' && Object.hasOwn(m.modes, trigger)
+          ? m.modes[trigger as keyof typeof m.modes]
+          : m.unknown;
+      line(
+        m.compaction,
+        date(compacted.endedAt),
+        mode,
+        `${tokenCount(tokensBefore)} → ${tokenCount(tokensAfter)} ${m.tokens}`,
+      );
+    }
+  }
+  const summary = store.getSummaryStatus(chat);
+  if (summary)
+    line(
+      m.summary,
+      m.covered(summary.messages),
+      `${m.updated} ${summary.updatedAt === null ? m.unknown : date(summary.updatedAt)}`,
+    );
+
+  const { running, queued, totalRunning } = work;
+  if (running || queued || totalRunning) {
+    line(
+      m.work,
+      running
+        ? m.runningFor(elapsed(running.startedAt), m.stages[running.stage])
+        : '',
+      m.queued(queued),
+      m.runningTotal(totalRunning),
+    );
+  }
+
+  const approvals = store.approvalStatus(chat, now);
+  if (approvals.total)
+    line(
+      m.approvals,
+      m.pending(approvals.chat, approvals.total),
+      approvals.nextExpiry === null
+        ? ''
+        : `${m.expires} ${date(approvals.nextExpiry)}`,
+    );
+
+  const schedules = store.scheduleStatus(chat.adapterId, target);
+  if (schedules.count) {
+    const { next } = schedules;
+    const details =
+      next?.nextDueAt != null
+        ? `#${scheduleRef(next.id)} · ${m.due} ${date(next.nextDueAt)} · ${shortText(next.action.kind === 'message' ? next.action.text : next.action.prompt, 30)}`
+        : '';
+    line(m.schedules, m.active(schedules.count), details);
+  }
+
+  const { platforms, agents } = runtime.attachments;
+  if (platforms.length)
+    line(m.platforms, platforms.map(attachment).join(' | '));
+  if (agents.length) line(m.agents, agents.map(attachment).join(' | '));
+  line(m.sandbox, sandboxEnabled ? m.enabled : m.disabled);
+
+  const failures = runtime.environmentReports.filter(
+    ({ status }) => status === 'fail',
+  );
+  if (failures.length) {
+    const names = failures.map(({ title, localized }) =>
+      shortText(
+        (locale === 'zh-TW' ? localized?.[locale]?.title : undefined) ?? title,
+        40,
+      ),
+    );
+    line(
+      m.health,
+      m.failing(failures.length),
+      names.join(locale === 'zh-TW' ? '、' : ' | '),
+    );
+  } else line(m.health, m.healthy);
+  return { text, entities, parseTextMentions: false };
+}
+
+function duration(ms: number, units: string[]) {
+  let seconds = Math.max(0, Math.floor(ms / 1_000));
+  const values = [86_400, 3_600, 60, 1].map((unit, index) => {
+    const value = Math.floor(seconds / unit);
+    seconds %= unit;
+    return value ? `${value}${units[index]}` : '';
+  });
+  return values.filter(Boolean).slice(0, 2).join(' ') || `0${units[3]}`;
+}
+
+function shortText(text: string, limit: number) {
+  const compact = text.replace(/\s+/gu, ' ').trim();
+  const characters = Array.from(compact);
+  return characters.length > limit
+    ? characters.slice(0, limit - 1).join('') + '…'
+    : compact;
+}

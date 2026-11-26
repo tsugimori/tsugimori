@@ -376,6 +376,91 @@ test('localizes /compact when the selected agent has no compaction capability', 
   assert.equal(platform.sent.at(-1)?.text, '此代理程式不支援壓縮工作階段。');
 });
 
+test(
+  'owner status reads live work and session metrics without running an agent',
+  { timeout: 4_000 },
+  async (t) => {
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    t.after(() => release.resolve());
+    let runs = 0;
+    const { gateway, platform, store, trace } = await fixture(
+      t,
+      async function* () {
+        runs++;
+        yield { type: 'sessionId', sessionId: 'active-native' };
+        if (runs === 1) {
+          yield {
+            type: 'usage',
+            contextTokens: 32_000,
+            inputTokens: 200_000,
+            outputTokens: 1_100,
+          };
+          entered.resolve();
+          await release.promise;
+        }
+        yield { type: 'text.final', text: 'done' };
+      },
+      true,
+      {
+        compact: async () => ({
+          status: 'compacted',
+          tokensBefore: 32_000,
+          tokensAfter: 8_000,
+        }),
+        context: { recentMessages: 30 },
+      },
+    );
+    store.setWorkspaceSettings(chat, {
+      model: 'workspace-model',
+      thinking: 'high',
+    });
+    const status = async (id: string) => {
+      await platform.emit(inbound(id, '/status'));
+      return platform.sent.at(-1)!.text;
+    };
+
+    await platform.emit(
+      inbound('member', '/status', { userId: 'member', mentionsBot: true }),
+    );
+    assert.equal(platform.sent.length, 0);
+    assert.match(await status('before'), /^Context · unknown$/m);
+
+    await platform.emit(inbound('run', 'start work'));
+    await entered.promise;
+    await platform.emit(inbound('queue', 'follow up'));
+    const live = await status('live');
+    assert.match(
+      live,
+      /^This chat · test · workspace-model · reasoning high$/m,
+    );
+    assert.match(live, /^Context · 32,000 \/ 250,000 tokens \(13%\)$/m);
+    assert.match(
+      live,
+      /^Work · running for .* \(running agent\) · 1 queued · 1 running total$/m,
+    );
+    assert.equal(runs, 1);
+
+    release.resolve();
+    await gateway.idle();
+    await platform.emit(inbound('compact-status', '/compact'));
+    await gateway.idle();
+    await trace.flush();
+    const after = await status('after');
+    assert.match(after, /^Context · 8,000 \/ 250,000 tokens \(3%\)$/m);
+    assert.match(
+      after,
+      /^Last compaction · .* · manual · 32,000 → 8,000 tokens$/m,
+    );
+    assert.doesNotMatch(after, /^Work · /m);
+    await platform.emit(inbound('switch', '/model other'));
+    const changed = await status('changed');
+    assert.match(changed, /^Context · unknown$/m);
+    assert.doesNotMatch(changed, /^Last compaction · /m);
+    assert.equal(runs, 2);
+  },
+);
+
 async function until(t: TestContext, condition: () => boolean) {
   while (!condition()) await delay(10, undefined, { signal: t.signal });
 }

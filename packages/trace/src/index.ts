@@ -1,6 +1,9 @@
-import type { Store, TraceSpan } from '@tsugimori/storage';
+import type { SessionMetric, Store, TraceSpan } from '@tsugimori/storage';
 
 const batchSize = 100;
+
+type TraceStore = Pick<Store, 'writeTraceSpans'> &
+  Partial<Pick<Store, 'latestSessionSpan'>>;
 
 interface TraceOptions {
   flushDelayMs?: number;
@@ -9,18 +12,16 @@ interface TraceOptions {
 }
 
 export class Tracer {
-  readonly #store: Pick<Store, 'writeTraceSpans'>;
+  readonly #store: TraceStore;
   readonly #options: TraceOptions;
   readonly #ring: TraceSpan[] = [];
   #ringPosition = 0;
   #pending: TraceSpan[] = [];
+  #writing?: TraceSpan[];
   #timer?: NodeJS.Timeout;
   #flushing?: Promise<void>;
 
-  constructor(
-    store: Pick<Store, 'writeTraceSpans'>,
-    options: TraceOptions = {},
-  ) {
+  constructor(store: TraceStore, options: TraceOptions = {}) {
     this.#store = store;
     this.#options = options;
   }
@@ -30,6 +31,19 @@ export class Tracer {
       ...this.#ring.slice(this.#ringPosition),
       ...this.#ring.slice(0, this.#ringPosition),
     ];
+  }
+
+  latestSessionSpan(scope: string, metric: SessionMetric) {
+    const matches = (span: TraceSpan) =>
+      span.attrs.sessionScope === scope &&
+      (metric === 'compaction'
+        ? span.name === 'agent.compaction'
+        : typeof span.attrs.contextTokens === 'number');
+    return (
+      this.#pending.findLast(matches) ??
+      this.#writing?.findLast(matches) ??
+      this.#store.latestSessionSpan?.(scope, metric)
+    );
   }
 
   begin(name: string, attrs: TraceSpan['attrs'] = {}) {
@@ -128,11 +142,14 @@ export class Tracer {
   async #writePending() {
     while (this.#pending.length) {
       const batch = this.#pending.splice(0, batchSize);
+      this.#writing = batch;
       try {
         await this.#store.writeTraceSpans(batch);
       } catch (error) {
         this.#pending = [...batch, ...this.#pending];
         throw error;
+      } finally {
+        this.#writing = undefined;
       }
     }
   }

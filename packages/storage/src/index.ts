@@ -46,6 +46,8 @@ export interface ChatSummary extends ChatRef {
   throughSeq: number;
 }
 
+export type SessionMetric = 'context' | 'compaction';
+
 export interface AgentSession extends ChatRef {
   agentId: string;
   model: string;
@@ -216,6 +218,10 @@ export interface StoredPreview extends ChatRef {
 }
 
 export interface Store {
+  approvalStatus(
+    ref: ChatRef,
+    now: number,
+  ): { chat: number; nextExpiry: number | null; total: number };
   beginSummary(ref: ChatRef): ChatSummary;
   cancelApproval(id: string, now: number): void;
   cancelChatApprovals(
@@ -283,6 +289,9 @@ export interface Store {
   ): AgentSession | undefined;
   getSetupRun(id: string): SetupRun | undefined;
   getSummary(ref: ChatRef): ChatSummary | undefined;
+  getSummaryStatus(
+    ref: ChatRef,
+  ): { messages: number; updatedAt: number | null } | undefined;
   getTask(id: string): TaskRecord | undefined;
   getUser(ref: PrincipalRef): UserRecord | undefined;
   getUserDisplay(ref: PrincipalRef): string | undefined;
@@ -291,6 +300,10 @@ export interface Store {
   interruptScheduleRuns(now: number): void;
   interruptTasks(now: number): void;
   isSetupSecret(ref: ChatRef, messageId: string): boolean;
+  latestSessionSpan(
+    scope: string,
+    metric: SessionMetric,
+  ): TraceSpan | undefined;
   linkApproval(
     id: string,
     promptMessageId: string,
@@ -336,6 +349,13 @@ export interface Store {
   savePairingCode(adapterId: string, digest: string, expiresAt: number): void;
   saveSetupRun(run: SetupRun, lease: string): boolean;
   saveSummary(summary: ChatSummary): boolean;
+  scheduleStatus(
+    adapterId: string,
+    target: ScheduleAddress,
+  ): {
+    count: number;
+    next?: Pick<ScheduleRecord, 'action' | 'id' | 'nextDueAt'>;
+  };
   setAllowlisted(ref: ChatRef, allowlisted: boolean): void;
   setChatRoute(
     ref: ChatRef,

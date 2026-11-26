@@ -23,6 +23,11 @@ import { describeError } from './errors.ts';
 
 type AgentConfig = Config['agents'][number];
 type AgentEntry = { agent: AgentConnector; config: AgentConfig };
+export type AttachmentStatus = { id: string } & (
+  | { state: 'running' | 'disabled' | 'starting' }
+  | { attempt: number; retryAt: number; state: 'retrying' }
+  | { failure?: CheckReport; state: 'unavailable' }
+);
 export type PlatformNotice =
   | { kind: 'unavailable' | 'recovered' }
   | { kind: 'environment'; report: CheckReport };
@@ -91,12 +96,43 @@ export class Runtime {
     return this.#transition;
   }
 
-  get agentCount() {
-    return this.#agents.size;
-  }
-
-  get adapterCount() {
-    return this.adapterIds.length;
+  get attachments() {
+    const failure = (category: 'agent' | 'platform', id: string) =>
+      this.#reports.find(
+        (item) =>
+          item.target === `${category}/${id}` &&
+          item.status === 'fail' &&
+          (!item.capabilities || item.capabilities.includes(category)),
+      );
+    const platforms = this.config.platforms.map(
+      ({ enabled, id }): AttachmentStatus => {
+        if (enabled === false) return { id, state: 'disabled' };
+        const entry = this.#adapters.get(id);
+        if (entry?.state === 'active') return { id, state: 'running' };
+        if (entry?.retryAt !== undefined)
+          return {
+            id,
+            state: 'retrying',
+            attempt: entry.attempt,
+            retryAt: entry.retryAt,
+          };
+        if (entry?.state === 'starting' && !entry.failure)
+          return { id, state: 'starting' };
+        return {
+          id,
+          state: 'unavailable',
+          failure: entry?.failure ?? failure('platform', id),
+        };
+      },
+    );
+    const agents = this.config.agents.map(
+      ({ enabled, id }): AttachmentStatus => {
+        if (enabled === false) return { id, state: 'disabled' };
+        if (this.#agents.has(id)) return { id, state: 'running' };
+        return { id, state: 'unavailable', failure: failure('agent', id) };
+      },
+    );
+    return { platforms, agents };
   }
 
   get adapterIds() {

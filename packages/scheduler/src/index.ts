@@ -34,6 +34,7 @@ import { prepareReminder, unlinkedText } from './reminders.ts';
 export {
   scheduleCadence,
   scheduleChatName,
+  scheduleRef,
   scheduleReplyStyle,
   scheduleTime,
 } from './messages.ts';

@@ -233,6 +233,12 @@ test(
     const input = request('auto compact');
     const events = await collect(agent.run(input, io));
     assert.deepEqual(
+      events.flatMap((event) =>
+        event.type === 'usage' ? [event.contextTokens] : [],
+      ),
+      [800, 100, null],
+    );
+    assert.deepEqual(
       events.filter(({ type }) => type === 'compaction'),
       [
         {

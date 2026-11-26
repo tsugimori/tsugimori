@@ -487,6 +487,7 @@ export class ClaudeAgent implements AgentConnector {
       session(sessionId, tokens);
     yield {
       type: 'usage',
+      contextTokens: tokens ?? null,
       inputTokens: result.usage.input_tokens,
       outputTokens: result.usage.output_tokens,
     };

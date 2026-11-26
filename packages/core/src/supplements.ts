@@ -17,6 +17,10 @@ export class Supplements {
   readonly delivered = new Set<number>();
   #available = Promise.withResolvers<void>();
 
+  get pendingCount() {
+    return this.#queue.length;
+  }
+
   push(input: TaskInput) {
     this.#queue.push(input);
     this.#wake();

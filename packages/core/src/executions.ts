@@ -86,6 +86,10 @@ export class Executions {
     this.#deps = deps;
   }
 
+  get enabled() {
+    return Boolean(this.#deps.backend());
+  }
+
   async #get(chat: ChatRef, signal: AbortSignal) {
     signal.throwIfAborted();
     if (this.#closed) throw new ToolFailure('Execution is stopping');

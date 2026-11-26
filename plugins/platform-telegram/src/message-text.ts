@@ -183,11 +183,11 @@ export function telegramMessageParts(
       text += message.text.slice(end, offset);
       end = offset + length;
       const label = message.text.slice(offset, end);
-      if (entity.type === 'pre') {
-        spans.push({ type: 'pre', offset: text.length, length });
-        text += label;
-      } else {
+      if (entity.type === 'mention') {
         mention(entity.userId, label, message.text.slice(end, end + 2));
+      } else {
+        spans.push({ type: entity.type, offset: text.length, length });
+        text += label;
       }
     }
     return splitMessage(text + message.text.slice(end), spans, limit);

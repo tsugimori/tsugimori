@@ -46,6 +46,7 @@ test(
       scope: object;
     }[] = [];
     const replies: string[] = [];
+    let statusEntities: unknown;
     const updates: unknown[] = [];
     const logs: Parameters<Logger>[0][] = [];
     const spans: Parameters<SqliteStore['writeTraceSpans']>[0][number][] = [];
@@ -67,6 +68,11 @@ test(
       const body = JSON.parse(init.body);
       if (method === 'sendMessage') {
         replies.push(body.text);
+        if (
+          typeof body.text === 'string' &&
+          body.text.startsWith('Gateway · v')
+        )
+          statusEntities = body.entities;
         return ok({ message_id: 1_000 + replies.length });
       }
       if (method === 'sendChatAction') return ok(true);
@@ -264,8 +270,17 @@ test(
       2,
     );
     assert.ok(
-      replies.includes('Gateway running with 1 platform(s) and 0 agent(s).'),
+      replies.some(
+        (text) =>
+          text.startsWith('Gateway · v') && text.includes('Platforms ·'),
+      ),
     );
+    assert.ok(Array.isArray(statusEntities));
+    assert.deepEqual(statusEntities[0], {
+      type: 'bold',
+      offset: 0,
+      length: 'Gateway'.length,
+    });
     assert.ok(replies.includes('Usage: /compact'));
     assert.equal(replies.length, 4);
     assert.equal(

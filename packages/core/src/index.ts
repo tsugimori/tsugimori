@@ -53,6 +53,7 @@ import { Previews } from './previews.ts';
 import { PluginRegistry } from './registry.ts';
 import { Runtime } from './runtime.ts';
 import { GuidedSetup } from './setup.ts';
+import { statusCard } from './status.ts';
 import { BackgroundSummaries } from './summary.ts';
 import { systemMessages } from './system-messages.ts';
 import { reply, Tasks } from './tasks.ts';
@@ -107,6 +108,7 @@ export class Gateway {
   #expiry?: Promise<void>;
   #initialApply?: Promise<void>;
   #stopping?: Promise<void>;
+  #startedAt = 0;
   readonly admin: AdminReader;
   #state: 'new' | 'starting' | 'running' | 'stopping' = 'new';
 
@@ -338,6 +340,7 @@ export class Gateway {
   async start(initial?: WorkspaceConfig) {
     if (this.#state !== 'new') throw new Error('Gateway can only start once');
     this.#state = 'starting';
+    this.#startedAt = Date.now();
     const { store, workspace, log } = this.#deps;
     const snapshot = initial ?? (await loadConfig(workspace, this.#registry));
     if (this.#isStopping()) return;
@@ -1083,16 +1086,25 @@ export class Gateway {
         await send(closed ? m.previewClosed : m.previewMissing);
         break;
       }
-      case 'status':
-        await send(
-          [
-            m.status(this.#runtime.adapterCount, this.#runtime.agentCount),
-            failureText(this.#runtime.reports, locale),
-          ]
-            .filter(Boolean)
-            .join('\n'),
+      case 'status': {
+        const card = statusCard(
+          {
+            runtime: this.#runtime,
+            sandboxEnabled: this.#execution.enabled,
+            startedAt: this.#startedAt,
+            store,
+            tasks: this.#tasks,
+            trace: this.#trace,
+          },
+          chat,
+          message,
         );
+        await this.#outbound.send(adapter, {
+          ...reply(message, card.text),
+          ...card,
+        });
         break;
+      }
     }
   }
 }

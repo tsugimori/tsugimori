@@ -13,8 +13,10 @@ import type {
   GrantQuery,
   InboundRecord,
   NewMessage,
+  ScheduleAddress,
   ScheduleRecord,
   ScheduleRun,
+  SessionMetric,
   SetupRun,
   Store,
   StoredGrant,
@@ -37,6 +39,7 @@ import {
   isNull,
   lt,
   lte,
+  min,
   notInArray,
   sql,
 } from 'drizzle-orm';
@@ -59,6 +62,7 @@ import {
   previews,
   scheduleRuns,
   schedules,
+  sessionScope,
   setupRuns,
   setupSecrets,
   tasks,
@@ -446,6 +450,23 @@ export class SqliteStore implements Store {
       .all();
   }
 
+  approvalStatus(ref: ChatRef, now: number) {
+    return this.#db
+      .select({
+        chat: sql<number>`count(*) filter (where ${chatScope(approvals, ref)})`,
+        total: count(),
+        nextExpiry: min(approvals.expiresAt),
+      })
+      .from(approvals)
+      .where(
+        and(
+          eq(approvals.status, 'pending'),
+          sql`(${approvals.expiresAt} is null or ${approvals.expiresAt} > ${now})`,
+        ),
+      )
+      .get()!;
+  }
+
   listGrants() {
     return this.#db
       .select()
@@ -463,6 +484,22 @@ export class SqliteStore implements Store {
       .orderBy(traceSpans.startedAt, traceSpans.id)
       .limit(2000)
       .all();
+  }
+
+  latestSessionSpan(scope: string, metric: SessionMetric) {
+    return this.#db
+      .select()
+      .from(traceSpans)
+      .where(
+        and(
+          eq(sessionScope(traceSpans.attrs), scope),
+          metric === 'compaction'
+            ? eq(traceSpans.name, 'agent.compaction')
+            : sql`json_extract(${traceSpans.attrs}, '$.contextTokens') is not null`,
+        ),
+      )
+      .orderBy(desc(traceSpans.id))
+      .get();
   }
 
   getWorkspaceSettings(ref: ChatRef) {
@@ -535,6 +572,32 @@ export class SqliteStore implements Store {
       .from(schedules)
       .where(chatScope(schedules, ref))
       .all();
+  }
+
+  scheduleStatus(adapterId: string, target: ScheduleAddress) {
+    const filter = and(
+      eq(schedules.status, 'active'),
+      eq(schedules.adapterId, adapterId),
+      eq(sql`json_extract(${schedules.target}, '$.chatId')`, target.chatId),
+      sql`json_extract(${schedules.target}, '$.threadId') is ${target.threadId ?? null}`,
+    );
+    return {
+      count: this.#db
+        .select({ value: count() })
+        .from(schedules)
+        .where(filter)
+        .get()!.value,
+      next: this.#db
+        .select({
+          id: schedules.id,
+          action: schedules.action,
+          nextDueAt: schedules.nextDueAt,
+        })
+        .from(schedules)
+        .where(and(filter, isNotNull(schedules.nextDueAt)))
+        .orderBy(asc(schedules.nextDueAt), asc(schedules.id))
+        .get(),
+    };
   }
 
   dueSchedules(now: number, adapterIds: readonly string[]) {
@@ -801,6 +864,23 @@ export class SqliteStore implements Store {
       .get();
   }
 
+  getSummaryStatus(ref: ChatRef) {
+    const summary = this.getSummary(ref);
+    if (!summary?.text) return;
+    const { value } = this.#db
+      .select({ value: count() })
+      .from(messages)
+      .where(
+        and(
+          chatScope(messages, ref),
+          eq(messages.deleted, false),
+          lte(messages.seq, summary.throughSeq),
+        ),
+      )
+      .get()!;
+    return { messages: value, updatedAt: summary.updatedAt };
+  }
+
   beginSummary(ref: ChatRef) {
     this.#db
       .insert(chatSummaries)
@@ -813,7 +893,11 @@ export class SqliteStore implements Store {
   saveSummary(summary: ChatSummary) {
     return !!this.#db
       .update(chatSummaries)
-      .set({ text: summary.text, throughSeq: summary.throughSeq })
+      .set({
+        text: summary.text,
+        throughSeq: summary.throughSeq,
+        updatedAt: Date.now(),
+      })
       .where(
         and(
           chatScope(chatSummaries, summary),

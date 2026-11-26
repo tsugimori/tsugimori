@@ -116,7 +116,7 @@ export interface TextRange {
 }
 
 export type TextEntity = TextRange &
-  ({ type: 'pre' } | { type: 'mention'; userId: string });
+  ({ type: 'bold' } | { type: 'pre' } | { type: 'mention'; userId: string });
 
 export interface SendReceipt {
   approvalEntities?: readonly TextEntity[];
@@ -437,7 +437,13 @@ export type AgentEvent =
   | { request: ApprovalRequest; type: 'approval.requested' }
   | { error: Error; type: 'error' }
   | AgentCompactionEvent
-  | { inputTokens?: number; outputTokens?: number; type: 'usage' }
+  | {
+      /** Tokens occupying the session context. Null when the provider only reports aggregate usage. */
+      contextTokens?: number | null;
+      inputTokens?: number;
+      outputTokens?: number;
+      type: 'usage';
+    }
   | { sessionId: string; type: 'sessionId' };
 
 export function toolWireName(name: string) {

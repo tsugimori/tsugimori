@@ -167,7 +167,7 @@ test(
       { type: 'tool.started', callId: 'tool-1', name: 'Bash' },
       { type: 'tool.finished', callId: 'tool-1', name: 'Bash', status: 'ok' },
       { type: 'text.delta', text: 'pong' },
-      { type: 'usage', inputTokens: 9, outputTokens: 1 },
+      { type: 'usage', contextTokens: 10, inputTokens: 9, outputTokens: 1 },
       { type: 'text.final', text: 'pong' },
     ]);
     assert.deepEqual(second, first);

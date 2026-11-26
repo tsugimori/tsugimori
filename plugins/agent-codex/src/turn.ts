@@ -142,6 +142,8 @@ export class TurnOutput {
       return [
         {
           type: 'usage',
+          contextTokens:
+            typeof usage.totalTokens === 'number' ? usage.totalTokens : null,
           inputTokens:
             typeof usage.inputTokens === 'number'
               ? usage.inputTokens

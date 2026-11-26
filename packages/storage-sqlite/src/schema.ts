@@ -13,7 +13,9 @@ import type {
   TraceSpan,
   WorkspaceSettings,
 } from '@tsugimori/storage';
+import type { AnySQLiteColumn } from 'drizzle-orm/sqlite-core';
 
+import { sql } from 'drizzle-orm';
 import {
   index,
   integer,
@@ -166,6 +168,12 @@ export const approvals = sqliteTable(
       table.promptMessageId,
     ),
     index('approvals_task').on(table.taskId, table.status),
+    index('approvals_pending').on(
+      table.status,
+      table.expiresAt,
+      table.adapterId,
+      table.chatId,
+    ),
   ],
 );
 
@@ -230,8 +238,17 @@ export const traceSpans = sqliteTable(
     durationMs: real('duration_ms').notNull(),
     status: text('status').$type<TraceSpan['status']>().notNull(),
   },
-  (table) => [index('trace_spans_started_at').on(table.startedAt)],
+  (table) => [
+    index('trace_spans_started_at').on(table.startedAt),
+    index('trace_spans_session')
+      .on(sessionScope(table.attrs), table.id)
+      .where(sql`${sessionScope(table.attrs)} is not null`),
+  ],
 );
+
+export function sessionScope(attrs: AnySQLiteColumn) {
+  return sql`json_extract(${attrs}, '$.sessionScope')`;
+}
 
 export const chatSummaries = sqliteTable(
   'chat_summaries',
@@ -240,6 +257,7 @@ export const chatSummaries = sqliteTable(
     revision: integer('revision').notNull(),
     text: text('text').notNull(),
     throughSeq: integer('through_seq').notNull(),
+    updatedAt: integer('updated_at'),
   },
   (table) => [primaryKey({ columns: [table.adapterId, table.chatId] })],
 );

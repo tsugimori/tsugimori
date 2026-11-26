@@ -16,6 +16,7 @@ import type {
 import type {
   ApprovalContinuation,
   ApprovalRecord,
+  ChatRecord,
   ScheduleChange,
   Store,
   TaskRecord,
@@ -34,7 +35,7 @@ import type { BackgroundSummaries } from './summary.ts';
 import type { TaskInput } from './supplements.ts';
 
 import { untilAborted } from './abort.ts';
-import { protectTools, runAgent } from './agent-run.ts';
+import { protectTools, runAgent, sessionScope } from './agent-run.ts';
 import { approvalMessages, approvalPrompt } from './approval-messages.ts';
 import { describeError } from './errors.ts';
 import { conversationId, DeliveryError, Outbound } from './outbound.ts';
@@ -69,11 +70,22 @@ type Work = {
   input: TaskInput;
   messageIds: Set<string>;
   pendingApprovalFallback?: string;
+  progress: { stage: TaskStage; startedAt: number };
   route?: { agentId: string; model: string };
+  sessionId?: string;
   sessionValid: boolean;
   supplements: Supplements;
   workdir?: string;
 };
+
+export type TaskStage =
+  | 'preparing'
+  | 'context'
+  | 'agent'
+  | 'approval'
+  | 'compaction'
+  | 'delivery'
+  | 'recording';
 
 type ApprovalAnswer =
   | { approved: boolean; reaction?: Promise<void>; scheduleApplied?: boolean }
@@ -102,6 +114,84 @@ export class Tasks {
     this.#deps = deps;
   }
 
+  status(chat: ChatRef) {
+    const { store } = this.#deps;
+    const key = chatKey(chat);
+    const running = this.#running.get(key);
+    const { agentId, model, selected, thinking } = this.#route(
+      chat,
+      store.getChat(chat),
+    );
+    const activeSession =
+      running?.sessionValid &&
+      running.route?.agentId === agentId &&
+      running.route?.model === model
+        ? running.sessionId
+        : undefined;
+    const sessionId =
+      activeSession ??
+      (selected && agentId && model
+        ? store.getSession(chat, agentId, model)?.sessionId
+        : undefined);
+    let queued = running?.supplements.pendingCount ?? 0;
+    for (const work of this.#work) {
+      if (
+        work !== running &&
+        work.chat.adapterId === chat.adapterId &&
+        work.chat.chatId === chat.chatId
+      )
+        queued++;
+    }
+    const progress = running?.progress;
+    const waiting =
+      running &&
+      [...this.#approvals.values()].some(
+        (approval) => approval.work === running && !approval.signal.aborted,
+      );
+    return {
+      agentId,
+      model,
+      thinking,
+      compactAt: selected?.config.compactAt,
+      sessionScope:
+        sessionId && agentId && model
+          ? sessionScope(chat, agentId, model, sessionId)
+          : undefined,
+      running:
+        waiting && progress
+          ? { ...progress, stage: 'approval' as const }
+          : progress,
+      queued,
+      totalRunning: this.#running.size,
+    };
+  }
+
+  #route(chat: ChatRef, current: ChatRecord | undefined) {
+    const { store, runtime } = this.#deps;
+    const settings = store.getWorkspaceSettings(chat);
+    const agentId = current?.agentId ?? settings?.agentId;
+    const configuredId = agentId ?? runtime.config.defaultAgent;
+    const unavailable = runtime.unavailable(configuredId);
+    const selected =
+      unavailable && configuredId
+        ? undefined
+        : (agentId && runtime.getAgent(agentId)) || runtime.defaultAgent();
+    const bound =
+      selected?.config ??
+      runtime.config.agents.find(({ id }) => id === configuredId);
+    return {
+      agentId: selected?.agent.id ?? agentId ?? bound?.id,
+      model:
+        current?.model ??
+        settings?.model ??
+        bound?.model ??
+        (bound ? 'default' : undefined),
+      thinking: settings?.thinking ?? bound?.thinking,
+      selected,
+      unavailable,
+    };
+  }
+
   dispatch(adapter: PlatformAdapter, chat: ChatRef, input: TaskInput) {
     const key = chatKey(chat);
     const running = this.#running.get(key);
@@ -118,6 +208,7 @@ export class Tasks {
       running.supplements.push(input);
       return;
     }
+    const createdAt = Date.now();
     const work: Work = {
       adapter,
       chat,
@@ -128,6 +219,7 @@ export class Tasks {
       messageIds: new Set([messageId]),
       supplements: new Supplements(),
       acceptsSupplements: false,
+      progress: { stage: 'preparing', startedAt: createdAt },
       sessionValid: true,
     };
     const { store, trace, log } = this.#deps;
@@ -138,7 +230,7 @@ export class Tasks {
       status: 'queued',
       agentId: null,
       model: null,
-      createdAt: Date.now(),
+      createdAt,
       startedAt: null,
       finishedAt: null,
     });
@@ -148,6 +240,7 @@ export class Tasks {
     const tail = previous
       .then(async () => {
         dequeued();
+        work.progress.startedAt = Date.now();
         this.#running.set(key, work);
         work.execution = this.#execute(work);
         await work.execution;
@@ -286,21 +379,10 @@ export class Tasks {
         finish('cancelled');
         return;
       }
-      const settings = store.getWorkspaceSettings(chat);
-      const agentId = current?.agentId ?? settings?.agentId;
-      const explicitUnavailable = runtime.unavailable(
-        agentId ?? runtime.config.defaultAgent,
-      );
-      const selected =
-        explicitUnavailable && (agentId || runtime.config.defaultAgent)
-          ? undefined
-          : (agentId && runtime.getAgent(agentId)) || runtime.defaultAgent();
+      const route = this.#route(chat, current);
+      const { selected } = route;
       const model = selected
-        ? (input.scheduled?.model ??
-          current?.model ??
-          settings?.model ??
-          selected.config.model ??
-          'default')
+        ? (input.scheduled?.model ?? route.model ?? 'default')
         : null;
       work.route =
         selected && model !== null
@@ -322,12 +404,13 @@ export class Tasks {
       }
       if (!selected || model === null) {
         if (input.scheduled) finish('failed');
-        else if (owner)
+        else if (owner) {
+          work.progress.stage = 'delivery';
           await outbound.send(
             adapter,
             reply(
               message,
-              explicitUnavailable ||
+              route.unavailable ||
                 systemMessages(runtime.config.locale).noAgent,
             ),
             {
@@ -335,13 +418,15 @@ export class Tasks {
               signal: abort.signal,
             },
           );
-        else finish('completed');
+        } else finish('completed');
         return;
       }
 
       if (input.compact) {
+        work.progress.stage = 'compaction';
         const text = await this.#compact(work, selected.agent, model);
         abort.signal.throwIfAborted();
+        work.progress.stage = 'delivery';
         await outbound.send(adapter, reply(message, text), {
           taskId: id,
           signal: abort.signal,
@@ -350,12 +435,14 @@ export class Tasks {
       }
 
       ranAgent = true;
+      work.progress.stage = 'context';
       const result = await this.#run(work, selected, model);
       work.acceptsSupplements = false;
       abort.signal.throwIfAborted();
       const fallback = work.pendingApprovalFallback;
       const text = [result.text, fallback].filter(Boolean).join('\n\n');
       if (text) {
+        work.progress.stage = 'delivery';
         const scheduled = input.scheduled;
         const output = scheduled
           ? {
@@ -429,6 +516,7 @@ export class Tasks {
     } finally {
       activity.abort();
       if (work.workdir && !runtime.disabled('workspace.record')) {
+        work.progress.stage = 'recording';
         try {
           await this.#deps.trace.span(
             'workspace.record',
@@ -481,7 +569,9 @@ export class Tasks {
       taskId: id,
       agentId: agent.id,
       model,
+      sessionScope: null as string | null,
       trigger: 'manual',
+      contextTokens: null as number | null,
       tokensBefore: null as number | null,
       tokensAfter: null as number | null,
     };
@@ -508,8 +598,15 @@ export class Tasks {
           : m.compactSkipped;
       }
       if (result.shared) return m.compactSuccess;
+      attrs.sessionScope = sessionScope(
+        chat,
+        agent.id,
+        model,
+        session.sessionId,
+      );
       attrs.tokensBefore = result.tokensBefore ?? null;
       attrs.tokensAfter = result.tokensAfter ?? null;
+      attrs.contextTokens = attrs.tokensAfter;
       end();
       return m.compactSuccess;
     } catch {
@@ -552,6 +649,7 @@ export class Tasks {
         ? storedSession
         : undefined;
     if (!session && !input.scheduled) store.clearSession(chat);
+    work.sessionId = session?.sessionId;
     work.acceptsSupplements = true;
     const assembled = await trace.span('context.assembled', attrs, async () => {
       const blocks = await context.assemble({
@@ -634,8 +732,18 @@ export class Tasks {
         definitions,
       );
       try {
+        work.progress.stage = 'agent';
         const result = await runAgent(
-          { ...this.#deps, task, approvalPending },
+          {
+            ...this.#deps,
+            task,
+            approvalPending,
+            onSession: input.scheduled
+              ? undefined
+              : (sessionId) => {
+                  work.sessionId = sessionId;
+                },
+          },
           agent,
           {
             model,
