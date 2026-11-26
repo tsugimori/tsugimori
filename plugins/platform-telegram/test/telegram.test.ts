@@ -361,6 +361,65 @@ test(
   },
 );
 
+test('retries only the rejected message part once after a chat migration', async (t) => {
+  const sent: Record<string, unknown>[] = [];
+  const events: InboundEvent[] = [];
+  const fetch: typeof globalThis.fetch = async (input, init) => {
+    const method = String(input).split('/').at(-1);
+    if (method === 'getMe') return ok(me);
+    if (method === 'getUpdates') return longPoll(init);
+    assert.equal(method, 'sendMessage');
+    assert.equal(typeof init?.body, 'string');
+    sent.push(JSON.parse(String(init?.body)));
+    if (sent.length === 1) return ok({ message_id: 17 });
+    return Response.json(
+      {
+        ok: false,
+        error_code: 400,
+        parameters: { migrate_to_chat_id: sent.length === 2 ? -10077 : -10078 },
+      },
+      { status: 400 },
+    );
+  };
+  const adapter = new TelegramAdapter({ fetch }, 'tg', '1:fake');
+  t.after(() => adapter.stop());
+  await adapter.start({
+    emit(event) {
+      events.push(event);
+      return Promise.resolve();
+    },
+  });
+  const first = 'x'.repeat(4094) + '\n\n';
+  await assert.rejects(
+    adapter.send({
+      chatId: '-77',
+      replyTo: '10',
+      text: first + 'Remaining text',
+    }),
+    (error) => {
+      assert.ok(error instanceof SendFailure);
+      assert.equal(error.deliveryUnknown, false);
+      assert.deepEqual(
+        error.parts.map(({ messageId, text }) => [messageId, text]),
+        [['17', first]],
+      );
+      return true;
+    },
+  );
+  assert.deepEqual(
+    sent.map(({ chat_id, text }) => [chat_id, text]),
+    [
+      ['-77', first],
+      ['-77', 'Remaining text'],
+      ['-10077', 'Remaining text'],
+    ],
+  );
+  assert.equal(sent[2]?.reply_parameters, undefined);
+  assert.deepEqual(events, [
+    { type: 'chat-migrated', chatId: '-77', newChatId: '-10077' },
+  ]);
+});
+
 test(
   'renders native IDs as current @usernames or UTF-16 text mentions',
   { timeout: 4_000 },

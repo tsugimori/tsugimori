@@ -289,6 +289,8 @@ export class TelegramAdapter implements PlatformAdapter {
   async send(message: OutboundMessage) {
     const signal = this.#signal();
     const parts: SendPart[] = [];
+    let chatId = this.#ctx?.resolveChatId?.(message.chatId) ?? message.chatId;
+    let migrated = false;
     let messages: ReturnType<typeof telegramMessageParts>;
     try {
       messages = telegramMessageParts(message, this.#ctx?.getUser);
@@ -300,15 +302,7 @@ export class TelegramAdapter implements PlatformAdapter {
       for (const [index, part] of messages.entries()) {
         const { text, entities } = part;
         const body = {
-          ...destination(message),
           text,
-          entities,
-          reply_parameters: message.replyTo
-            ? {
-                message_id: Number(message.replyTo),
-                allow_sending_without_reply: true,
-              }
-            : undefined,
           reply_markup:
             index === controls && message.buttons?.length
               ? {
@@ -321,30 +315,63 @@ export class TelegramAdapter implements PlatformAdapter {
                 }
               : undefined,
         };
+        const post = (entities: typeof part.entities, retries?: number) => {
+          const address = chatId === message.chatId ? message : { chatId };
+          return this.#api.call(
+            'sendMessage',
+            {
+              ...body,
+              ...destination(address),
+              entities,
+              reply_parameters:
+                chatId === message.chatId && message.replyTo
+                  ? {
+                      message_id: Number(message.replyTo),
+                      allow_sending_without_reply: true,
+                    }
+                  : undefined,
+            },
+            signal,
+            retries,
+          );
+        };
+        const send = async (
+          entities: typeof part.entities,
+          retries?: number,
+        ) => {
+          try {
+            return await post(entities, retries);
+          } catch (error) {
+            if (migrated) throw error;
+            const next = await this.#recordMigration(chatId, error);
+            if (!next) throw error;
+            chatId = next;
+            migrated = true;
+            return post(entities, 0);
+          }
+        };
         const sent = record(
-          await this.#api
-            .call('sendMessage', body, signal)
-            .catch((error: unknown) => {
-              if (
-                message.format !== 'markdown' ||
-                message.approval ||
-                !entities?.length ||
-                !(error instanceof BotApiError) ||
-                !error.invalidEntities
-              )
-                throw error;
-              this.#ctx?.logWarning?.('telegram.entities_rejected');
-              return this.#api.call(
-                'sendMessage',
-                { ...body, entities: undefined },
-                signal,
-                0,
-              );
-            }),
+          await send(entities).catch((error: unknown) => {
+            if (
+              message.format !== 'markdown' ||
+              message.approval ||
+              !entities?.length ||
+              !(error instanceof BotApiError) ||
+              !error.invalidEntities
+            )
+              throw error;
+            this.#ctx?.logWarning?.('telegram.entities_rejected');
+            return send(undefined, 0);
+          }),
         );
         const messageId = nativeId(sent?.message_id);
         if (!messageId) throw new BotApiError('sendMessage', undefined);
-        parts.push({ messageId, text, raw: { message_id: sent?.message_id } });
+        parts.push({
+          ...(chatId === message.chatId ? {} : { chatId }),
+          messageId,
+          text,
+          raw: { message_id: sent?.message_id },
+        });
       }
     } catch (error) {
       throw new SendFailure(
@@ -456,17 +483,22 @@ export class TelegramAdapter implements PlatformAdapter {
           text,
           entities: formatting,
         });
-        await this.#api.call(
-          'editMessageText',
-          {
-            chat_id: chatId,
-            message_id: Number(messageId),
-            text,
-            entities: rendered[0]?.entities,
-            reply_markup: { inline_keyboard: [] },
-          },
-          signal,
-        );
+        try {
+          await this.#api.call(
+            'editMessageText',
+            {
+              chat_id: chatId,
+              message_id: Number(messageId),
+              text,
+              entities: rendered[0]?.entities,
+              reply_markup: { inline_keyboard: [] },
+            },
+            signal,
+          );
+        } catch (error) {
+          await this.#recordMigration(chatId, error);
+          throw error;
+        }
       }
     }
   }
@@ -482,16 +514,30 @@ export class TelegramAdapter implements PlatformAdapter {
       denied: '👎',
       expired: null,
     }[status];
-    await this.#api.call(
-      'setMessageReaction',
-      {
-        chat_id: chatId,
-        message_id: Number(messageId),
-        reaction: emoji ? [{ type: 'emoji', emoji }] : [],
-      },
-      AbortSignal.any([this.#signal(), signal]),
-      0,
-    );
+    try {
+      await this.#api.call(
+        'setMessageReaction',
+        {
+          chat_id: chatId,
+          message_id: Number(messageId),
+          reaction: emoji ? [{ type: 'emoji', emoji }] : [],
+        },
+        AbortSignal.any([this.#signal(), signal]),
+        0,
+      );
+    } catch (error) {
+      await this.#recordMigration(chatId, error);
+      throw error;
+    }
+  }
+
+  async #recordMigration(chatId: string, error: unknown) {
+    if (!(error instanceof BotApiError) || error.code !== 400) return;
+    const newChatId = error.parameters.migrateToChatId;
+    if (!newChatId || newChatId === chatId) return;
+    await this.#ctx?.emit({ type: 'chat-migrated', chatId, newChatId });
+    const resolved = this.#ctx?.resolveChatId?.(chatId) ?? newChatId;
+    return resolved === chatId ? undefined : resolved;
   }
 
   #signal() {

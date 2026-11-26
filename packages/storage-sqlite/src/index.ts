@@ -41,6 +41,7 @@ import {
   lte,
   min,
   notInArray,
+  or,
   sql,
 } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/node-sqlite';
@@ -127,6 +128,192 @@ function createDatabase(path: string) {
     sqlite.close();
     throw error;
   }
+}
+
+type Transaction = Parameters<
+  Parameters<ReturnType<typeof createDatabase>['db']['transaction']>[0]
+>[0];
+
+function readdressSchedule(
+  schedule: ScheduleRecord,
+  resolve: (chatId: string) => string,
+) {
+  const chatId = resolve(schedule.chatId);
+  const resolveOther = (id: string) =>
+    id === schedule.chatId ? chatId : resolve(id);
+  const addressId = resolveOther(schedule.address.chatId);
+  const targetId =
+    schedule.target.chatId === schedule.address.chatId
+      ? addressId
+      : resolveOther(schedule.target.chatId);
+  if (
+    chatId === schedule.chatId &&
+    addressId === schedule.address.chatId &&
+    targetId === schedule.target.chatId
+  )
+    return schedule;
+  return {
+    ...schedule,
+    chatId,
+    address: { ...schedule.address, chatId: addressId },
+    target: { ...schedule.target, chatId: targetId },
+  };
+}
+
+function moveSummary(tx: Transaction, previous: ChatRef, next: ChatRef) {
+  const read = (chat: ChatRef) =>
+    tx.select().from(chatSummaries).where(chatScope(chatSummaries, chat)).get();
+  const before = read(previous);
+  const current = read(next);
+  if (!before && !current) return;
+  const firstUncovered = (chat: ChatRef, throughSeq: number) =>
+    tx
+      .select({ seq: min(messages.seq) })
+      .from(messages)
+      .where(
+        and(
+          chatScope(messages, chat),
+          gt(messages.seq, throughSeq),
+          eq(messages.deleted, false),
+        ),
+      )
+      .get()?.seq ?? Infinity;
+  const uncoveredBefore = firstUncovered(previous, before?.throughSeq ?? 0);
+  if (!before && uncoveredBefore === Infinity) return;
+  const uncoveredCurrent = firstUncovered(next, current?.throughSeq ?? 0);
+  const merged = {
+    text: [...new Set([before?.text, current?.text].filter(Boolean))].join(
+      '\n\n',
+    ),
+    throughSeq: Math.min(
+      Math.max(before?.throughSeq ?? 0, current?.throughSeq ?? 0),
+      uncoveredBefore - 1,
+      uncoveredCurrent - 1,
+    ),
+    revision: Math.max(before?.revision ?? 0, current?.revision ?? 0) + 1,
+    updatedAt:
+      Math.max(before?.updatedAt ?? 0, current?.updatedAt ?? 0) || null,
+  };
+  tx.insert(chatSummaries)
+    .values({ ...next, ...merged })
+    .onConflictDoUpdate({
+      target: [chatSummaries.adapterId, chatSummaries.chatId],
+      set: merged,
+    })
+    .run();
+  tx.delete(chatSummaries).where(chatScope(chatSummaries, previous)).run();
+}
+
+function moveChatState(tx: Transaction, ref: ChatRef, chatId: string) {
+  const next = { adapterId: ref.adapterId, chatId };
+  const pending = tx
+    .select()
+    .from(approvals)
+    .where(
+      and(
+        eq(approvals.adapterId, ref.adapterId),
+        eq(approvals.status, 'pending'),
+      ),
+    )
+    .all();
+  const moveSchedule = (schedule: ScheduleRecord) =>
+    readdressSchedule(schedule, (id) => (id === ref.chatId ? chatId : id));
+  for (const approval of pending) {
+    const movedPrompt = approval.chatId === ref.chatId;
+    const continuation = approval.continuation;
+    const { resource } = approval;
+    const movedResource =
+      resource.type === 'chat' &&
+      resource.adapterId === ref.adapterId &&
+      resource.chatId === ref.chatId;
+    const change =
+      continuation?.kind === 'schedule' ? continuation.change : undefined;
+    const schedule = change && moveSchedule(change.schedule);
+    const previous = change?.previous && moveSchedule(change.previous);
+    const movedSchedule =
+      schedule !== change?.schedule || previous !== change?.previous;
+    if (!movedPrompt && !movedResource && !movedSchedule) continue;
+    const prompt =
+      movedPrompt && approval.promptMessageId
+        ? tx
+            .select({ text: messages.text })
+            .from(messages)
+            .where(
+              and(
+                chatScope(messages, ref),
+                eq(messages.direction, 'outbound'),
+                eq(messages.messageId, approval.promptMessageId),
+                eq(messages.migratedFromChatId, ''),
+              ),
+            )
+            .get()?.text
+        : undefined;
+    tx.update(approvals)
+      .set({
+        chatId: movedPrompt ? chatId : undefined,
+        promptMessageId: movedPrompt ? null : undefined,
+        migratedPrompt: prompt,
+        continuation:
+          movedSchedule && schedule
+            ? { kind: 'schedule', change: { ...change, schedule, previous } }
+            : undefined,
+        resource: movedResource ? { ...resource, chatId } : undefined,
+      })
+      .where(eq(approvals.id, approval.id))
+      .run();
+  }
+
+  const addressId = sql`json_extract(${schedules.address}, '$.chatId')`;
+  const targetId = sql`json_extract(${schedules.target}, '$.chatId')`;
+  tx.update(schedules)
+    .set({
+      chatId: sql`case when ${schedules.chatId} = ${ref.chatId} then ${chatId} else ${schedules.chatId} end`,
+      address: sql`case when ${addressId} = ${ref.chatId} then json_set(${schedules.address}, '$.chatId', ${chatId}) else ${schedules.address} end`,
+      target: sql`case when ${targetId} = ${ref.chatId} then json_set(${schedules.target}, '$.chatId', ${chatId}) else ${schedules.target} end`,
+    })
+    .where(
+      and(
+        eq(schedules.adapterId, ref.adapterId),
+        or(
+          eq(schedules.chatId, ref.chatId),
+          eq(addressId, ref.chatId),
+          eq(targetId, ref.chatId),
+        ),
+      ),
+    )
+    .run();
+
+  tx.update(tasks)
+    .set({
+      chatId,
+      sourceChatId: sql`coalesce(${tasks.sourceChatId}, ${ref.chatId})`,
+    })
+    .where(chatScope(tasks, ref))
+    .run();
+  moveSummary(tx, ref, next);
+  tx.update(messages)
+    .set({
+      chatId,
+      migratedFromChatId: sql`case when ${messages.migratedFromChatId} = '' then ${ref.chatId} else ${messages.migratedFromChatId} end`,
+    })
+    .where(chatScope(messages, ref))
+    .run();
+
+  const sessions = tx
+    .select()
+    .from(agentSessions)
+    .where(chatScope(agentSessions, ref))
+    .all();
+  for (const session of sessions)
+    tx.insert(agentSessions)
+      .values({
+        ...session,
+        ...next,
+        scopeChatId: session.scopeChatId ?? ref.chatId,
+      })
+      .onConflictDoNothing()
+      .run();
+  tx.delete(agentSessions).where(chatScope(agentSessions, ref)).run();
 }
 
 function saveUser(
@@ -223,6 +410,31 @@ export class SqliteStore implements Store {
     const { db, sqlite } = createDatabase(path);
     this.#db = db;
     this.#sqlite = sqlite;
+    try {
+      // Earlier releases recorded the chat alias without moving conversation state.
+      db.transaction(
+        (tx) => {
+          for (const chat of tx
+            .select()
+            .from(chats)
+            .where(isNotNull(chats.migratedToChatId))
+            .all()) {
+            if (chat.migratedToChatId)
+              this.#migrateChat(
+                tx,
+                chat,
+                chat.migratedToChatId,
+                undefined,
+                true,
+              );
+          }
+        },
+        { behavior: 'immediate' },
+      );
+    } catch (error) {
+      sqlite.close();
+      throw error;
+    }
   }
 
   close() {
@@ -233,74 +445,122 @@ export class SqliteStore implements Store {
     return this.#db.select().from(chats).where(chatScope(chats, ref)).get();
   }
 
+  resolveChat(ref: ChatRef): ChatRef {
+    const destination = (scope: ChatRef) =>
+      this.#db
+        .select({ chatId: chats.migratedToChatId })
+        .from(chats)
+        .where(chatScope(chats, scope))
+        .get()?.chatId;
+    let chatId = destination(ref);
+    if (!chatId) return ref;
+    const seen = new Set([ref.chatId]);
+    while (chatId && !seen.has(chatId)) {
+      seen.add(chatId);
+      ref = { ...ref, chatId };
+      chatId = destination(ref);
+    }
+    if (chatId) throw new Error('Chat migration contains a cycle');
+    return ref;
+  }
+
   migrateChat(ref: ChatRef, newChatId: string, title?: string) {
     if (ref.chatId === newChatId) return false;
     return this.#db.transaction(
-      (tx) => {
-        const previous = tx
-          .select()
-          .from(chats)
-          .where(chatScope(chats, ref))
-          .get();
-        const next = { adapterId: ref.adapterId, chatId: newChatId };
-        const current = tx
-          .select()
-          .from(chats)
-          .where(chatScope(chats, next))
-          .get();
-        if (previous?.migratedToChatId || current?.migratedToChatId)
-          return false;
-        const route = {
-          agentId: current?.agentId ?? previous?.agentId ?? null,
-          model: current?.model ?? previous?.model ?? null,
-        };
-        const destination = {
-          ...route,
-          kind: 'supergroup' as const,
-          title: current?.title ?? title ?? previous?.title ?? null,
-          allowlisted:
-            current?.allowlistConfigured || current?.allowlisted
-              ? current.allowlisted
-              : (previous?.allowlisted ?? false),
-          allowlistConfigured:
-            current?.allowlistConfigured ||
-            (previous?.allowlistConfigured ?? false),
-        };
-        tx.insert(chats)
-          .values({ ...next, ...destination })
-          .onConflictDoUpdate({
-            target: [chats.adapterId, chats.chatId],
-            set: destination,
-          })
-          .run();
-        tx.insert(chats)
-          .values({ ...ref, kind: 'group', title, migratedToChatId: newChatId })
-          .onConflictDoUpdate({
-            target: [chats.adapterId, chats.chatId],
-            set: { migratedToChatId: newChatId },
-          })
-          .run();
-        const settings = (chat: ChatRef) =>
-          tx
-            .select()
-            .from(workspaceSettings)
-            .where(chatScope(workspaceSettings, chat))
-            .get()?.settings;
-        const previousSettings = settings(ref);
-        if (previousSettings) {
-          const merged = { ...previousSettings, ...settings(next) };
-          tx.insert(workspaceSettings)
-            .values({ ...next, settings: merged })
-            .onConflictDoUpdate({
-              target: [workspaceSettings.adapterId, workspaceSettings.chatId],
-              set: { settings: merged },
-            })
-            .run();
-        }
-        return true;
-      },
+      (tx) => this.#migrateChat(tx, ref, newChatId, title),
       { behavior: 'immediate' },
     );
+  }
+
+  #migrateChat(
+    tx: Transaction,
+    ref: ChatRef,
+    newChatId: string,
+    title?: string,
+    backfill = false,
+  ) {
+    const previous = tx.select().from(chats).where(chatScope(chats, ref)).get();
+    const next = { adapterId: ref.adapterId, chatId: newChatId };
+    const current = tx.select().from(chats).where(chatScope(chats, next)).get();
+    if (
+      (previous?.migratedToChatId &&
+        (!backfill || previous.migratedToChatId !== newChatId)) ||
+      current?.migratedToChatId
+    )
+      return false;
+    if (previous?.migratedToChatId) {
+      moveChatState(tx, ref, newChatId);
+      if (previous.sessionAgentId && !current?.sessionAgentId)
+        tx.update(chats)
+          .set({
+            sessionAgentId: previous.sessionAgentId,
+            sessionModel: previous.sessionModel,
+          })
+          .where(chatScope(chats, next))
+          .run();
+      if (previous.sessionAgentId || previous.sessionModel)
+        tx.update(chats)
+          .set({ sessionAgentId: null, sessionModel: null })
+          .where(chatScope(chats, ref))
+          .run();
+      return false;
+    }
+    const route = {
+      agentId: current?.agentId ?? previous?.agentId ?? null,
+      model: current?.model ?? previous?.model ?? null,
+    };
+    const destination = {
+      ...route,
+      sessionAgentId:
+        current?.sessionAgentId ?? previous?.sessionAgentId ?? null,
+      sessionModel: current?.sessionModel ?? previous?.sessionModel ?? null,
+      kind: 'supergroup' as const,
+      title: current?.title ?? title ?? previous?.title ?? null,
+      allowlisted:
+        current?.allowlistConfigured || current?.allowlisted
+          ? current.allowlisted
+          : (previous?.allowlisted ?? false),
+      allowlistConfigured:
+        current?.allowlistConfigured ||
+        (previous?.allowlistConfigured ?? false),
+    };
+    tx.insert(chats)
+      .values({ ...next, ...destination })
+      .onConflictDoUpdate({
+        target: [chats.adapterId, chats.chatId],
+        set: destination,
+      })
+      .run();
+    tx.insert(chats)
+      .values({ ...ref, kind: 'group', title, migratedToChatId: newChatId })
+      .onConflictDoUpdate({
+        target: [chats.adapterId, chats.chatId],
+        set: {
+          migratedToChatId: newChatId,
+          sessionAgentId: null,
+          sessionModel: null,
+        },
+      })
+      .run();
+    const settings = (chat: ChatRef) =>
+      tx
+        .select()
+        .from(workspaceSettings)
+        .where(chatScope(workspaceSettings, chat))
+        .get()?.settings;
+    const previousSettings = settings(ref);
+    if (previousSettings) {
+      const merged = { ...previousSettings, ...settings(next) };
+      tx.insert(workspaceSettings)
+        .values({ ...next, settings: merged })
+        .onConflictDoUpdate({
+          target: [workspaceSettings.adapterId, workspaceSettings.chatId],
+          set: { settings: merged },
+        })
+        .run();
+    }
+    moveChatState(tx, ref, newChatId);
+    return true;
   }
 
   listUnavailableCommandScopes({
@@ -410,6 +670,7 @@ export class SqliteStore implements Store {
         adapterId: messages.adapterId,
         chatId: messages.chatId,
         messageId: messages.messageId,
+        migratedFromChatId: messages.migratedFromChatId,
         userId: messages.userId,
         text: messages.text,
         direction: messages.direction,
@@ -522,6 +783,7 @@ export class SqliteStore implements Store {
   }
 
   deliveryAddress(ref: ChatRef) {
+    ref = this.resolveChat(ref);
     const chat = this.getChat(ref);
     if (!chat) return;
     const last = this.#db
@@ -633,6 +895,7 @@ export class SqliteStore implements Store {
     limit: number,
     expected?: ScheduleRecord,
   ) {
+    schedule = this.#resolveSchedule(schedule);
     if (
       (!expected ||
         (schedule.status === 'active' &&
@@ -665,6 +928,14 @@ export class SqliteStore implements Store {
       )
       .returning({ id: schedules.id })
       .get();
+  }
+
+  #resolveSchedule(schedule: ScheduleRecord) {
+    return readdressSchedule(
+      schedule,
+      (chatId) =>
+        this.resolveChat({ adapterId: schedule.adapterId, chatId }).chatId,
+    );
   }
 
   claimScheduleRun(
@@ -778,6 +1049,16 @@ export class SqliteStore implements Store {
     message: InboundRecord,
     edited = false,
   ) {
+    const { chatId } = this.resolveChat(chat);
+    message = {
+      ...message,
+      chatId,
+      migratedFromChatId:
+        message.migratedFromChatId ??
+        (chatId === chat.chatId ? '' : chat.chatId),
+    };
+    if (chatId !== chat.chatId)
+      chat = { ...chat, chatId, kind: 'supergroup', title: null };
     return this.#db.transaction((tx) => {
       const insert = tx.insert(messages).values(message);
       const result = (
@@ -788,6 +1069,7 @@ export class SqliteStore implements Store {
                 messages.chatId,
                 messages.direction,
                 messages.messageId,
+                messages.migratedFromChatId,
               ],
               set: { text: message.text, raw: message.raw },
             })
@@ -814,6 +1096,9 @@ export class SqliteStore implements Store {
   }
 
   recordOutbound(message: NewMessage, taskId?: string) {
+    const { chatId } = this.resolveChat(message);
+    if (chatId !== message.chatId)
+      message = { ...message, chatId, migratedFromChatId: message.chatId };
     this.#db.transaction((tx) => {
       tx.insert(messages).values(message).onConflictDoNothing().run();
       if (taskId) {
@@ -825,16 +1110,24 @@ export class SqliteStore implements Store {
     });
   }
 
-  getMessage(ref: ChatRef, messageId: string) {
+  getMessage(ref: ChatRef, messageId: string, migratedFromChatId?: string) {
     return this.#db
       .select()
       .from(messages)
-      .where(and(chatScope(messages, ref), eq(messages.messageId, messageId)))
-      .orderBy(messages.direction)
+      .where(
+        and(
+          chatScope(messages, ref),
+          eq(messages.messageId, messageId),
+          migratedFromChatId === undefined
+            ? undefined
+            : eq(messages.migratedFromChatId, migratedFromChatId),
+        ),
+      )
+      .orderBy(messages.migratedFromChatId, messages.direction)
       .get();
   }
 
-  markDeleted(ref: ChatRef, messageId: string) {
+  markDeleted(ref: ChatRef, messageId: string, migratedFromChatId = '') {
     this.#db.transaction((tx) => {
       const deleted = tx
         .update(messages)
@@ -843,6 +1136,7 @@ export class SqliteStore implements Store {
           and(
             chatScope(messages, ref),
             eq(messages.messageId, messageId),
+            eq(messages.migratedFromChatId, migratedFromChatId),
             eq(messages.deleted, false),
           ),
         )
@@ -935,6 +1229,7 @@ export class SqliteStore implements Store {
     ref: ChatRef,
     options: Parameters<Store['recentMessages']>[1],
   ) {
+    ref = this.resolveChat(ref);
     const { afterSeq } = options;
     const resumed = afterSeq !== undefined;
     const filter = and(
@@ -979,7 +1274,22 @@ export class SqliteStore implements Store {
   }
 
   setSession(session: AgentSession) {
-    const { agentId, model, sessionId, throughSeq, seenAfter } = session;
+    const { chatId } = this.resolveChat(session);
+    if (session.chatId !== chatId) {
+      const current = this.getSession(
+        { ...session, chatId },
+        session.agentId,
+        session.model,
+      );
+      if (current && current.throughSeq > session.throughSeq) return;
+      session = {
+        ...session,
+        chatId,
+        scopeChatId: session.scopeChatId ?? session.chatId,
+      };
+    }
+    const { agentId, model, sessionId, throughSeq, seenAfter, scopeChatId } =
+      session;
     this.#db.transaction((tx) => {
       tx.insert(agentSessions)
         .values(session)
@@ -990,7 +1300,12 @@ export class SqliteStore implements Store {
             agentSessions.agentId,
             agentSessions.model,
           ],
-          set: { sessionId, throughSeq, seenAfter },
+          set: {
+            sessionId,
+            throughSeq,
+            seenAfter,
+            scopeChatId: scopeChatId ?? null,
+          },
         })
         .run();
       tx.update(chats)
@@ -1001,6 +1316,7 @@ export class SqliteStore implements Store {
   }
 
   clearSession(ref: ChatRef) {
+    ref = this.resolveChat(ref);
     this.#db
       .update(chats)
       .set({ sessionAgentId: null, sessionModel: null })
@@ -1021,7 +1337,16 @@ export class SqliteStore implements Store {
   }
 
   createTask(task: TaskRecord) {
-    this.#db.insert(tasks).values(task).run();
+    const { chatId } = this.resolveChat(task);
+    this.#db
+      .insert(tasks)
+      .values({
+        ...task,
+        chatId,
+        sourceChatId:
+          task.sourceChatId ?? (chatId === task.chatId ? null : task.chatId),
+      })
+      .run();
   }
 
   updateTask(id: string, patch: Parameters<Store['updateTask']>[1]) {
@@ -1103,7 +1428,33 @@ export class SqliteStore implements Store {
   }
 
   createApproval(approval: ApprovalRecord) {
-    this.#db.insert(approvals).values(approval).run();
+    const { chatId } = this.resolveChat(approval);
+    const { resource, continuation } = approval;
+    if (continuation?.kind === 'schedule') {
+      const { change } = continuation;
+      approval = {
+        ...approval,
+        continuation: {
+          kind: 'schedule',
+          change: {
+            ...change,
+            schedule: this.#resolveSchedule(change.schedule),
+            previous: change.previous && this.#resolveSchedule(change.previous),
+          },
+        },
+      };
+    }
+    this.#db
+      .insert(approvals)
+      .values({
+        ...approval,
+        chatId,
+        resource:
+          resource.type === 'chat'
+            ? { ...resource, ...this.resolveChat(resource) }
+            : resource,
+      })
+      .run();
   }
 
   linkApproval(
@@ -1113,13 +1464,28 @@ export class SqliteStore implements Store {
   ) {
     this.#db
       .update(approvals)
-      .set({ promptMessageId, promptFormat })
+      .set({ promptMessageId, promptFormat, migratedPrompt: null })
       .where(and(eq(approvals.id, id), eq(approvals.status, 'pending')))
       .run();
   }
 
   getApproval(id: string) {
     return this.#db.select().from(approvals).where(eq(approvals.id, id)).get();
+  }
+
+  listMigratedApprovalPrompts(adapterId: string, now: number) {
+    return this.#db
+      .select()
+      .from(approvals)
+      .where(
+        and(
+          eq(approvals.adapterId, adapterId),
+          eq(approvals.status, 'pending'),
+          isNotNull(approvals.migratedPrompt),
+          gt(approvals.expiresAt, now),
+        ),
+      )
+      .all();
   }
 
   listPendingApprovals(ref: ChatRef) {
@@ -1197,7 +1563,12 @@ export class SqliteStore implements Store {
       .run();
   }
 
-  cancelChatApprovals(ref: ChatRef, now: number, sourceMessageId?: string) {
+  cancelChatApprovals(
+    ref: ChatRef,
+    now: number,
+    sourceMessageId?: string,
+    sourceChatId?: string,
+  ) {
     const sources = this.#db
       .select({ id: tasks.id })
       .from(tasks)
@@ -1206,7 +1577,12 @@ export class SqliteStore implements Store {
           chatScope(tasks, ref),
           sourceMessageId === undefined
             ? undefined
-            : eq(tasks.sourceMessageId, sourceMessageId),
+            : and(
+                eq(tasks.sourceMessageId, sourceMessageId),
+                sourceChatId === undefined
+                  ? isNull(tasks.sourceChatId)
+                  : eq(tasks.sourceChatId, sourceChatId),
+              ),
         ),
       );
     this.#db

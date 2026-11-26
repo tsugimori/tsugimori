@@ -85,6 +85,7 @@ export const messages = sqliteTable(
     ...chatScope(),
     seq: integer('seq').primaryKey({ autoIncrement: true }),
     messageId: text('message_id').notNull(),
+    migratedFromChatId: text('migrated_from_chat_id').notNull().default(''),
     direction: text('direction').$type<MessageRecord['direction']>().notNull(),
     userId: text('user_id'),
     replyTo: text('reply_to'),
@@ -99,6 +100,7 @@ export const messages = sqliteTable(
       table.chatId,
       table.direction,
       table.messageId,
+      table.migratedFromChatId,
     ),
     index('messages_chat_sequence').on(
       table.adapterId,
@@ -115,6 +117,7 @@ export const agentSessions = sqliteTable(
     agentId: text('agent_id').notNull(),
     model: text('model').notNull(),
     sessionId: text('session_id').notNull(),
+    scopeChatId: text('scope_chat_id'),
     throughSeq: integer('through_seq').notNull(),
     seenAfter: text('seen_after', { mode: 'json' }).$type<number[]>().notNull(),
   },
@@ -128,6 +131,7 @@ export const agentSessions = sqliteTable(
 export const tasks = sqliteTable('tasks', {
   ...chatScope(),
   id: text('id').primaryKey().notNull(),
+  sourceChatId: text('source_chat_id'),
   sourceMessageId: text('source_message_id').notNull(),
   status: text('status').$type<TaskStatus>().notNull(),
   agentId: text('agent_id'),
@@ -154,6 +158,7 @@ export const approvals = sqliteTable(
     >(),
     expiresAt: integer('expires_at'),
     promptMessageId: text('prompt_message_id'),
+    migratedPrompt: text('migrated_prompt'),
     promptFormat: text('prompt_format', { mode: 'json' }).$type<
       NonNullable<ApprovalRecord['promptFormat']>
     >(),

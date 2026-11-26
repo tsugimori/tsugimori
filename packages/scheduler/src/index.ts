@@ -292,6 +292,7 @@ export class Scheduler {
   }
 
   #canManage({ principal, chat }: ToolContext, schedule: ScheduleRecord) {
+    chat = this.#deps.store.resolveChat(chat);
     return (
       schedule.adapterId === chat.adapterId &&
       schedule.chatId === chat.chatId &&
@@ -302,7 +303,9 @@ export class Scheduler {
 
   #pending(chat: ChatRef) {
     const pending = new Map<string, ScheduleChange & { approvalId: string }>();
-    for (const approval of this.#deps.store.listPendingApprovals(chat)) {
+    for (const approval of this.#deps.store.listPendingApprovals(
+      this.#deps.store.resolveChat(chat),
+    )) {
       if (
         approval.continuation?.kind !== 'schedule' ||
         (approval.expiresAt !== null && approval.expiresAt <= this.#now())
@@ -317,7 +320,7 @@ export class Scheduler {
   #inChat(chat: ChatRef, pending = this.#pending(chat)) {
     const schedules = new Map(
       this.#deps.store
-        .listSchedules(chat)
+        .listSchedules(this.#deps.store.resolveChat(chat))
         .map((schedule) => [schedule.id, schedule]),
     );
     for (const [id, { schedule }] of pending) schedules.set(id, schedule);
@@ -420,13 +423,17 @@ export class Scheduler {
     previous?: ScheduleRecord,
   ) {
     const { store } = this.#deps;
-    const { chat, principal, signal } = task;
+    const { principal, signal } = task;
+    const chat = store.resolveChat(task.chat);
     const time = this.#now();
     const settings = this.#deps.settings();
     const timezone = input.timezone ?? settings.timezone;
     new Intl.DateTimeFormat('en', { timeZone: timezone });
     const address = store.deliveryAddress(chat);
-    const targetScope = { ...chat, chatId: input.targetChatId ?? chat.chatId };
+    const targetScope =
+      input.targetChatId === undefined
+        ? chat
+        : store.resolveChat({ ...chat, chatId: input.targetChatId });
     const target = store.deliveryAddress(targetScope);
     if (!address || !target)
       throw new Error('Schedule destination is unavailable');

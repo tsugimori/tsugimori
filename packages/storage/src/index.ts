@@ -32,6 +32,7 @@ export interface MessageRecord extends ChatRef {
   deleted: boolean;
   direction: 'inbound' | 'outbound';
   messageId: string;
+  migratedFromChatId: string;
   raw: unknown;
   replyTo: string | null;
   seq: number;
@@ -51,6 +52,7 @@ export type SessionMetric = 'context' | 'compaction';
 export interface AgentSession extends ChatRef {
   agentId: string;
   model: string;
+  scopeChatId?: string | null;
   seenAfter: number[];
   sessionId: string;
   throughSeq: number;
@@ -72,6 +74,7 @@ export interface TaskRecord extends ChatRef {
   finishedAt: number | null;
   id: string;
   model: string | null;
+  sourceChatId?: string | null;
   sourceMessageId: string;
   startedAt: number | null;
   status: TaskStatus;
@@ -85,6 +88,7 @@ export interface ApprovalRecord extends ChatRef {
   decidedBy: string | null;
   expiresAt: number | null;
   id: string;
+  migratedPrompt?: string | null;
   promptFormat: ApprovalPromptFormat | null;
   promptMessageId: string | null;
   requester: string;
@@ -138,7 +142,11 @@ export interface TraceSpan {
   status: 'ok' | 'error';
 }
 
-export type NewMessage = Omit<MessageRecord, 'seq' | 'deleted'>;
+export type NewMessage = Omit<
+  MessageRecord,
+  'seq' | 'deleted' | 'migratedFromChatId'
+> &
+  Partial<Pick<MessageRecord, 'migratedFromChatId'>>;
 export type InboundRecord = NewMessage & {
   direction: 'inbound';
   userId: string;
@@ -228,6 +236,7 @@ export interface Store {
     ref: ChatRef,
     now: number,
     sourceMessageId?: string,
+    sourceChatId?: string,
   ): void;
   claimPairing(principal: PrincipalRef, digest: string, now: number): boolean;
   claimScheduleRun(
@@ -279,7 +288,11 @@ export interface Store {
   getApproval(id: string): ApprovalRecord | undefined;
   getChat(ref: ChatRef): ChatRecord | undefined;
   getCursor(adapterId: string, stream: string): AdapterCursor | undefined;
-  getMessage(ref: ChatRef, messageId: string): MessageRecord | undefined;
+  getMessage(
+    ref: ChatRef,
+    messageId: string,
+    migratedFromChatId?: string,
+  ): MessageRecord | undefined;
   getOwner(adapterId: string): string | undefined;
   getSchedule(id: string): ScheduleRecord | undefined;
   getSession(
@@ -314,6 +327,7 @@ export interface Store {
   listChats(): ChatRecord[];
   listChatTasks(ref: ChatRef): TaskRecord[];
   listGrants(): StoredGrant[];
+  listMigratedApprovalPrompts(adapterId: string, now: number): ApprovalRecord[];
   listPendingApprovals(ref: ChatRef): ApprovalRecord[];
   listPreviews(adapterId?: string): StoredPreview[];
   listSchedules(ref: ChatRef): ScheduleRecord[];
@@ -321,7 +335,11 @@ export interface Store {
     ref: Omit<CommandScopeChat, 'chatId'>,
   ): { chatId: string; scope: string }[];
   markCommandScopeUnavailable(ref: CommandScopeChat, scope: string): void;
-  markDeleted(ref: ChatRef, messageId: string): void;
+  markDeleted(
+    ref: ChatRef,
+    messageId: string,
+    migratedFromChatId?: string,
+  ): void;
   markSetupSecret(ref: ChatRef, messageId: string): void;
   migrateChat(ref: ChatRef, newChatId: string, title?: string): boolean;
   openPreview(preview: StoredPreview): void;
@@ -345,6 +363,7 @@ export interface Store {
   recordUser(
     user: Omit<UserRecord, 'username'> & Partial<Pick<UserRecord, 'username'>>,
   ): void;
+  resolveChat(ref: ChatRef): ChatRef;
   saveCursor(adapterId: string, stream: string, cursor: AdapterCursor): void;
   savePairingCode(adapterId: string, digest: string, expiresAt: number): void;
   saveSetupRun(run: SetupRun, lease: string): boolean;

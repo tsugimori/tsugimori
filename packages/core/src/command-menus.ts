@@ -16,6 +16,11 @@ import { describeError } from './errors.ts';
 
 interface Dependencies {
   log: Logger;
+  onMigration(
+    adapter: PlatformAdapter,
+    chatId: string,
+    newChatId: string,
+  ): void;
   owner(adapterId: string): string | undefined;
   runtime: Runtime;
   store: Store;
@@ -223,6 +228,7 @@ export class CommandMenus {
         state.applied.delete(key);
       }
     }
+    if (recorded) this.#deps.onMigration(adapter, chatId, newChatId);
     return recorded;
   }
 
@@ -275,7 +281,11 @@ export class CommandMenus {
         attrs.retryAfterMs = details.retryAfterMs;
       end('error');
       log({ level: 'error', event: 'platform.commands_failed', ...attrs });
-      if (scope.type === 'chat-member' && details?.migratedToChatId) {
+      if (
+        scope.type === 'chat-member' &&
+        details?.code === 400 &&
+        details.migratedToChatId
+      ) {
         this.#recordMigration(adapter, scope.chatId, details.migratedToChatId);
       } else if (ref && details?.scopeUnavailable) {
         store.markCommandScopeUnavailable(ref, key);

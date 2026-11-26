@@ -34,7 +34,7 @@ interface OutboundDependencies {
 
 export class Outbound {
   readonly #deps: OutboundDependencies;
-  readonly #approvalReactions = new Map<string, Promise<void>>();
+  readonly #approvalReactions = new Map<string, Promise<boolean>>();
 
   constructor(deps: OutboundDependencies) {
     this.#deps = deps;
@@ -42,12 +42,14 @@ export class Outbound {
 
   reactToApproval(
     adapter: PlatformAdapter,
-    source: ChatRef & Pick<TaskRecord, 'id' | 'sourceMessageId'>,
+    source: ChatRef &
+      Pick<TaskRecord, 'id' | 'sourceChatId' | 'sourceMessageId'>,
     reaction: ApprovalReaction,
   ) {
     const { id: taskId, sourceMessageId } = source;
     const setReaction = adapter.setApprovalReaction?.bind(adapter);
-    if (!setReaction || sourceMessageId.startsWith('schedule:')) return;
+    if (!setReaction || sourceMessageId.startsWith('schedule:'))
+      return Promise.resolve(false);
     const { log, store, trace } = this.#deps;
     const attrs = {
       adapterId: adapter.id,
@@ -59,10 +61,14 @@ export class Outbound {
     const update = previous
       .then(async () => {
         try {
-          await trace.span('approval.reaction', attrs, async () => {
-            const message = store.getMessage(source, sourceMessageId);
-            const address = store.deliveryAddress(source);
-            if (!message || message.deleted || !address) return;
+          return await trace.span('approval.reaction', attrs, async () => {
+            const current = store.getTask(taskId) ?? source;
+            const chat = store.resolveChat(current);
+            if (current.sourceChatId || chat.chatId !== current.chatId)
+              return false;
+            const message = store.getMessage(chat, sourceMessageId, '');
+            const address = store.deliveryAddress(chat);
+            if (!message || message.deleted || !address) return false;
             const signal = AbortSignal.timeout(5_000);
             await untilAborted(signal, () =>
               setReaction(
@@ -71,9 +77,11 @@ export class Outbound {
                 signal,
               ),
             );
+            return true;
           });
         } catch {
           log({ level: 'error', event: 'approval.reaction_failed', ...attrs });
+          return false;
         }
       })
       .finally(() => {
@@ -95,6 +103,12 @@ export class Outbound {
   ) {
     const { store, trace, hooks } = this.#deps;
     const { signal, taskId } = options;
+    const { chatId } = store.resolveChat({
+      adapterId: adapter.id,
+      chatId: message.chatId,
+    });
+    if (chatId !== message.chatId)
+      message = { ...message, chatId, replyTo: undefined, threadId: undefined };
     const chat: ChatRef = {
       adapterId: adapter.id,
       chatId: conversationId(message),
@@ -107,14 +121,23 @@ export class Outbound {
     const record = (parts: readonly SendPart[], completedTaskId?: string) => {
       trace.span('outbound.record', attrs, () => {
         for (const [index, part] of parts.entries()) {
+          const address =
+            part.chatId === undefined
+              ? message
+              : {
+                  chatId: part.chatId,
+                  replyTo: undefined,
+                  threadId: undefined,
+                };
           store.recordOutbound(
             {
-              ...chat,
+              adapterId: adapter.id,
+              chatId: conversationId(address),
               messageId: part.messageId,
               direction: 'outbound',
               userId: null,
-              replyTo: message.replyTo ?? null,
-              threadId: message.threadId ?? null,
+              replyTo: address.replyTo ?? null,
+              threadId: address.threadId ?? null,
               text: part.text,
               raw: part.raw ?? null,
             },
@@ -143,7 +166,21 @@ export class Outbound {
       });
       throw new DeliveryError({ cause: error });
     }
-    await hooks.emit('outbound.sent', { chat, message, receipt });
+    const delivered = message.approval
+      ? receipt.parts?.at(-1)
+      : receipt.parts?.[0];
+    if (delivered?.chatId !== undefined)
+      message = {
+        ...message,
+        chatId: delivered.chatId,
+        replyTo: undefined,
+        threadId: undefined,
+      };
+    await hooks.emit('outbound.sent', {
+      chat: { adapterId: adapter.id, chatId: conversationId(message) },
+      message,
+      receipt,
+    });
     return receipt;
   }
 }

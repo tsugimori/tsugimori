@@ -39,7 +39,8 @@ export class BackgroundSummaries implements SummaryProvider {
 
   async get(chat: ChatRef) {
     if (this.#deps.runtime.config.context.summary?.enabled === false) return;
-    const summary = this.#deps.store.getSummary(chat);
+    const { store } = this.#deps;
+    const summary = store.getSummary(store.resolveChat(chat));
     if (summary?.text) {
       return {
         block: {
@@ -93,10 +94,11 @@ export class BackgroundSummaries implements SummaryProvider {
 
   async #update(job: SummaryJob) {
     const { store, runtime, trace } = this.#deps;
-    const { chat, taskId } = job;
+    const { taskId } = job;
     const transition = runtime.transition;
     if (transition) await transition;
     if (this.#stop.signal.aborted) return;
+    const chat = store.resolveChat(job.chat);
     const { recentMessages, summary } = runtime.config.context;
     if (summary?.enabled === false) return;
     const selected = runtime.getAgent(job.agentId);

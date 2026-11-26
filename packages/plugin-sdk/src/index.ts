@@ -126,6 +126,8 @@ export interface SendReceipt {
 }
 
 export interface SendPart {
+  /** Native destination if delivery moved to another chat. */
+  chatId?: string;
   messageId: string;
   raw?: unknown;
   text: string;
@@ -162,6 +164,7 @@ export interface AdapterContext {
   logError?(event: string, error?: unknown): void;
   logWarning?(event: string): void;
   ready?: Promise<void>;
+  resolveChatId?(chatId: string): string;
   saveCursor?(stream: string, cursor: AdapterCursor): void;
   /** Aborted when this startup attempt is cancelled or the adapter detaches. */
   signal?: AbortSignal;

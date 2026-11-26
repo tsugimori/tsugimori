@@ -20,7 +20,7 @@ import type {
   TaskRecord,
 } from '@tsugimori/storage';
 
-import { Auth } from '@tsugimori/auth';
+import { approvalCallbackId, Auth } from '@tsugimori/auth';
 import {
   ConfigError,
   configuredOwner,
@@ -81,7 +81,7 @@ type LinkedApproval = Exclude<
   { decision: 'expired' }
 > & {
   live: boolean;
-  reaction?: Promise<void>;
+  reaction?: Promise<boolean>;
   record: ApprovalRecord;
 };
 
@@ -101,6 +101,7 @@ export class Gateway {
   readonly #chatSetup: ChatSetup;
   readonly #commandMenus: CommandMenus;
   readonly #platformNotifications = new Map<string, Promise<void>>();
+  readonly #migratedPrompts = new Map<string, Promise<void>>();
   readonly #inbound = new Set<Promise<void>>();
   #applyingConfig = false;
   #closeWatch?: ReturnType<typeof watch>;
@@ -175,6 +176,7 @@ export class Gateway {
         if (this.#state !== 'running' || this.#applyingConfig) return;
         if (ready) {
           this.#commandMenus.refresh();
+          this.#restoreApprovalPrompts();
           this.#scheduler.tick();
           void this.#reportFailures();
         }
@@ -205,6 +207,10 @@ export class Gateway {
     });
     this.#commandMenus = new CommandMenus({
       log,
+      onMigration: (adapter, chatId, newChatId) => {
+        this.#tasks.migrateChat(adapter.id, chatId, newChatId);
+        this.#restoreApprovalPrompts([adapter]);
+      },
       owner: (id) => this.#auth.owner(id),
       runtime: this.#runtime,
       store,
@@ -381,6 +387,7 @@ export class Gateway {
       await this.#expiry;
       await this.#runtime.apply(snapshot);
       this.#commandMenus.refresh();
+      this.#restoreApprovalPrompts();
       if (this.#deps.namedPreview) {
         const provider = this.#deps.namedPreview(
           this.#runtime.disabled('preview.named') ? undefined : snapshot,
@@ -483,6 +490,8 @@ export class Gateway {
     while (this.#inbound.size) await Promise.allSettled(this.#inbound);
     await this.#tasks.idle();
     await this.#commandMenus.idle();
+    while (this.#migratedPrompts.size)
+      await Promise.allSettled(this.#migratedPrompts.values());
     await this.#environmentNotification;
     while (this.#platformNotifications.size)
       await Promise.allSettled(this.#platformNotifications.values());
@@ -541,20 +550,99 @@ export class Gateway {
     return work;
   }
 
+  #restoreApprovalPrompts(
+    adapters = this.#runtime.adapterIds.flatMap((id) => {
+      const adapter = this.#runtime.getAdapter(id);
+      return adapter ? [adapter] : [];
+    }),
+  ) {
+    if (this.#isStopping()) return;
+    const { log, store } = this.#deps;
+    const { buttons } = approvalMessages(this.#runtime.config.locale);
+    for (const adapter of adapters) {
+      for (const approval of store.listMigratedApprovalPrompts(
+        adapter.id,
+        Date.now(),
+      )) {
+        const { id, chatId, migratedPrompt, promptFormat } = approval;
+        if (!migratedPrompt || this.#migratedPrompts.has(id)) continue;
+        const work = this.#outbound
+          .send(
+            adapter,
+            {
+              chatId,
+              text: migratedPrompt,
+              approval: true,
+              parseTextMentions: false,
+              entities:
+                promptFormat?.entities ??
+                (promptFormat?.pre && [{ ...promptFormat.pre, type: 'pre' }]),
+              buttons: adapter.capabilities.inlineButtons
+                ? [
+                    {
+                      id: approvalCallbackId(id, 'approve'),
+                      label: buttons.approve,
+                    },
+                    { id: approvalCallbackId(id, 'deny'), label: buttons.deny },
+                  ]
+                : undefined,
+            },
+            {
+              onReceipt: ({ messageId }) =>
+                store.linkApproval(id, messageId, promptFormat ?? undefined),
+            },
+          )
+          .then(
+            () => undefined,
+            () =>
+              log({
+                level: 'error',
+                event: 'approval.migration_prompt_failed',
+                adapterId: adapter.id,
+                taskId: approval.taskId,
+              }),
+          )
+          .finally(() => this.#migratedPrompts.delete(id));
+        this.#migratedPrompts.set(id, work);
+      }
+    }
+  }
+
   async #process(adapter: PlatformAdapter, inbound: PlatformInboundEvent) {
     const { store } = this.#deps;
     if (inbound.type === 'chat-migrated')
       this.#commandMenus.migrateChat(adapter, inbound);
-    const event = inbound.type === 'chat-migrated' ? inbound.message : inbound;
-    if (!event) return;
+    const original =
+      inbound.type === 'chat-migrated' ? inbound.message : inbound;
+    if (!original) return;
+    const { chatId } = store.resolveChat({
+      adapterId: adapter.id,
+      chatId: original.chatId,
+    });
+    const migratedFrom =
+      chatId === original.chatId ? undefined : original.chatId;
+    const event =
+      migratedFrom === undefined
+        ? original
+        : original.type === 'message'
+          ? {
+              ...original,
+              chatId,
+              chatKind: 'supergroup' as const,
+              chatTitle: undefined,
+              migratedFromChatId: migratedFrom,
+              threadId: undefined,
+              replyTo: undefined,
+            }
+          : { ...original, chatId, threadId: undefined };
     const chat: ChatRef = {
       adapterId: adapter.id,
       chatId: conversationId(event),
     };
     if (event.type === 'delete') {
       this.#trace.span('inbound.deleted', { ...chat }, () => {
-        store.markDeleted(chat, event.messageId);
-        this.#tasks.cancelSource(chat, event.messageId);
+        store.markDeleted(chat, event.messageId, migratedFrom);
+        this.#tasks.cancelSource(chat, event.messageId, migratedFrom);
       });
       return;
     }
@@ -565,12 +653,15 @@ export class Gateway {
         display: event.userDisplay ?? null,
         username: event.userUsername,
       });
-      const result = this.#resolveApproval(adapter, {
-        ...chat,
-        callbackId: event.callbackId,
-        messageId: event.messageId,
-        userId: event.userId,
-      });
+      const result =
+        migratedFrom === undefined
+          ? this.#resolveApproval(adapter, {
+              ...chat,
+              callbackId: event.callbackId,
+              messageId: event.messageId,
+              userId: event.userId,
+            })
+          : undefined;
       await this.#approvalFeedback(
         adapter,
         chat,
@@ -624,6 +715,7 @@ export class Gateway {
         {
           ...chat,
           messageId: event.messageId,
+          migratedFromChatId: migratedFrom,
           direction: 'inbound',
           userId: event.userId,
           replyTo: event.replyTo ?? null,
@@ -698,11 +790,7 @@ export class Gateway {
   ): Promise<ScheduleRun['status']> {
     const { store } = this.#deps;
     const { id, adapterId, chatId, createdBy, action } = schedule;
-    const adapter = this.#runtime.getAdapter(adapterId);
-    const chat = { adapterId, chatId };
-    const origin = store.getChat(chat);
-    if (!adapter || !origin) return 'skipped';
-    const attrs = { ...chat, scheduleId: id, dueAt: run.dueAt };
+    const attrs = { adapterId, chatId, scheduleId: id, dueAt: run.dueAt };
     const delayNote = delayed
       ? systemMessages(this.#runtime.config.locale).delayed(
           new Date(run.dueAt).toISOString(),
@@ -710,6 +798,11 @@ export class Gateway {
       : '';
     return this.#trace.span('schedule.fire', attrs, async () => {
       await this.#hooks.emit('schedule.fired', { scheduleId: id });
+      const chat = store.resolveChat({ adapterId, chatId });
+      const adapter = this.#runtime.getAdapter(adapterId);
+      const origin = store.getChat(chat);
+      if (!adapter || !origin || !this.#canCompleteApproval(chat, createdBy))
+        return 'skipped';
       if (action.kind === 'message') {
         const reminder =
           action.mentions === undefined
@@ -747,6 +840,10 @@ export class Gateway {
         type: 'schedule',
         scheduleId: id,
         ...schedule.address,
+        chatId: store.resolveChat({
+          adapterId,
+          chatId: schedule.address.chatId,
+        }).chatId,
         chatKind: origin.kind,
         userId: createdBy,
         messageId: `schedule:${id}:${run.dueAt}`,
@@ -875,12 +972,12 @@ export class Gateway {
   }
 
   async #approvalOutcome(adapter: PlatformAdapter, result: LinkedApproval) {
-    if (result.live) return;
-    await result.reaction;
+    const reacted = await result.reaction;
     const { store, log } = this.#deps;
     const { record, approved, scheduleApplied } = result;
     const source = store.getTask(record.taskId);
     if (!source) return;
+    if (result.live && (reacted || !source.sourceChatId)) return;
     const m = approvalMessages(this.#runtime.config.locale).outcomes;
     const continuation = record.continuation;
     let text = approved ? m.interrupted : m.denied;
@@ -894,6 +991,10 @@ export class Gateway {
           : previous
             ? m.scheduleUpdated(ref)
             : m.scheduleCreated(ref);
+    } else if (result.live) {
+      text =
+        approvalDecisionText(this.#runtime.config.locale, result.decision)
+          .decisionText ?? text;
     } else if (approved && continuation?.kind === 'tool') {
       text = m.failed;
       try {
@@ -921,13 +1022,19 @@ export class Gateway {
     const { store, log } = this.#deps;
     const address = store.deliveryAddress(source);
     if (!address) return;
-    const message = store.getMessage(source, source.sourceMessageId);
+    const message = store.getMessage(
+      store.resolveChat(source),
+      source.sourceMessageId,
+      source.sourceChatId ?? '',
+    );
     try {
       await this.#outbound.send(adapter, {
         chatId: address.chatId,
         threadId: address.threadId,
         replyTo:
-          message && !message.deleted ? source.sourceMessageId : undefined,
+          message && !message.deleted && !source.sourceChatId
+            ? source.sourceMessageId
+            : undefined,
         text,
       });
     } catch {
@@ -948,7 +1055,7 @@ export class Gateway {
     if (!adapter.respondToApproval) return;
     const prompt =
       edit && feedback.decision
-        ? this.#deps.store.getMessage(chat, feedback.messageId)?.text
+        ? this.#deps.store.getMessage(chat, feedback.messageId, '')?.text
         : undefined;
     try {
       await this.#trace.span('approval.feedback', { ...chat }, () =>

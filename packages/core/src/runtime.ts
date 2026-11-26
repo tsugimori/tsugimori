@@ -68,6 +68,7 @@ interface RuntimeDeps {
     | 'getCursor'
     | 'getSetupRun'
     | 'getUser'
+    | 'resolveChat'
     | 'saveCursor'
   >;
   trace: Tracer;
@@ -510,6 +511,8 @@ export class Runtime {
           ready: ready.promise,
           signal,
           getUser: (userId) => store.getUser({ adapterId: adapter.id, userId }),
+          resolveChatId: (chatId) =>
+            store.resolveChat({ adapterId: adapter.id, chatId }).chatId,
           loadCursor: (stream) => store.getCursor(adapter.id, stream),
           saveCursor: (stream, cursor) =>
             store.saveCursor(adapter.id, stream, cursor),

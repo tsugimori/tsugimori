@@ -1,6 +1,6 @@
 import type { Logger } from '@tsugimori/core';
 
-import { Auth } from '@tsugimori/auth';
+import { approvalCallbackId, Auth } from '@tsugimori/auth';
 import { Gateway, PluginRegistry } from '@tsugimori/core';
 import { TelegramAdapter } from '@tsugimori/platform-telegram';
 import { SqliteStore } from '@tsugimori/storage-sqlite';
@@ -10,6 +10,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
+
+type ScheduleRecord = Parameters<SqliteStore['createSchedule']>[0];
 
 test(
   'Telegram command menus follow core permissions, locale, and group discovery',
@@ -334,6 +336,323 @@ test(
 );
 
 test(
+  'Telegram upgrades carry conversation state, pending approvals, and running schedules',
+  { timeout: 8_000 },
+  async (t) => {
+    const workspace = await mkdtemp(join(tmpdir(), 'tsugimori-chat-upgrade-'));
+    const store = new SqliteStore(':memory:');
+    const adapterId = 'telegram:test';
+    const bot = { id: 42, username: 'testbot' };
+    const owner = 79;
+    const ref = (chatId: string) => ({ adapterId, chatId });
+    const old = ref('-77');
+    const next = ref('-10077');
+    const apiOld = ref('-78');
+    const apiNext = ref('-10078');
+    const principal = { adapterId, userId: String(owner), display: 'Owner' };
+    const messages = (chatId: string) =>
+      store.listChatMessages(ref(chatId)).map(({ text }) => text);
+    const seedHistory = (chat: typeof old, text: string) =>
+      store.recordInbound(
+        { ...chat, kind: 'group', title: 'Original group' },
+        principal,
+        {
+          ...chat,
+          direction: 'inbound',
+          messageId: '5',
+          raw: null,
+          replyTo: null,
+          threadId: null,
+          text,
+          userId: principal.userId,
+        },
+      )!;
+    const history = seedHistory(old, 'Earlier history');
+    seedHistory(apiOld, 'API group history');
+    store.setAllowlisted(old, true);
+    store.setAllowlisted(apiOld, true);
+    store.saveSummary({
+      ...store.beginSummary(old),
+      text: 'Earlier summary',
+      throughSeq: history.seq,
+    });
+    store.setSession({
+      ...old,
+      agentId: 'agent',
+      model: 'model',
+      sessionId: 'session',
+      seenAfter: [],
+      throughSeq: history.seq,
+    });
+    const at = Date.now() + 2_000;
+    const reminder: ScheduleRecord = {
+      ...old,
+      id: 'original-schedule',
+      action: { kind: 'message', text: 'Migrated reminder' },
+      address: { chatId: old.chatId },
+      target: { chatId: old.chatId },
+      createdBy: principal.userId,
+      deliveryApprovedBy: principal.userId,
+      mentions: [],
+      missed: 'latest',
+      nextDueAt: at,
+      status: 'active',
+      timezone: 'UTC',
+      trigger: { kind: 'interval', at, minutes: 60 },
+    };
+    const apiReminder: ScheduleRecord = {
+      ...reminder,
+      ...apiOld,
+      address: { chatId: apiOld.chatId },
+      target: { chatId: apiOld.chatId },
+      id: 'api-schedule',
+      action: { kind: 'message', text: 'API reminder' },
+    };
+    assert.ok(store.createSchedule(reminder, 20));
+    assert.ok(store.createSchedule(apiReminder, 20));
+    const crossChat: ScheduleRecord = {
+      ...apiReminder,
+      id: 'cross-chat-schedule',
+      status: 'paused',
+      target: reminder.target,
+    };
+    assert.ok(store.createSchedule(crossChat, 20));
+    store.createTask({
+      ...old,
+      id: 'request-task',
+      agentId: null,
+      model: null,
+      status: 'completed',
+      createdAt: at - 1_000,
+      startedAt: at - 1_000,
+      finishedAt: at - 1_000,
+      sourceMessageId: history.messageId,
+    });
+    const scheduledAt = at + 60_000;
+    const pending: ScheduleRecord = {
+      ...reminder,
+      id: 'pending-schedule',
+      deliveryApprovedBy: null,
+      nextDueAt: scheduledAt,
+      trigger: { kind: 'once', at: scheduledAt },
+    };
+    const auth = new Auth({ store, configuredOwner: () => principal.userId });
+    const approval = auth.createApproval(
+      old,
+      'request-task',
+      principal.userId,
+      {
+        action: 'schedule.create',
+        resource: {
+          type: 'schedule',
+          id: pending.id,
+          deliveryKey: 'original-key',
+        },
+      },
+      { continuation: { kind: 'schedule', change: { schedule: pending } } },
+    );
+    const prompt = 'Approve the schedule';
+    store.recordOutbound({
+      ...old,
+      direction: 'outbound',
+      messageId: '9',
+      userId: null,
+      raw: null,
+      replyTo: '5',
+      threadId: null,
+      text: prompt,
+    });
+    store.linkApproval(approval.id, '9');
+
+    const updates: unknown[] = [];
+    const sends: {
+      chat_id: string;
+      reply_parameters?: unknown;
+      text: string;
+    }[] = [];
+    const reactions: unknown[] = [];
+    const ok = (result: unknown) => Response.json({ ok: true, result });
+    const fetch: typeof globalThis.fetch = async (input, init) => {
+      const method = new URL(String(input)).pathname.split('/').at(-1);
+      if (method === 'getMe') return ok(bot);
+      if (method === 'getUpdates') {
+        await delay(5, undefined, { signal: init?.signal ?? undefined });
+        return ok(updates.splice(0));
+      }
+      assert.equal(typeof init?.body, 'string');
+      const body = JSON.parse(String(init?.body));
+      if (method === 'setMessageReaction') reactions.push(body);
+      if (method !== 'sendMessage') return ok(true);
+      sends.push(body);
+      if (body.chat_id === apiOld.chatId)
+        return Response.json(
+          {
+            ok: false,
+            error_code: 400,
+            parameters: { migrate_to_chat_id: Number(apiNext.chatId) },
+          },
+          { status: 400 },
+        );
+      return ok({ message_id: 100 + sends.length });
+    };
+    const registry = new PluginRegistry([
+      {
+        name: 'test-telegram',
+        adapters: {
+          telegram: ({ id }) => new TelegramAdapter({ fetch }, id, '1:fake'),
+        },
+      },
+    ]);
+    const gateway = new Gateway({
+      log: () => undefined,
+      registry,
+      store,
+      workspace,
+    });
+    t.after(async () => {
+      try {
+        await gateway.stop();
+      } finally {
+        store.close();
+        await rm(workspace, { recursive: true, force: true });
+      }
+    });
+    await writeFile(
+      join(workspace, 'tsugimori.json'),
+      JSON.stringify({
+        owner: { [adapterId]: principal.userId },
+        platforms: [
+          { id: adapterId, kind: 'telegram', tokenEnv: 'TEST_TOKEN' },
+        ],
+      }),
+    );
+    const deliver = async (update: object) => {
+      const updateId = store.getCursor(adapterId, String(bot.id))?.offset ?? 1;
+      updates.push({ update_id: updateId, ...update });
+      while (
+        store.getCursor(adapterId, String(bot.id))?.offset !==
+        updateId + 1
+      )
+        await delay(5, undefined, { signal: t.signal });
+      await gateway.idle();
+    };
+    const group = { id: Number(old.chatId), type: 'group' };
+    const supergroup = { id: Number(next.chatId), type: 'supergroup' };
+    await gateway.start();
+    await deliver({
+      message: {
+        chat: group,
+        from: { id: owner },
+        message_id: 7,
+        migrate_to_chat_id: supergroup.id,
+      },
+    });
+    assert.equal(store.getSummary(next)?.text, 'Earlier summary');
+    assert.equal(
+      store.getSession(next, 'agent', 'model')?.sessionId,
+      'session',
+    );
+    assert.equal(
+      store.getSession(next, 'agent', 'model')?.scopeChatId,
+      old.chatId,
+    );
+    assert.equal(store.getMessage(next, history.messageId)?.seq, history.seq);
+    assert.deepEqual(store.getSchedule(reminder.id), {
+      ...reminder,
+      ...next,
+      address: { chatId: next.chatId },
+      target: { chatId: next.chatId },
+    });
+    assert.deepEqual(store.getSchedule(crossChat.id), {
+      ...crossChat,
+      target: { chatId: next.chatId },
+    });
+    await deliver({
+      message: {
+        chat: supergroup,
+        from: { id: 80 },
+        message_id: 5,
+        text: 'Native message with the same ID',
+      },
+    });
+    await deliver({
+      message: {
+        chat: group,
+        from: { id: 80 },
+        message_id: 6,
+        text: 'Late old-chat message',
+      },
+    });
+    assert.ok(messages(next.chatId).includes('Earlier history'));
+    assert.ok(
+      messages(next.chatId).includes('Native message with the same ID'),
+    );
+    assert.ok(messages(next.chatId).includes('Late old-chat message'));
+    assert.deepEqual(messages(old.chatId), []);
+
+    const migratedApproval = store.getApproval(approval.id)!;
+    assert.equal(migratedApproval.chatId, next.chatId);
+    assert.ok(migratedApproval.promptMessageId);
+    assert.notEqual(migratedApproval.promptMessageId, '9');
+    assert.ok(
+      sends.some(
+        ({ chat_id, text }) => chat_id === next.chatId && text === prompt,
+      ),
+    );
+    await deliver({
+      callback_query: {
+        id: 'approve-request',
+        from: { id: owner },
+        message: {
+          chat: supergroup,
+          message_id: Number(migratedApproval.promptMessageId),
+        },
+        data: approvalCallbackId(approval.id, 'approve'),
+      },
+    });
+    assert.deepEqual(store.getSchedule(pending.id), {
+      ...pending,
+      ...next,
+      address: { chatId: next.chatId },
+      target: { chatId: next.chatId },
+      deliveryApprovedBy: principal.userId,
+    });
+    assert.deepEqual(reactions, []);
+    assert.ok(
+      sends.some(
+        ({ chat_id, text, reply_parameters }) =>
+          chat_id === next.chatId &&
+          text.includes('was created') &&
+          reply_parameters === undefined,
+      ),
+    );
+
+    while (
+      store.getSchedule(apiReminder.id)?.target.chatId !== apiNext.chatId ||
+      !sends.some(({ text }) => text.endsWith('Migrated reminder')) ||
+      !sends.some(
+        ({ chat_id, text }) =>
+          chat_id === apiNext.chatId && text.endsWith('API reminder'),
+      )
+    )
+      await delay(10, undefined, { signal: t.signal });
+    const targets = (text: string) =>
+      sends
+        .filter((sent) => sent.text.endsWith(text))
+        .map(({ chat_id }) => chat_id);
+    assert.deepEqual(targets('Migrated reminder'), [next.chatId]);
+    assert.deepEqual(targets('API reminder'), [apiOld.chatId, apiNext.chatId]);
+    assert.deepEqual(store.getSchedule(apiReminder.id), {
+      ...apiReminder,
+      ...apiNext,
+      address: { chatId: apiNext.chatId },
+      target: { chatId: apiNext.chatId },
+      nextDueAt: at + 60 * 60_000,
+    });
+  },
+);
+
+test(
   'Telegram menus follow group migrations and resume unavailable scopes after a fresh message',
   { timeout: 8_000 },
   async (t) => {
@@ -557,7 +876,10 @@ test(
     });
     assert.deepEqual(requests.splice(0), [supergroup(updateToSource)]);
     assertMigrated(updateToSource);
-    assert.equal(store.getMessage(ref(updateToSource), '1')?.text, '');
+    assert.equal(
+      store.getMessage(ref(supergroup(updateToSource)), '1')?.text,
+      '',
+    );
     await deliver(supergroup(updateFromSource), 'supergroup', {
       from: undefined,
       migrate_from_chat_id: updateFromSource,

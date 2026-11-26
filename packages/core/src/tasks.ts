@@ -6,7 +6,6 @@ import type {
   ChatRef,
   ExecBackend,
   ExecScope,
-  InboundMessage,
   PlatformAdapter,
   ScheduleApproval,
   ScheduleApprovalRequest,
@@ -73,6 +72,7 @@ type Work = {
   progress: { stage: TaskStage; startedAt: number };
   route?: { agentId: string; model: string };
   sessionId?: string;
+  sessionScopeChatId?: string | null;
   sessionValid: boolean;
   supplements: Supplements;
   workdir?: string;
@@ -88,7 +88,11 @@ export type TaskStage =
   | 'recording';
 
 type ApprovalAnswer =
-  | { approved: boolean; reaction?: Promise<void>; scheduleApplied?: boolean }
+  | {
+      approved: boolean;
+      reaction?: Promise<boolean>;
+      scheduleApplied?: boolean;
+    }
   | 'expired'
   | 'timeout';
 
@@ -128,11 +132,14 @@ export class Tasks {
       running.route?.model === model
         ? running.sessionId
         : undefined;
-    const sessionId =
-      activeSession ??
-      (selected && agentId && model
-        ? store.getSession(chat, agentId, model)?.sessionId
-        : undefined);
+    const storedSession =
+      selected && agentId && model
+        ? store.getSession(chat, agentId, model)
+        : undefined;
+    const sessionId = activeSession ?? storedSession?.sessionId;
+    const scopeChatId = activeSession
+      ? running?.sessionScopeChatId
+      : storedSession?.scopeChatId;
     let queued = running?.supplements.pendingCount ?? 0;
     for (const work of this.#work) {
       if (
@@ -155,7 +162,12 @@ export class Tasks {
       compactAt: selected?.config.compactAt,
       sessionScope:
         sessionId && agentId && model
-          ? sessionScope(chat, agentId, model, sessionId)
+          ? sessionScope(
+              { ...chat, chatId: scopeChatId ?? chat.chatId },
+              agentId,
+              model,
+              sessionId,
+            )
           : undefined,
       running:
         waiting && progress
@@ -193,13 +205,17 @@ export class Tasks {
   }
 
   dispatch(adapter: PlatformAdapter, chat: ChatRef, input: TaskInput) {
+    const { store, trace, log } = this.#deps;
+    chat = store.resolveChat(chat);
     const key = chatKey(chat);
     const running = this.#running.get(key);
     const { replyTo, messageId } = input.message;
     if (
       !input.compact &&
       !input.scheduled &&
+      !input.message.migratedFromChatId &&
       running?.acceptsSupplements &&
+      !running.input.message.migratedFromChatId &&
       !running.abort.signal.aborted &&
       replyTo &&
       running.messageIds.has(replyTo)
@@ -222,10 +238,10 @@ export class Tasks {
       progress: { stage: 'preparing', startedAt: createdAt },
       sessionValid: true,
     };
-    const { store, trace, log } = this.#deps;
     store.createTask({
       ...chat,
       id: work.id,
+      sourceChatId: input.message.migratedFromChatId,
       sourceMessageId: messageId,
       status: 'queued',
       agentId: null,
@@ -266,23 +282,41 @@ export class Tasks {
     while (this.#queues.size) await Promise.all(this.#queues.values());
   }
 
-  cancelSource(chat: ChatRef, messageId: string) {
-    this.cancelApprovals(chat, messageId);
+  migrateChat(adapterId: string, chatId: string, newChatId: string) {
+    const previous = this.#queues.get(chatKey({ adapterId, chatId }));
+    if (!previous) return;
+    const key = chatKey({ adapterId, chatId: newChatId });
+    const tail = Promise.all([previous, this.#queues.get(key)]).then(() => {
+      if (this.#queues.get(key) === tail) this.#queues.delete(key);
+    });
+    this.#queues.set(key, tail);
+  }
+
+  cancelSource(chat: ChatRef, messageId: string, sourceChatId?: string) {
+    const { store } = this.#deps;
+    this.cancelApprovals(chat, messageId, sourceChatId);
     const key = chatKey(chat);
     for (const work of this.#work) {
-      if (chatKey(work.chat) === key && work.messageIds.has(messageId)) {
+      if (
+        chatKey(store.resolveChat(work.chat)) === key &&
+        store.getTask(work.id)?.sourceChatId === (sourceChatId ?? null) &&
+        work.messageIds.has(messageId)
+      ) {
         work.abort.abort();
       }
     }
   }
 
-  cancelApprovals(chat: ChatRef, messageId?: string) {
-    this.#deps.store.cancelChatApprovals(chat, Date.now(), messageId);
+  cancelApprovals(chat: ChatRef, messageId?: string, sourceChatId?: string) {
+    const { store } = this.#deps;
+    store.cancelChatApprovals(chat, Date.now(), messageId, sourceChatId);
     for (const approval of this.#approvals.values()) {
       if (
-        chatKey(approval.work.chat) === chatKey(chat) &&
+        chatKey(store.resolveChat(approval.work.chat)) === chatKey(chat) &&
         (messageId === undefined ||
-          approval.work.input.message.messageId === messageId)
+          (approval.work.input.message.messageId === messageId &&
+            store.getTask(approval.work.id)?.sourceChatId ===
+              (sourceChatId ?? null)))
       )
         approval.resolve();
     }
@@ -348,7 +382,7 @@ export class Tasks {
 
   async #execute(work: Work) {
     const { store, auth, runtime, outbound, log } = this.#deps;
-    const { chat, adapter, input, abort, id } = work;
+    const { adapter, input, abort, id } = work;
     const { message } = input;
     const activity = new AbortController();
     const finish = (status: TaskRecord['status']) =>
@@ -359,7 +393,10 @@ export class Tasks {
       abort.signal.throwIfAborted();
       const transition = runtime.transition;
       if (transition) await untilAborted(abort.signal, () => transition);
-      if (store.getMessage(chat, message.messageId)?.deleted) {
+      const chat = store.resolveChat(work.chat);
+      const sourceChatId = store.getTask(id)?.sourceChatId ?? '';
+      work.chat = chat;
+      if (store.getMessage(chat, message.messageId, sourceChatId)?.deleted) {
         finish('cancelled');
         return;
       }
@@ -486,6 +523,7 @@ export class Tasks {
           agentId: selected.agent.id,
           model,
           sessionId: result.sessionId,
+          scopeChatId: result.scopeChatId,
           throughSeq: input.seq,
           seenAfter: result.seenAfter,
         });
@@ -502,7 +540,7 @@ export class Tasks {
           workdir: result.workdir,
         });
     } catch (error) {
-      if (ranAgent) store.clearSession(chat);
+      if (ranAgent) store.clearSession(work.chat);
       if (!delivered && !(error instanceof DeliveryError))
         finish(abort.signal.aborted ? 'cancelled' : 'failed');
       if (!abort.signal.aborted || error instanceof DeliveryError) {
@@ -520,7 +558,7 @@ export class Tasks {
         try {
           await this.#deps.trace.span(
             'workspace.record',
-            { ...chat, taskId: id },
+            { ...work.chat, taskId: id },
             () => recordWorkspace(work.workdir!, message.userId),
           );
         } catch (error) {
@@ -599,7 +637,7 @@ export class Tasks {
       }
       if (result.shared) return m.compactSuccess;
       attrs.sessionScope = sessionScope(
-        chat,
+        { ...chat, chatId: session.scopeChatId ?? chat.chatId },
         agent.id,
         model,
         session.sessionId,
@@ -650,6 +688,7 @@ export class Tasks {
         : undefined;
     if (!session && !input.scheduled) store.clearSession(chat);
     work.sessionId = session?.sessionId;
+    work.sessionScopeChatId = session?.scopeChatId;
     work.acceptsSupplements = true;
     const assembled = await trace.span('context.assembled', attrs, async () => {
       const blocks = await context.assemble({
@@ -738,10 +777,18 @@ export class Tasks {
             ...this.#deps,
             task,
             approvalPending,
+            scopeChatId:
+              sessionId === session?.sessionId
+                ? session?.scopeChatId
+                : undefined,
             onSession: input.scheduled
               ? undefined
               : (sessionId) => {
                   work.sessionId = sessionId;
+                  work.sessionScopeChatId =
+                    sessionId === session?.sessionId
+                      ? session?.scopeChatId
+                      : undefined;
                 },
           },
           agent,
@@ -799,6 +846,8 @@ export class Tasks {
     return {
       text: answers.join('\n\n'),
       sessionId,
+      scopeChatId:
+        sessionId === session?.sessionId ? session?.scopeChatId : undefined,
       seenAfter,
       workdir: assembled.workdir,
     };
@@ -839,7 +888,9 @@ export class Tasks {
     schedule: ScheduleApprovalRequest,
     change: ScheduleChange,
   ): Promise<ScheduleApproval | undefined> {
-    const work = this.#running.get(chatKey(task.chat));
+    const work = [...this.#running.values()].find(
+      ({ id }) => id === task.taskId,
+    );
     if (work?.id !== task.taskId) return;
     const request: ApprovalRequest = {
       action: 'schedule.' + schedule.operation,
@@ -875,7 +926,11 @@ export class Tasks {
       name || (approver === '' ? m.pendingRecipient : m.owner),
     );
     if (!work.endForApproval.signal.aborted) {
-      if (!work.adapter.setApprovalReaction || work.input.scheduled)
+      if (
+        !work.adapter.setApprovalReaction ||
+        work.input.scheduled ||
+        this.#deps.store.getTask(work.id)?.sourceChatId
+      )
         work.pendingApprovalFallback = summary;
       work.endForApproval.abort();
     }
@@ -1036,10 +1091,11 @@ export class Tasks {
   }
 }
 
-export function reply(message: InboundMessage, text: string) {
+export function reply(message: TaskInput['message'], text: string) {
   return {
     chatId: message.chatId,
-    replyTo: message.messageId,
+    replyTo:
+      message.migratedFromChatId === undefined ? message.messageId : undefined,
     threadId: message.threadId,
     text,
   };

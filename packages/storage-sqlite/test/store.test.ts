@@ -111,3 +111,69 @@ test('applies generated migrations, enables WAL, and reopens existing data', asy
     reopened.close();
   }
 });
+
+test('backfills state for group upgrades already recorded before chat continuity', async (t) => {
+  const temp = await mkdtemp(join(tmpdir(), 'tsugimori-store-upgrade-'));
+  t.after(() => rm(temp, { recursive: true, force: true }));
+  const path = join(temp, 'store.db');
+  const old = { adapterId: 'telegram', chatId: '-100' };
+  const next = { ...old, chatId: '-100100' };
+  const store = new SqliteStore(path);
+  try {
+    for (const chat of [old, next]) {
+      store.recordInbound(
+        { ...chat, kind: chat === old ? 'group' : 'supergroup', title: null },
+        { adapterId: chat.adapterId, userId: 'user', display: null },
+        {
+          ...chat,
+          direction: 'inbound',
+          messageId: '1',
+          userId: 'user',
+          text: chat.chatId,
+          raw: null,
+          replyTo: null,
+          threadId: null,
+        },
+      );
+    }
+    store.setSession({
+      ...old,
+      agentId: 'agent',
+      model: 'model',
+      sessionId: 'id',
+      throughSeq: 1,
+      seenAfter: [],
+    });
+  } finally {
+    store.close();
+  }
+  const legacy = new DatabaseSync(path);
+  try {
+    legacy
+      .prepare(
+        'UPDATE chats SET migrated_to_chat_id = ? WHERE adapter_id = ? AND chat_id = ?',
+      )
+      .run(next.chatId, old.adapterId, old.chatId);
+  } finally {
+    legacy.close();
+  }
+  for (let i = 0; i < 2; i++) {
+    const reopened = new SqliteStore(path);
+    try {
+      assert.deepEqual(reopened.resolveChat(old), next);
+      assert.deepEqual(reopened.listChatMessages(old), []);
+      assert.equal(
+        reopened.getMessage(next, '1', old.chatId)?.text,
+        old.chatId,
+      );
+      assert.equal(reopened.getMessage(next, '1', '')?.text, next.chatId);
+      assert.equal(
+        reopened.getSession(next, 'agent', 'model')?.sessionId,
+        'id',
+      );
+      assert.equal(reopened.listChatMessages(next).length, 2);
+    } finally {
+      reopened.close();
+    }
+  }
+});

@@ -2,7 +2,7 @@ import type { InboundMessage, OutboundMessage } from '@tsugimori/plugin-sdk';
 
 export interface TaskInput {
   compact?: boolean;
-  message: InboundMessage;
+  message: InboundMessage & { migratedFromChatId?: string };
   scheduled?: {
     allowTextMentions: boolean;
     delayNote: string;

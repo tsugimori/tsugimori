@@ -22,6 +22,7 @@ interface AgentRunDependencies {
   approvalPending?: AbortSignal;
   log: Logger;
   onSession?(sessionId: string): void;
+  scopeChatId?: string | null;
   task: ToolContext;
   trace: Tracer;
 }
@@ -38,7 +39,14 @@ export function sessionScope(
 }
 
 export async function runAgent(
-  { approvalPending, trace, log, onSession, task }: AgentRunDependencies,
+  {
+    approvalPending,
+    trace,
+    log,
+    onSession,
+    task,
+    scopeChatId,
+  }: AgentRunDependencies,
   agent: AgentConnector,
   request: AgentRequest,
   io: AgentIO,
@@ -48,7 +56,14 @@ export async function runAgent(
   const scope = (id: string) =>
     request.purpose
       ? null
-      : sessionScope(task.chat, agent.id, request.model, id);
+      : sessionScope(
+          scopeChatId && id === request.resumeSessionId
+            ? { ...task.chat, chatId: scopeChatId }
+            : task.chat,
+          agent.id,
+          request.model,
+          id,
+        );
   let activeScope = request.resumeSessionId
     ? scope(request.resumeSessionId)
     : null;
