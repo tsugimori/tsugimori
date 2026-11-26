@@ -1,6 +1,7 @@
 import type { Config } from '@tsugimori/config';
 import type {
   AdapterContext,
+  AdminEvent,
   AgentConnector,
   AgentRequest,
   ApprovalFeedback,
@@ -12,6 +13,7 @@ import type {
   PluginDefinition,
   TunnelProvider,
 } from '@tsugimori/plugin-sdk';
+import type { ScheduleRecord } from '@tsugimori/storage';
 
 import { SqliteStore } from '@tsugimori/storage-sqlite';
 import { Tracer } from '@tsugimori/trace';
@@ -3399,3 +3401,200 @@ test(
     assert.equal(f.gateway.admin.approvals().approvals[0]?.status, 'denied');
   },
 );
+
+test('admin overview uses indexed activity and trims previews across 1,000 chats', async (t) => {
+  const f = await fixture(t, async function* () {
+    yield { type: 'text.final', text: 'fixture' };
+  });
+  const now = Date.now();
+  for (let i = 0; i < 1000; i++) {
+    const ref = { adapterId, chatId: 'room-' + i };
+    f.store.recordInbound(
+      { ...ref, kind: 'group', title: 'Room ' + i },
+      { adapterId, userId: 'fixture-user', display: 'Fixture sender' },
+      {
+        ...ref,
+        messageId: 'message-' + i,
+        direction: 'inbound',
+        userId: 'fixture-user',
+        replyTo: null,
+        threadId: null,
+        text: '文'.repeat(100),
+        raw: null,
+      },
+    );
+    f.store.createTask({
+      ...ref,
+      id: 'task-' + i,
+      sourceMessageId: 'message-' + i,
+      agentId: 'test',
+      model: 'fixture-model',
+      createdAt: now,
+      startedAt: now,
+      finishedAt: null,
+      status: 'running',
+    });
+  }
+  const started = performance.now();
+  const overview = f.gateway.admin.overview(Date.now(), 'test');
+  const elapsed = performance.now() - started;
+  assert.ok(elapsed < 200, `Overview took ${Math.round(elapsed)} ms`);
+  assert.equal(overview.totals.chats, 1000);
+  assert.equal(overview.totals.tasksToday, 1000);
+  assert.equal(overview.chats.length, 200);
+  assert.deepEqual(overview.chats[0]?.preview, {
+    sender: 'Fixture sender',
+    text: '文'.repeat(79) + '…',
+  });
+  const [agent] = f.gateway.admin.agents(Date.now());
+  assert.equal(agent?.chats, 1000);
+  assert.equal(agent?.active, 1000);
+  assert.equal(agent?.recent.length, 3);
+  assert.equal(agent?.login, 'unknown');
+});
+
+test('admin subscriptions receive committed activity with no message or tool contents', async (t) => {
+  const f = await fixture(t, async function* () {
+    yield { type: 'text.final', text: 'fixture' };
+  });
+  const events: AdminEvent[] = [];
+  const unsubscribe = f.gateway.admin.subscribe((event) => {
+    if (event.kind === 'message')
+      assert.equal(
+        f.store.listChatMessages(chat).some(({ seq }) => seq === event.seq),
+        true,
+      );
+    if (event.kind === 'task')
+      assert.equal(f.store.getTask(event.id)?.status, event.status);
+    events.push(event);
+  });
+  const message = f.store.recordInbound(
+    { ...chat, kind: 'group', title: 'Room' },
+    { adapterId, userId: 'fixture-user', display: 'Fixture' },
+    {
+      ...chat,
+      messageId: 'message',
+      direction: 'inbound',
+      userId: 'fixture-user',
+      replyTo: null,
+      threadId: null,
+      text: 'private message',
+      raw: null,
+    },
+  )!;
+  const now = Date.now();
+  f.store.createTask({
+    ...chat,
+    id: 'task',
+    sourceMessageId: 'message',
+    agentId: 'test',
+    model: 'fixture',
+    status: 'running',
+    createdAt: now,
+    startedAt: now,
+    finishedAt: null,
+  });
+  const seq = f.store.createToolCall({
+    taskId: 'task',
+    name: 'tool',
+    callId: 'call',
+    startedAt: now,
+    endedAt: null,
+    args: 'private args',
+    result: null,
+    status: null,
+    approvalId: null,
+  })!;
+  assert.equal(f.gateway.admin.overview(now).chats[0]?.currentTool, 'tool');
+  f.store.createApproval({
+    ...chat,
+    id: 'approval',
+    taskId: 'task',
+    action: 'tool',
+    requester: 'fixture-user',
+    resource: { type: 'global' },
+    status: 'pending',
+    requestedAt: now,
+    approverId: null,
+    continuation: null,
+    expiresAt: now + 1000,
+    decidedAt: null,
+    decidedBy: null,
+    promptFormat: null,
+    promptMessageId: null,
+  });
+  f.store.updateToolCall(seq, {
+    status: 'ok',
+    endedAt: now + 1,
+    result: 'private result',
+  });
+  f.store.cancelApproval('approval', now + 2);
+  const summary = f.store.beginSummary(chat);
+  f.store.saveSummary({
+    ...summary,
+    throughSeq: message.seq,
+    text: 'private summary',
+  });
+  f.store.setChatRoute(chat, { thinking: 'high' });
+  f.store.updateTask('task', { status: 'completed', finishedAt: now + 3 });
+  const schedule: ScheduleRecord = {
+    ...chat,
+    id: 'scheduled',
+    address: { chatId: chat.chatId },
+    target: { chatId: chat.chatId },
+    action: { kind: 'message', text: 'private schedule' },
+    trigger: { kind: 'once', at: now },
+    nextDueAt: now,
+    status: 'active',
+    timezone: 'UTC',
+    missed: 'latest',
+    createdBy: 'fixture-user',
+    deliveryApprovedBy: null,
+    mentions: [],
+  };
+  const run = {
+    scheduleId: schedule.id,
+    dueAt: now,
+    startedAt: now,
+    finishedAt: null,
+    status: 'claimed' as const,
+  };
+  assert.equal(f.store.createSchedule(schedule, Infinity), true);
+  assert.equal(f.store.claimScheduleRun(schedule, run, null), true);
+  f.store.finishScheduleRun({ ...run, status: 'sent', finishedAt: now + 4 });
+  assert.deepEqual(
+    events.filter((event) => event.kind === 'schedule'),
+    [
+      { kind: 'schedule', id: schedule.id, status: 'active', lastRun: null },
+      { kind: 'schedule', id: schedule.id, status: 'done', lastRun: now },
+      { kind: 'schedule', id: schedule.id, status: 'done', lastRun: now },
+    ],
+  );
+
+  assert.deepEqual(
+    events.map((event) => event.kind),
+    [
+      'message',
+      'task',
+      'tool',
+      'approval',
+      'tool',
+      'approval',
+      'summary',
+      'chat',
+      'task',
+      'schedule',
+      'schedule',
+      'schedule',
+    ],
+  );
+  assert.doesNotMatch(JSON.stringify(events), /private/);
+  assert.equal(f.gateway.admin.toolCall('task', seq)?.result, 'private result');
+  assert.equal(f.gateway.admin.chat(chat)?.tasks[0]?.tools[0]?.result, null);
+  await f.configure(true, { model: 'reloaded-model' });
+  await until(t, () => events.some((event) => event.kind === 'reload'));
+  const afterReload = events.length;
+  unsubscribe();
+  f.store.setChatRoute(chat, { thinking: 'low' });
+  assert.equal(events.length, afterReload);
+});

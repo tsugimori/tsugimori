@@ -1,5 +1,6 @@
 import type {
   AdapterCursor,
+  AdminEvent,
   ChatRef,
   PreviewCloseReason,
   PrincipalRef,
@@ -427,6 +428,88 @@ function saveUser(
 export class SqliteStore implements Store {
   readonly #db;
   readonly #sqlite;
+  readonly #adminListeners = new Set<(event: AdminEvent) => void>();
+
+  subscribeAdmin(listener: (event: AdminEvent) => void) {
+    this.#adminListeners.add(listener);
+    return () => {
+      this.#adminListeners.delete(listener);
+    };
+  }
+
+  #publish(event: AdminEvent) {
+    for (const listener of this.#adminListeners) {
+      try {
+        listener(event);
+      } catch {
+        console.error(
+          JSON.stringify({ level: 'error', event: 'admin.listener_failed' }),
+        );
+      }
+    }
+  }
+
+  #publishTask(task: TaskRecord) {
+    const {
+      adapterId,
+      chatId,
+      id,
+      status,
+      agentId,
+      model,
+      startedAt,
+      finishedAt,
+    } = task;
+    this.#publish({
+      kind: 'task',
+      adapterId,
+      chatId,
+      id,
+      status,
+      agentId,
+      model,
+      startedAt,
+      endedAt: finishedAt,
+    });
+  }
+
+  #publishTool({
+    taskId,
+    seq,
+    name,
+    startedAt,
+    endedAt,
+    status,
+  }: Pick<
+    ToolCallRecord,
+    'taskId' | 'seq' | 'name' | 'startedAt' | 'endedAt' | 'status'
+  >) {
+    this.#publish({
+      kind: 'tool',
+      taskId,
+      seq,
+      name,
+      startedAt,
+      endedAt,
+      status,
+    });
+  }
+
+  #publishApproval({ adapterId, chatId, id, status }: ApprovalRecord) {
+    this.#publish({ kind: 'approval', adapterId, chatId, id, status });
+  }
+
+  #publishSchedule(id: string) {
+    if (!this.#adminListeners.size) return;
+    const schedule = this.getSchedule(id);
+    if (schedule)
+      this.#publish({
+        kind: 'schedule',
+        id,
+        status: schedule.status,
+        lastRun: this.adminLastScheduleRun(id),
+      });
+  }
 
   backup(path: string) {
     closeSync(openSync(path, 'wx', 0o600));
@@ -869,10 +952,15 @@ export class SqliteStore implements Store {
 
   migrateChat(ref: ChatRef, newChatId: string, title?: string) {
     if (ref.chatId === newChatId) return false;
-    return this.#db.transaction(
+    const changed = this.#db.transaction(
       (tx) => this.#migrateChat(tx, ref, newChatId, title),
       { behavior: 'immediate' },
     );
+    if (changed) {
+      this.#publishChat(ref);
+      this.#publishChat({ adapterId: ref.adapterId, chatId: newChatId });
+    }
+    return changed;
   }
 
   #migrateChat(
@@ -1142,49 +1230,194 @@ export class SqliteStore implements Store {
       : recent;
   }
 
-  adminChatActivity(ref: ChatRef, now: number) {
-    const { latestSeq, messageCount, messageTime } = this.#db
+  #adminActivityQueries?: ReturnType<SqliteStore['prepareAdminActivity']>;
+
+  private prepareAdminActivity() {
+    const adapter = sql.placeholder('adapterId');
+    const chat = sql.placeholder('chatId');
+    const scope = (table: typeof messages | typeof tasks | typeof approvals) =>
+      and(eq(table.adapterId, adapter), eq(table.chatId, chat));
+    const messageStats = this.#db
       .select({
         latestSeq: max(messages.seq),
         messageCount: count(),
         messageTime: max(messages.recordedAt),
       })
       .from(messages)
-      .where(chatScope(messages, ref))
-      .get()!;
+      .where(scope(messages))
+      .prepare();
     const thread = this.#db
       .select({ threadId: messages.threadId })
       .from(messages)
-      .where(and(chatScope(messages, ref), isNotNull(messages.threadId)))
+      .where(and(scope(messages), isNotNull(messages.threadId)))
       .orderBy(desc(messages.seq))
       .limit(1)
-      .get();
+      .prepare();
     const task = (active: boolean) =>
       this.#db
         .select()
         .from(tasks)
         .where(
           and(
-            chatScope(tasks, ref),
-            active
-              ? inArray(tasks.status, ['queued', 'running', 'sending'])
-              : undefined,
+            scope(tasks),
+            active ? inArray(tasks.status, activeTaskStatuses) : undefined,
           ),
         )
         .orderBy(desc(tasks.createdAt))
         .limit(1)
-        .get();
+        .prepare();
+    const preview = this.#db
+      .select({
+        sender: sql<
+          string | null
+        >`case when ${messages.direction} = 'outbound' then null else coalesce(${users.display}, ${messages.userId}) end`,
+        text: sql<string>`substr(trim(${messages.text}), 1, 81)`,
+      })
+      .from(messages)
+      .leftJoin(
+        users,
+        and(
+          eq(users.adapterId, messages.adapterId),
+          eq(users.userId, messages.userId),
+        ),
+      )
+      .where(and(scope(messages), eq(messages.deleted, false)))
+      .orderBy(desc(messages.seq))
+      .limit(1)
+      .prepare();
+    const tool = this.#db
+      .select({ name: toolCalls.name })
+      .from(toolCalls)
+      .where(
+        and(
+          eq(toolCalls.taskId, sql.placeholder('taskId')),
+          isNull(toolCalls.endedAt),
+          isNull(toolCalls.status),
+        ),
+      )
+      .orderBy(desc(toolCalls.seq))
+      .limit(1)
+      .prepare();
+    const pending = this.#db
+      .select({ value: count() })
+      .from(approvals)
+      .where(
+        and(
+          scope(approvals),
+          eq(approvals.status, 'pending'),
+          or(
+            isNull(approvals.expiresAt),
+            gt(approvals.expiresAt, sql.placeholder('now')),
+          ),
+        ),
+      )
+      .prepare();
     return {
+      messageStats,
+      thread,
+      activeTask: task(true),
+      lastTask: task(false),
+      preview,
+      tool,
+      pending,
+    };
+  }
+
+  adminChatActivity(ref: ChatRef, now: number) {
+    const {
+      messageStats,
+      thread,
+      activeTask,
+      lastTask,
+      preview,
+      tool,
+      pending,
+    } = (this.#adminActivityQueries ??= this.prepareAdminActivity());
+    const key = { adapterId: ref.adapterId, chatId: ref.chatId };
+    const { latestSeq, messageCount, messageTime } = messageStats.get(key)!;
+    const active = activeTask.get(key);
+    return {
+      preview: preview.get(key) ?? null,
+      currentTool: active
+        ? (tool.get({ taskId: active.id })?.name ?? null)
+        : null,
       latestSeq: latestSeq ?? 0,
       messageCount,
       messageTime,
-      threadId: thread?.threadId ?? null,
-      activeTask: task(true),
-      lastTask: task(false),
-      pendingApprovals: this.#db
-        .$count(approvals, and(chatScope(approvals, ref), currentApproval(now)))
-        .sync(),
+      threadId: thread.get(key)?.threadId ?? null,
+      activeTask: active,
+      lastTask: lastTask.get(key),
+      pendingApprovals: pending.get({ ...key, now })!.value,
     };
+  }
+
+  adminAgentActivity(agentId: string, since: number, now: number) {
+    const { active, tasksToday, failedToday, lastActivity } = this.#db
+      .select({
+        active:
+          sql<number>`count(*) filter (where ${tasks.status} in ('queued', 'running', 'sending'))`.mapWith(
+            Number,
+          ),
+        tasksToday:
+          sql<number>`count(*) filter (where ${tasks.createdAt} between ${since} and ${now})`.mapWith(
+            Number,
+          ),
+        failedToday:
+          sql<number>`count(*) filter (where ${tasks.status} in ('failed', 'delivery-unknown') and coalesce(${tasks.finishedAt}, ${tasks.createdAt}) between ${since} and ${now})`.mapWith(
+            Number,
+          ),
+        lastActivity: sql<
+          number | null
+        >`max(coalesce(${tasks.finishedAt}, ${tasks.startedAt}, ${tasks.createdAt}))`.mapWith(
+          Number,
+        ),
+      })
+      .from(tasks)
+      .where(eq(tasks.agentId, agentId))
+      .get()!;
+    const recent = this.#db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.agentId, agentId))
+      .orderBy(desc(tasks.createdAt), desc(tasks.id))
+      .limit(3)
+      .all();
+    return { active, tasksToday, failedToday, lastActivity, recent };
+  }
+
+  adminChatSchedules(ref: ChatRef) {
+    return this.#db
+      .select()
+      .from(schedules)
+      .where(
+        and(
+          chatScope(schedules, ref),
+          inArray(schedules.status, ['active', 'paused']),
+        ),
+      )
+      .orderBy(asc(schedules.nextDueAt), schedules.id)
+      .all();
+  }
+
+  adminChatApprovals(ref: ChatRef, now: number) {
+    return this.#db
+      .select()
+      .from(approvals)
+      .where(and(chatScope(approvals, ref), currentApproval(now)))
+      .orderBy(desc(approvals.requestedAt))
+      .all();
+  }
+
+  adminLastScheduleRun(id: string) {
+    return (
+      this.#db
+        .select({ at: scheduleRuns.startedAt })
+        .from(scheduleRuns)
+        .where(eq(scheduleRuns.scheduleId, id))
+        .orderBy(desc(scheduleRuns.dueAt))
+        .limit(1)
+        .get()?.at ?? null
+    );
   }
 
   countPendingApprovals(now: number) {
@@ -1204,7 +1437,7 @@ export class SqliteStore implements Store {
         .$count(
           tasks,
           and(
-            inArray(tasks.status, ['failed', 'delivery-unknown']),
+            sql`${tasks.status} in ('failed', 'delivery-unknown')`,
             gte(failedAt, since),
             lte(failedAt, now),
           ),
@@ -1331,7 +1564,7 @@ export class SqliteStore implements Store {
 
   createToolCall(call: Omit<ToolCallRecord, 'seq'>) {
     // The task can disappear during removal. Reserve its sequence only if it exists.
-    return this.#db
+    const seq = this.#db
       .insert(toolCalls)
       .select(
         this.#db
@@ -1354,6 +1587,8 @@ export class SqliteStore implements Store {
       )
       .returning({ seq: toolCalls.seq })
       .get()?.seq;
+    if (seq !== undefined) this.#publishTool({ ...call, seq });
+    return seq;
   }
 
   updateToolCall(
@@ -1365,13 +1600,40 @@ export class SqliteStore implements Store {
       >
     >,
   ) {
-    this.#db.update(toolCalls).set(patch).where(eq(toolCalls.seq, seq)).run();
+    const call = this.#db
+      .update(toolCalls)
+      .set(patch)
+      .where(eq(toolCalls.seq, seq))
+      .returning({
+        seq: toolCalls.seq,
+        name: toolCalls.name,
+        taskId: toolCalls.taskId,
+        status: toolCalls.status,
+        startedAt: toolCalls.startedAt,
+        endedAt: toolCalls.endedAt,
+      })
+      .get();
+    if (call) this.#publishTool(call);
   }
 
-  taskToolCalls(taskIds: readonly string[]) {
-    if (!taskIds.length) return [];
+  adminToolCall(taskId: string, seq: number) {
     return this.#db
       .select()
+      .from(toolCalls)
+      .where(and(eq(toolCalls.taskId, taskId), eq(toolCalls.seq, seq)))
+      .get();
+  }
+
+  taskToolCalls(taskIds: readonly string[], details = true) {
+    if (!taskIds.length) return [];
+    const columns = getColumns(toolCalls);
+    return this.#db
+      .select({
+        ...columns,
+        args: details ? columns.args : sql<null>`null`,
+        result: details ? columns.result : sql<null>`null`,
+        callId: details ? columns.callId : sql<null>`null`,
+      })
       .from(toolCalls)
       .where(inArray(toolCalls.taskId, [...taskIds]))
       .orderBy(toolCalls.seq)
@@ -1427,12 +1689,26 @@ export class SqliteStore implements Store {
     };
   }
 
-  getWorkspaceSettings(ref: ChatRef) {
+  private selectWorkspaceSettings() {
     return this.#db
-      .select()
+      .select({ settings: workspaceSettings.settings })
       .from(workspaceSettings)
-      .where(chatScope(workspaceSettings, ref))
-      .get()?.settings;
+      .where(
+        and(
+          eq(workspaceSettings.adapterId, sql.placeholder('adapterId')),
+          eq(workspaceSettings.chatId, sql.placeholder('chatId')),
+        ),
+      )
+      .prepare();
+  }
+
+  #workspaceSettings?: ReturnType<SqliteStore['selectWorkspaceSettings']>;
+
+  getWorkspaceSettings({ adapterId, chatId }: ChatRef) {
+    return (this.#workspaceSettings ??= this.selectWorkspaceSettings()).get({
+      adapterId,
+      chatId,
+    })?.settings;
   }
 
   setWorkspaceSettings(ref: ChatRef, settings: WorkspaceSettings) {
@@ -1444,6 +1720,11 @@ export class SqliteStore implements Store {
         set: { settings },
       })
       .run();
+    this.#publishChat(ref);
+  }
+
+  #publishChat({ adapterId, chatId }: ChatRef) {
+    this.#publish({ kind: 'chat', adapterId, chatId });
   }
 
   deliveryAddress(ref: ChatRef) {
@@ -1468,9 +1749,14 @@ export class SqliteStore implements Store {
   }
 
   createSchedule(schedule: ScheduleRecord, limit: number) {
-    return this.#db.transaction(() => this.#saveSchedule(schedule, limit), {
-      behavior: 'immediate',
-    });
+    const changed = this.#db.transaction(
+      () => this.#saveSchedule(schedule, limit),
+      {
+        behavior: 'immediate',
+      },
+    );
+    if (changed) this.#publishSchedule(schedule.id);
+    return changed;
   }
 
   #hasScheduleCapacity(schedule: ScheduleRecord, limit: number) {
@@ -1571,10 +1857,12 @@ export class SqliteStore implements Store {
     expected: ScheduleRecord,
     limit: number,
   ) {
-    return this.#db.transaction(
+    const changed = this.#db.transaction(
       () => this.#saveSchedule(schedule, limit, expected),
       { behavior: 'immediate' },
     );
+    if (changed) this.#publishSchedule(schedule.id);
+    return changed;
   }
 
   #saveSchedule(
@@ -1631,9 +1919,9 @@ export class SqliteStore implements Store {
     nextDueAt: number | null,
     failureReason?: string,
   ) {
-    return this.#db.transaction(
+    const change = this.#db.transaction(
       (tx) => {
-        if (schedule.nextDueAt === null) return false;
+        if (schedule.nextDueAt === null) return;
         const advanced = tx
           .update(schedules)
           .set({
@@ -1656,20 +1944,23 @@ export class SqliteStore implements Store {
           )
           .returning({ id: schedules.id })
           .get();
-        if (!advanced) return false;
-        return !!tx
+        if (!advanced) return;
+        const claimed = !!tx
           .insert(scheduleRuns)
           .values(run)
           .onConflictDoNothing()
           .returning({ id: scheduleRuns.scheduleId })
           .get();
+        return { claimed };
       },
       { behavior: 'immediate' },
     );
+    if (change) this.#publishSchedule(schedule.id);
+    return change?.claimed ?? false;
   }
 
   finishScheduleRun(run: ScheduleRun) {
-    this.#db
+    const changed = this.#db
       .update(scheduleRuns)
       .set({ status: run.status, finishedAt: run.finishedAt })
       .where(
@@ -1680,6 +1971,7 @@ export class SqliteStore implements Store {
         ),
       )
       .run();
+    if (changed.changes) this.#publishSchedule(run.scheduleId);
   }
 
   interruptScheduleRuns(now: number) {
@@ -1723,6 +2015,7 @@ export class SqliteStore implements Store {
       .set({ allowlisted, allowlistConfigured: true })
       .where(chatScope(chats, ref))
       .run();
+    this.#publishChat(ref);
   }
 
   setChatRoute(ref: ChatRef, route: ChatRoute, invalidateSession = true) {
@@ -1734,6 +2027,7 @@ export class SqliteStore implements Store {
       })
       .where(chatScope(chats, ref))
       .run();
+    this.#publishChat(ref);
   }
 
   recordInbound(
@@ -1752,7 +2046,7 @@ export class SqliteStore implements Store {
     };
     if (chatId !== chat.chatId)
       chat = { ...chat, chatId, kind: 'supergroup', title: null };
-    return this.#db.transaction((tx) => {
+    const recorded = this.#db.transaction((tx) => {
       const insert = tx
         .insert(messages)
         .values({ ...message, recordedAt: Date.now() });
@@ -1788,24 +2082,43 @@ export class SqliteStore implements Store {
       saveUser(tx, user);
       return result;
     });
+    if (recorded) {
+      const { adapterId, chatId, seq, direction } = recorded;
+      this.#publish({ kind: 'message', adapterId, chatId, seq, direction });
+    }
+    return recorded;
   }
 
   recordOutbound(message: NewMessage, taskId?: string) {
     const { chatId } = this.resolveChat(message);
     if (chatId !== message.chatId)
       message = { ...message, chatId, migratedFromChatId: message.chatId };
-    this.#db.transaction((tx) => {
-      tx.insert(messages)
+    const { recorded, task } = this.#db.transaction((tx) => {
+      const recorded = tx
+        .insert(messages)
         .values({ ...message, recordedAt: Date.now() })
         .onConflictDoNothing()
-        .run();
-      if (taskId) {
-        tx.update(tasks)
-          .set({ status: 'sent', finishedAt: Date.now() })
-          .where(eq(tasks.id, taskId))
-          .run();
-      }
+        .returning({ seq: messages.seq })
+        .get();
+      const task = taskId
+        ? tx
+            .update(tasks)
+            .set({ status: 'sent', finishedAt: Date.now() })
+            .where(eq(tasks.id, taskId))
+            .returning()
+            .get()
+        : undefined;
+      return { recorded, task };
     });
+    if (recorded)
+      this.#publish({
+        kind: 'message',
+        adapterId: message.adapterId,
+        chatId,
+        seq: recorded.seq,
+        direction: message.direction,
+      });
+    if (task) this.#publishTask(task);
   }
 
   getMessage(ref: ChatRef, messageId: string, migratedFromChatId?: string) {
@@ -1826,7 +2139,7 @@ export class SqliteStore implements Store {
   }
 
   markDeleted(ref: ChatRef, messageId: string, migratedFromChatId = '') {
-    this.#db.transaction((tx) => {
+    const changed = this.#db.transaction((tx) => {
       const deleted = tx
         .update(messages)
         .set({ deleted: true })
@@ -1838,22 +2151,42 @@ export class SqliteStore implements Store {
             eq(messages.deleted, false),
           ),
         )
-        .returning({ seq: messages.seq })
+        .returning({ seq: messages.seq, direction: messages.direction })
         .all();
       if (deleted.length)
         tx.update(chatSummaries)
           .set(summaryRepair(Math.min(...deleted.map(({ seq }) => seq))))
           .where(chatScope(chatSummaries, ref))
           .run();
+      return deleted;
     });
+    for (const { seq, direction } of changed)
+      this.#publish({
+        kind: 'message',
+        adapterId: ref.adapterId,
+        chatId: ref.chatId,
+        seq,
+        direction,
+      });
   }
 
-  getSummary(ref: ChatRef) {
+  private selectSummary() {
     return this.#db
       .select()
       .from(chatSummaries)
-      .where(chatScope(chatSummaries, ref))
-      .get();
+      .where(
+        and(
+          eq(chatSummaries.adapterId, sql.placeholder('adapterId')),
+          eq(chatSummaries.chatId, sql.placeholder('chatId')),
+        ),
+      )
+      .prepare();
+  }
+
+  #summary?: ReturnType<SqliteStore['selectSummary']>;
+
+  getSummary({ adapterId, chatId }: ChatRef) {
+    return (this.#summary ??= this.selectSummary()).get({ adapterId, chatId });
   }
 
   getSummaryStatus(ref: ChatRef) {
@@ -1883,7 +2216,7 @@ export class SqliteStore implements Store {
   }
 
   saveSummary(summary: ChatSummary) {
-    return !!this.#db
+    const changed = !!this.#db
       .update(chatSummaries)
       .set({
         text: summary.text,
@@ -1899,6 +2232,11 @@ export class SqliteStore implements Store {
       )
       .returning({ revision: chatSummaries.revision })
       .get();
+    if (changed) {
+      const { adapterId, chatId, throughSeq } = summary;
+      this.#publish({ kind: 'summary', adapterId, chatId, throughSeq });
+    }
+    return changed;
   }
 
   summaryMessages(
@@ -2113,10 +2451,17 @@ export class SqliteStore implements Store {
           task.sourceChatId ?? (chatId === task.chatId ? null : task.chatId),
       })
       .run();
+    this.#publishTask({ ...task, chatId });
   }
 
   updateTask(id: string, patch: Parameters<Store['updateTask']>[1]) {
-    this.#db.update(tasks).set(patch).where(eq(tasks.id, id)).run();
+    const task = this.#db
+      .update(tasks)
+      .set(patch)
+      .where(eq(tasks.id, id))
+      .returning()
+      .get();
+    if (task) this.#publishTask(task);
   }
 
   interruptTasks(now: number) {
@@ -2234,6 +2579,7 @@ export class SqliteStore implements Store {
             : resource,
       })
       .run();
+    this.#publishApproval({ ...approval, chatId });
   }
 
   linkApproval(
@@ -2296,7 +2642,7 @@ export class SqliteStore implements Store {
     grant?: StoredGrant,
     scheduleLimit?: number,
   ) {
-    return this.#db.transaction(
+    const change = this.#db.transaction(
       (tx) => {
         const approval = tx
           .update(approvals)
@@ -2325,21 +2671,31 @@ export class SqliteStore implements Store {
               previous,
             );
           if (scheduleApplied && grant) tx.insert(grants).values(grant).run();
-          return { scheduleApplied };
+          return {
+            approval,
+            result: { scheduleApplied },
+            scheduleId: scheduleApplied ? schedule.id : undefined,
+          };
         }
         if (grant) tx.insert(grants).values(grant).run();
-        return {};
+        return { approval, result: {}, scheduleId: undefined };
       },
       { behavior: 'immediate' },
     );
+    if (!change) return;
+    this.#publishApproval(change.approval);
+    if (change.scheduleId) this.#publishSchedule(change.scheduleId);
+    return change.result;
   }
 
   cancelApproval(id: string, now: number) {
-    this.#db
+    const changed = this.#db
       .update(approvals)
       .set({ status: 'cancelled', decidedAt: now })
       .where(and(eq(approvals.id, id), eq(approvals.status, 'pending')))
-      .run();
+      .returning()
+      .all();
+    for (const approval of changed) this.#publishApproval(approval);
   }
 
   cancelChatApprovals(
@@ -2364,7 +2720,7 @@ export class SqliteStore implements Store {
               ),
         ),
       );
-    this.#db
+    const changed = this.#db
       .update(approvals)
       .set({ status: 'cancelled', decidedAt: now })
       .where(
@@ -2373,12 +2729,14 @@ export class SqliteStore implements Store {
           eq(approvals.status, 'pending'),
         ),
       )
-      .run();
+      .returning()
+      .all();
+    for (const approval of changed) this.#publishApproval(approval);
   }
 
   expireApprovals(now: number, adapterIds: readonly string[]) {
     if (!adapterIds.length) return [];
-    return this.#db
+    const changed = this.#db
       .update(approvals)
       .set({ status: 'expired', decidedAt: now })
       .where(
@@ -2391,6 +2749,8 @@ export class SqliteStore implements Store {
       )
       .returning()
       .all();
+    for (const approval of changed) this.#publishApproval(approval);
+    return changed;
   }
 
   insertGrant(grant: StoredGrant) {

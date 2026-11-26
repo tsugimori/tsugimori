@@ -12,5 +12,5 @@
     "types": ["node"]
   },
   "include": ["packages/**/*.ts", "plugins/**/*.ts"],
-  "exclude": ["**/dist/**"]
+  "exclude": ["**/dist/**", "plugins/web/ui/**"]
 }

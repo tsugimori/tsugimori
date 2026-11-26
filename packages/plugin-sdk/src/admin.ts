@@ -25,9 +25,57 @@ export interface AdminToolCall {
   status: ToolCallStatus | null;
 }
 
+export type AdminEvent =
+  | (ChatRef & { direction: string; kind: 'message'; seq: number })
+  | (ChatRef & {
+      agentId: string | null;
+      endedAt: number | null;
+      id: string;
+      kind: 'task';
+      model: string | null;
+      startedAt: number | null;
+      status: string;
+    })
+  | {
+      endedAt: number | null;
+      kind: 'tool';
+      name: string;
+      seq: number;
+      startedAt: number;
+      status: ToolCallStatus | null;
+      taskId: string;
+    }
+  | (ChatRef & { id: string; kind: 'approval'; status: string })
+  | (ChatRef & { kind: 'summary'; throughSeq: number })
+  | (ChatRef & { kind: 'chat' })
+  | { id: string; kind: 'schedule'; lastRun: number | null; status: string }
+  | { kind: 'reload' };
+
+export interface AdminAgent {
+  active: number;
+  chats: number;
+  failedToday: number;
+  id: string;
+  implementation: string;
+  isDefault: boolean;
+  lastActivity: number | null;
+  login: 'signed-in' | 'required' | 'unknown';
+  model?: string;
+  recent: readonly (ChatRef & {
+    chatTitle: string;
+    durationMs: number | null;
+    id: string;
+    status: string;
+    threadId: string | null;
+  })[];
+  state: 'ready' | 'disabled' | 'error';
+  tasksToday: number;
+}
+
 export interface AdminChat extends ChatRef {
   activeTask: string | null;
   allowlisted: boolean;
+  currentTool?: string | null;
   kind: string;
   lastActivity: number | null;
   lastTaskStatus: string | null;
@@ -35,6 +83,7 @@ export interface AdminChat extends ChatRef {
   messageCount: number;
   pendingApprovals: number;
   platform: string;
+  preview?: { sender: string | null; text: string } | null;
   route: {
     agentId?: string;
     isDefault: boolean;
@@ -63,6 +112,7 @@ export interface AdminTask extends ChatRef {
 }
 
 export interface AdminConversation {
+  approvals?: AdminApprovals['approvals'];
   chat: AdminChat;
   messages: readonly {
     deleted: boolean;
@@ -74,6 +124,7 @@ export interface AdminConversation {
     userId: string | null;
   }[];
   older?: number;
+  schedules?: AdminSchedules['schedules'];
   tasks: readonly AdminTask[];
 }
 
@@ -120,6 +171,8 @@ export interface AdminApprovals {
 export interface AdminWorkspace {
   locale: 'en' | 'zh-TW';
   name?: string;
+  pendingApprovals?: number;
+  schedules?: boolean;
   timezone: string;
 }
 
@@ -137,6 +190,7 @@ export interface AdminSchedules {
   schedules: readonly (ChatRef & {
     chat?: AdminChat;
     id: string;
+    lastRun?: number | null;
     nextDueAt: number | null;
     status: string;
     title: string;
@@ -144,12 +198,15 @@ export interface AdminSchedules {
 }
 
 export interface AdminReader {
+  agents(now: number): readonly AdminAgent[];
   approvals(recentLimit?: number): AdminApprovals;
   chat(ref: ChatRef, before?: number): AdminConversation | undefined;
   chats(): readonly AdminChat[];
-  overview(now: number): AdminOverview;
+  overview(now: number, agentId?: string): AdminOverview;
   pendingApprovals(now: number): number;
   schedules?(): AdminSchedules;
+  subscribe(listener: (event: AdminEvent) => void): () => void;
+  toolCall(taskId: string, seq: number): AdminToolCall | undefined;
   trace(taskId: string): AdminTrace | undefined;
   workspace(): AdminWorkspace;
 }

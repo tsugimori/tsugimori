@@ -1,6 +1,7 @@
 import type { Config } from '@tsugimori/config';
 import type {
   AdminChat,
+  AdminEvent,
   AdminReader,
   AdminTask,
   AdminToolCall,
@@ -8,6 +9,7 @@ import type {
 } from '@tsugimori/plugin-sdk';
 import type {
   ChatRecord,
+  ScheduleRecord,
   Store,
   TaskRecord,
   ToolCallRecord,
@@ -17,7 +19,15 @@ import type {
 import type { Tasks } from './tasks.ts';
 
 interface Dependencies {
+  agentInfo(id: string): {
+    implementation?: string;
+    isDefault: boolean;
+    login: 'signed-in' | 'required' | 'unknown';
+    model?: string;
+    state: 'ready' | 'disabled' | 'error';
+  };
   config(): Config;
+  reloadListeners: Set<(event: AdminEvent) => void>;
   route: Tasks['route'];
   store: Store;
 }
@@ -99,13 +109,17 @@ function groupCalls(calls: readonly ToolCallRecord[]) {
 }
 
 export function adminReader({
+  agentInfo,
   config,
+  reloadListeners,
   route,
   store,
 }: Dependencies): AdminReader {
   const chatDetails = (chat: ChatRecord, now: number): AdminChat => {
     const {
       activeTask,
+      currentTool,
+      preview,
       lastTask,
       latestSeq,
       messageCount,
@@ -113,7 +127,10 @@ export function adminReader({
       pendingApprovals,
       threadId,
     } = store.adminChatActivity(chat, now);
-    const { agentId, model, thinking, serviceTier } = route(chat, chat);
+    const { agentId, model, thinking, serviceTier, selected } = route(
+      chat,
+      chat,
+    );
     const settings = store.getWorkspaceSettings(chat);
     const summary = store.getSummary(chat);
     const lastActivity = Math.max(
@@ -129,6 +146,16 @@ export function adminReader({
         chat.adapterId,
       threadId,
       activeTask: activeTask?.id ?? null,
+      currentTool,
+      preview: preview && {
+        sender: preview.sender,
+        text: (() => {
+          const text = [...preview.text.replace(/\s+/g, ' ').trim()];
+          return text.length > 80
+            ? text.slice(0, 79).join('') + '…'
+            : text.join('');
+        })(),
+      },
       lastTaskStatus: lastTask?.status ?? null,
       lastActivity: lastActivity || null,
       latestSeq,
@@ -136,7 +163,7 @@ export function adminReader({
       pendingApprovals,
       route: {
         agentId,
-        model: model.value,
+        model: model.value ?? selected?.defaults?.model,
         thinking: thinking.value,
         serviceTier: serviceTier.value,
         isDefault: (chat.agentId ?? settings?.agentId) == null,
@@ -150,7 +177,70 @@ export function adminReader({
     const chat = store.getChat(ref);
     return chat && chatDetails(chat, now);
   };
+  const scheduleDetails = (schedule: ScheduleRecord) => ({
+    id: schedule.id,
+    adapterId: schedule.adapterId,
+    chatId: schedule.chatId,
+    title:
+      schedule.action.kind === 'message'
+        ? schedule.action.text
+        : schedule.action.prompt,
+    nextDueAt: schedule.nextDueAt,
+    lastRun: store.adminLastScheduleRun(schedule.id),
+    status: schedule.status,
+  });
   return {
+    subscribe: (listener) => {
+      const unsubscribe = store.subscribeAdmin?.(listener);
+      reloadListeners.add(listener);
+      return () => {
+        reloadListeners.delete(listener);
+        unsubscribe?.();
+      };
+    },
+    agents: (now) => {
+      const { agents, timezone } = config();
+      const since = startOfDay(now, timezone);
+      const chatCounts = new Map<string, number>();
+      for (const chat of store.listChats()) {
+        if (chat.migratedToChatId !== null) continue;
+        const { agentId } = route(chat, chat);
+        if (agentId)
+          chatCounts.set(agentId, (chatCounts.get(agentId) ?? 0) + 1);
+      }
+      return agents
+        .map(({ id, kind }) => {
+          const info = agentInfo(id);
+          const activity = store.adminAgentActivity(id, since, now);
+          return {
+            ...info,
+            ...activity,
+            id,
+            implementation: info.implementation ?? kind,
+            chats: chatCounts.get(id) ?? 0,
+            recent: activity.recent.map((task) => {
+              const chat = getChat(task, now);
+              return {
+                adapterId: task.adapterId,
+                chatId: task.chatId,
+                chatTitle: chat?.title ?? task.chatId,
+                threadId: chat?.threadId ?? null,
+                status: task.status,
+                id: task.id,
+                durationMs:
+                  task.startedAt !== null && task.finishedAt !== null
+                    ? task.finishedAt - task.startedAt
+                    : null,
+              };
+            }),
+          };
+        })
+        .sort(
+          (a, b) =>
+            Number(b.active > 0) - Number(a.active > 0) ||
+            (b.lastActivity ?? 0) - (a.lastActivity ?? 0),
+        );
+    },
     workspace: () => {
       const { locale, name, timezone } = config();
       return { locale, name, timezone };
@@ -160,11 +250,12 @@ export function adminReader({
       return store.listChats().map((chat) => chatDetails(chat, now));
     },
     pendingApprovals: (now) => store.countPendingApprovals(now),
-    overview: (now) => {
+    overview: (now, agentId) => {
       const chats = store
         .listChats()
         .filter(({ migratedToChatId }) => migratedToChatId === null)
         .map((chat) => chatDetails(chat, now))
+        .filter((chat) => !agentId || chat.route.agentId === agentId)
         .sort((a, b) => (b.lastActivity ?? 0) - (a.lastActivity ?? 0));
       return {
         chats: chats.slice(0, 200),
@@ -175,7 +266,9 @@ export function adminReader({
       };
     },
     chat: (ref, before) => {
-      const chat = getChat(ref, Date.now());
+      ref = store.resolveChat(ref);
+      const now = Date.now();
+      const chat = getChat(ref, now);
       if (!chat) return;
       const window = store.listChatMessages(ref, before);
       const oldest = window.length === 100 ? window.at(-1) : undefined;
@@ -184,11 +277,44 @@ export function adminReader({
         oldestSeq: oldest?.seq,
         oldestTime: oldest?.recordedAt,
       });
-      const calls = groupCalls(store.taskToolCalls(page.map(({ id }) => id)));
+      const calls = groupCalls(
+        store.taskToolCalls(
+          page.map(({ id }) => id),
+          false,
+        ),
+      );
       return {
         chat,
         messages: window,
         older: oldest?.seq,
+        approvals: store
+          .adminChatApprovals(ref, now)
+          .map(
+            ({
+              adapterId,
+              chatId,
+              id,
+              action,
+              status,
+              requestedAt,
+              requester,
+              resource,
+              decidedAt,
+              decidedBy,
+            }) => ({
+              adapterId,
+              chatId,
+              id,
+              action,
+              status,
+              requestedAt,
+              requester,
+              resource,
+              decidedAt,
+              decidedBy,
+            }),
+          ),
+        schedules: store.adminChatSchedules(ref).map(scheduleDetails),
         tasks: page.map((task) => ({
           ...taskDetails(
             task,
@@ -242,6 +368,12 @@ export function adminReader({
         grants: store.listGrants(),
       };
     },
+    toolCall: (taskId, seq) => {
+      const record = store.adminToolCall(taskId, seq);
+      if (!record) return;
+      const { name, args, result, status, callId, startedAt, endedAt } = record;
+      return { name, args, result, status, callId, startedAt, endedAt, seq };
+    },
     trace: (taskId) => {
       const task = store.getTask(taskId);
       const chat = task && getChat(task, Date.now());
@@ -256,17 +388,10 @@ export function adminReader({
     schedules: () => {
       const now = Date.now();
       return {
-        schedules: store
-          .listAdminSchedules()
-          .map(({ action, ...schedule }) => ({
-            id: schedule.id,
-            adapterId: schedule.adapterId,
-            chatId: schedule.chatId,
-            title: action.kind === 'message' ? action.text : action.prompt,
-            nextDueAt: schedule.nextDueAt,
-            status: schedule.status,
-            chat: getChat(schedule, now),
-          })),
+        schedules: store.listAdminSchedules().map((schedule) => ({
+          ...scheduleDetails(schedule),
+          chat: getChat(schedule, now),
+        })),
       };
     },
   };

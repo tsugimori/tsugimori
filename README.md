@@ -17,6 +17,8 @@ corepack pnpm exec tsugimori start ./ws
 
 Send `/status` to the bot in a direct message, then send a message to start a conversation. A workspace can also start with zero platforms or zero agents. With a platform and zero agents, the gateway still records ordinary incoming messages and tells the owner when a triggered message has no agent.
 
+Build the [live admin console](plugins/web/README.md) with `corepack pnpm --filter @tsugimori/web build`.
+
 ## Workspace and conversations
 
 | Path                                     | Purpose                                                                                                                                      |

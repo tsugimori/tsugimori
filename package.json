@@ -9,12 +9,12 @@
   },
   "packageManager": "pnpm@12.23.0",
   "scripts": {
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && corepack pnpm --filter @tsugimori/web typecheck",
     "lint": "eslint . --max-warnings=0",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "test": "node --test --test-concurrency=2",
-    "build": "tsc -b tsconfig.build.json && node scripts/build-version.mjs",
+    "build": "tsc -b tsconfig.build.json && node scripts/build-version.mjs && corepack pnpm --filter @tsugimori/web build",
     "check": "corepack pnpm typecheck && corepack pnpm lint && corepack pnpm format:check && corepack pnpm test && corepack pnpm build"
   },
   "devDependencies": {
@@ -24,6 +24,8 @@
     "prettier": "3.10.1",
     "typescript": "5.9.3",
     "typescript-eslint": "8.74.0",
-    "@tsugimori/cli": "workspace:*"
+    "@tsugimori/cli": "workspace:*",
+    "eslint-plugin-svelte": "3.24.1",
+    "prettier-plugin-svelte": "4.2.0"
   }
 }

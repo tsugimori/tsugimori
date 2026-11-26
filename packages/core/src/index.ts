@@ -1,6 +1,7 @@
 import type { Config, WorkspaceConfig } from '@tsugimori/config';
 import type { SummaryProvider } from '@tsugimori/context';
 import type {
+  AdminEvent,
   AdminReader,
   ApprovalFeedback,
   ChatRef,
@@ -139,6 +140,7 @@ export class Gateway {
   #stopping?: Promise<void>;
   #startedAt = 0;
   readonly admin: AdminReader;
+  readonly #adminReload = new Set<(event: AdminEvent) => void>();
   #state: 'new' | 'starting' | 'running' | 'stopping' = 'new';
 
   constructor({
@@ -156,6 +158,8 @@ export class Gateway {
     this.admin = adminReader({
       store,
       config: () => this.#runtime.config,
+      agentInfo: (id) => this.#runtime.adminAgentInfo(id),
+      reloadListeners: this.#adminReload,
       route: (chat, current) => this.#tasks.route(chat, current),
     });
     this.#registry = registry;
@@ -475,6 +479,13 @@ export class Gateway {
       this.#applyingConfig = false;
     }
     if (this.#state === 'running') {
+      for (const listener of this.#adminReload) {
+        try {
+          listener({ kind: 'reload' });
+        } catch {
+          this.#deps.log({ level: 'error', event: 'admin.listener_failed' });
+        }
+      }
       this.#scheduler.tick();
       this.#reportPlatformNotices();
     }

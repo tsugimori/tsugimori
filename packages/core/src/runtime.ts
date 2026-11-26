@@ -185,6 +185,34 @@ export class Runtime {
     return this.#adapters.get(id)?.notices.splice(0) ?? [];
   }
 
+  adminAgentInfo(id: string) {
+    const attachment = this.attachments.agents.find((agent) => agent.id === id);
+    const config = this.config.agents.find((agent) => agent.id === id);
+    const login = this.#reports.find(
+      ({ target, id: check }) =>
+        target === `agent/${id}` &&
+        ['claude-login', 'codex-login', 'login-pending'].includes(check),
+    );
+    return {
+      implementation: attachment?.implementation,
+      isDefault:
+        id === (this.config.defaultAgent ?? this.defaultAgent()?.agent.id),
+      model: config?.model ?? this.getAgent(id)?.defaults?.model,
+      login:
+        login?.status === 'ok'
+          ? ('signed-in' as const)
+          : login?.status === 'fail'
+            ? ('required' as const)
+            : ('unknown' as const),
+      state:
+        attachment?.state === 'disabled'
+          ? ('disabled' as const)
+          : attachment?.state === 'running'
+            ? ('ready' as const)
+            : ('error' as const),
+    };
+  }
+
   getAgent(id: string) {
     return this.#agents.get(id);
   }

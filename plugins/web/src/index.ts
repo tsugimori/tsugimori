@@ -7,27 +7,20 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 
 import { createServer } from 'node:http';
-
-import type { ViewContext } from './format.ts';
-import type { Section } from './layout.ts';
+import { fileURLToPath } from 'node:url';
 
 import { createAccessVerifier } from './access.ts';
-import { escapeHtml } from './format.ts';
-import { i18n } from './i18n.ts';
-import { page } from './layout.ts';
-import { approvalsView } from './views/approvals.ts';
-import { chatView } from './views/chat.ts';
-import { overviewView } from './views/overview.ts';
-import { schedulesView } from './views/schedules.ts';
-import { chatTitle } from './views/shared.ts';
-import { traceView } from './views/trace.ts';
+import { Assets } from './assets.ts';
+import { AdminEvents } from './events.ts';
 
 export { createAccessVerifier };
 
 interface WebDependencies {
   logError?(): void;
   now?(): number;
+  pingMs?: number;
   reader: AdminReader;
+  uiDirectory?: string;
   verify?: VerifyAccess;
 }
 
@@ -37,21 +30,33 @@ interface WebOptions {
   listen?: string;
 }
 
+const html = 'text/html; charset=utf-8';
+const jsonType = 'application/json; charset=utf-8';
+const csp =
+  "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; font-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
+const uiDirectory = fileURLToPath(
+  new URL(
+    import.meta.url.endsWith('/src/index.ts') ? '../dist/ui/' : './ui/',
+    import.meta.url,
+  ),
+);
+
 function respond(
   response: ServerResponse,
   status: number,
-  body: string,
-  contentType = 'text/plain; charset=utf-8',
+  body: string | Buffer,
+  type = 'text/plain; charset=utf-8',
+  cache = 'no-store',
 ) {
   response.writeHead(status, {
-    'Cache-Control': 'no-store',
-    'Content-Type': contentType,
-    'Content-Security-Policy':
-      "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'",
-    'Referrer-Policy': 'no-referrer',
-    'X-Content-Type-Options': 'nosniff',
+    'Cache-Control': cache,
+    'Content-Type': type,
   });
   response.end(body);
+}
+
+function apiError(response: ServerResponse, status: number, error: string) {
+  respond(response, status, JSON.stringify({ error }), jsonType);
 }
 
 function isLocal(request: IncomingMessage) {
@@ -67,22 +72,39 @@ function isLocal(request: IncomingMessage) {
   );
 }
 
+function positiveInt(value: string | null) {
+  const number = Number(value);
+  return /^\d+$/.test(value ?? '') && Number.isSafeInteger(number) && number > 0
+    ? number
+    : undefined;
+}
+
 export class AdminServer {
   readonly #deps: WebDependencies;
   readonly #options: WebOptions;
   readonly #verify: VerifyAccess;
+  readonly #assets: Assets;
+  readonly #events: AdminEvents;
   readonly #server;
+  #unsubscribe?: () => void;
+  #stopping = false;
 
   constructor(deps: WebDependencies, options: WebOptions = {}) {
     this.#deps = deps;
     this.#options = options;
     this.#verify = deps.verify ?? createAccessVerifier();
+    this.#assets = new Assets(deps.uiDirectory ?? uiDirectory);
+    this.#events = new AdminEvents(deps.pingMs);
     this.#server = createServer((request, response) => {
+      response.setHeader('Content-Security-Policy', csp);
+      response.setHeader('Referrer-Policy', 'no-referrer');
+      response.setHeader('X-Content-Type-Options', 'nosniff');
       void this.#handle(request, response).catch(() => {
         this.#deps.logError?.();
-        if (!response.headersSent)
-          this.#error(request, response, 500, 'internal');
-        else response.destroy();
+        if (response.headersSent) response.destroy();
+        else if (request.url?.startsWith('/api'))
+          apiError(response, 500, 'internal');
+        else respond(response, 500, 'Internal server error.');
       });
     });
   }
@@ -104,11 +126,18 @@ export class AdminServer {
     } finally {
       this.#server.off('error', listening.reject);
     }
+    this.#stopping = false;
+    this.#unsubscribe = this.#deps.reader.subscribe((event) =>
+      this.#events.publish(event),
+    );
     return this.#server.address() as AddressInfo;
   }
 
   async stop() {
     if (!this.#server.listening) return;
+    this.#stopping = true;
+    this.#unsubscribe?.();
+    this.#events.close();
     const closed = Promise.withResolvers<void>();
     this.#server.close((error) =>
       error ? closed.reject(error) : closed.resolve(),
@@ -117,139 +146,140 @@ export class AdminServer {
     await closed.promise;
   }
 
-  #error(
-    request: IncomingMessage,
-    response: ServerResponse,
-    status: number,
-    key: 'internal' | 'forbidden' | 'method' | 'invalidChat' | 'notFound',
-    ctx?: ViewContext,
-  ) {
-    let workspace: Pick<ViewContext, 'locale' | 'name'> = { locale: 'en' };
-    try {
-      const { locale, name } = ctx ?? this.#deps.reader.workspace();
-      workspace = { locale, name: status === 403 ? undefined : name };
-    } catch {
-      // The error page remains available if workspace metadata cannot be read.
-    }
-    const m = i18n(workspace.locale);
-    if (request.url?.startsWith('/api/')) {
-      respond(response, status, m[key]);
-      return;
-    }
-    respond(
-      response,
-      status,
-      page({
-        ...workspace,
-        schedules: status !== 403 && Boolean(this.#deps.reader.schedules),
-        pending: ctx?.pending,
-        title: m.error,
-        body: `<section class="card error-page"><h1>${m.error} ${status}</h1><p>${escapeHtml(m[key])}</p></section>`,
-      }),
-      'text/html; charset=utf-8',
-    );
-  }
-
   async #handle(request: IncomingMessage, response: ServerResponse) {
     const jwt = request.headers['cf-access-jwt-assertion'];
     const { access, allowLocalWithoutAccess } = this.#options;
+    const raw = request.url ?? '/';
+    const path = raw.split('?', 1)[0]!;
+    const api = path === '/api' || path.startsWith('/api/');
     if (
       !(allowLocalWithoutAccess && isLocal(request)) &&
       !(access && typeof jwt === 'string' && (await this.#verify(jwt, access)))
     ) {
-      this.#error(request, response, 403, 'forbidden');
+      if (api) apiError(response, 403, 'forbidden');
+      else respond(response, 403, 'Access denied.');
+      return;
+    }
+    if (this.#stopping || response.destroyed) {
+      response.destroy();
       return;
     }
     if (request.method !== 'GET') {
       response.setHeader('Allow', 'GET');
-      this.#error(request, response, 405, 'method');
+      if (api) apiError(response, 405, 'method');
+      else respond(response, 405, 'Only GET is supported.');
       return;
     }
-    const url = new URL(request.url ?? '/', 'http://127.0.0.1');
-    const api = url.pathname.startsWith('/api/');
-    const route = api ? url.pathname.slice(4) : url.pathname;
-    const { reader } = this.#deps;
-    const json = (data: unknown) =>
-      respond(
+    // Inspect the path before URL normalizes dot segments and backslashes.
+    if (
+      /(?:^|\/)(?:\.|%2e){1,2}(?:\/|$)|%(?:2f|5c)|\\/i.test(path) &&
+      !/^\/(?:chat|trace)\//.test(path)
+    ) {
+      respond(response, 404, 'Not found.');
+      return;
+    }
+    const url = new URL(raw, 'http://127.0.0.1');
+    if (api) return this.#api(url, request, response);
+    if (path === '/assets' || path.startsWith('/assets/')) {
+      const asset = await this.#assets.get(path.slice(1));
+      if (!asset) return respond(response, 404, 'Not found.');
+      return respond(
         response,
         200,
-        JSON.stringify(data),
-        'application/json; charset=utf-8',
+        asset.body,
+        asset.type,
+        'public, max-age=31536000, immutable',
       );
-    if (api && (route === '/' || route === '/chats'))
-      return json(reader.chats());
-    const workspace = reader.workspace();
-    const now = this.#deps.now?.() ?? Date.now();
-    const m = i18n(workspace.locale);
-    const overview =
-      !api && (route === '/' || route === '/chats')
-        ? reader.overview(now)
-        : undefined;
-    const ctx: ViewContext = {
-      ...workspace,
-      now,
-      pending: api
-        ? 0
-        : (overview?.totals.pendingApprovals ?? reader.pendingApprovals(now)),
-      schedules: Boolean(reader.schedules),
-    };
-    const show = <T>(
-      title: string,
-      active: Section,
-      data: T,
-      view: (data: T, ctx: ViewContext) => string,
-    ) => {
-      if (api) return json(data);
-      respond(
-        response,
-        200,
-        page({ ...ctx, title, active, body: view(data, ctx) }),
-        'text/html; charset=utf-8',
-      );
-    };
-    if ((route === '/' || route === '/chats') && overview)
-      return show(
-        route === '/' ? m.overview : m.chats,
-        route === '/' ? 'overview' : 'chats',
-        overview,
-        (data, ctx) => overviewView(data, ctx, route === '/chats'),
-      );
-    if (route === '/approvals')
-      return show(
-        m.approvals,
-        'approvals',
-        reader.approvals(api ? undefined : 50),
-        approvalsView,
-      );
-    if (route === '/schedules' && reader.schedules)
-      return show(m.schedules, 'schedules', reader.schedules(), schedulesView);
-    if (route === '/chat') {
-      const adapterId = url.searchParams.get('adapter');
-      const chatId = url.searchParams.get('id');
-      const cursor = url.searchParams.get('before');
-      const before = cursor === null ? undefined : Number(cursor);
-      if (
-        !adapterId ||
-        !chatId ||
-        (before !== undefined && (!Number.isSafeInteger(before) || before < 1))
-      ) {
-        this.#error(request, response, 400, 'invalidChat', ctx);
-        return;
-      }
-      const data = reader.chat({ adapterId, chatId }, before);
-      if (data)
-        return show(
-          `${m.chat} · ${chatTitle(data.chat)}`,
-          'chats',
-          data,
-          chatView,
+    }
+    const query = url.searchParams;
+    const adapter = query.get('adapter');
+    const id = query.get('id');
+    const topic = query.get('topic');
+    const task = query.get('task');
+    let redirect: string | undefined;
+    if (path === '/chat' && adapter && id) {
+      redirect = [
+        '/chat',
+        encodeURIComponent(adapter),
+        encodeURIComponent(id),
+        ...(topic ? [encodeURIComponent(topic)] : []),
+      ].join('/');
+      const before = positiveInt(query.get('before'));
+      if (before !== undefined) redirect += `?before=${before}`;
+    }
+    if (path === '/trace' && task)
+      redirect = '/trace/' + encodeURIComponent(task);
+    if (redirect) {
+      response.setHeader('Location', redirect);
+      return respond(response, 302, '');
+    }
+    const index = await this.#assets.index();
+    return index
+      ? respond(response, 200, index, html)
+      : respond(
+          response,
+          503,
+          '<!doctype html><html lang="en"><title>Console unavailable</title><p>The admin UI is not built.</p></html>',
+          html,
         );
+  }
+
+  #api(url: URL, request: IncomingMessage, response: ServerResponse) {
+    const { reader } = this.#deps;
+    const query = url.searchParams;
+    const now = this.#deps.now?.() ?? Date.now();
+    const task = query.get('task');
+    const json = (data: unknown) =>
+      respond(response, 200, JSON.stringify(data), jsonType);
+    switch (url.pathname) {
+      case '/api/events':
+        return this.#events.open(
+          response,
+          request.headers['last-event-id'] as string | undefined,
+        );
+      case '/api/workspace':
+        return json({
+          ...reader.workspace(),
+          schedules: Boolean(reader.schedules),
+          pendingApprovals: reader.pendingApprovals(now),
+        });
+      case '/api/':
+      case '/api/chats':
+        return json(reader.chats());
+      case '/api/overview':
+        return json(reader.overview(now, query.get('agent') ?? undefined));
+      case '/api/agents':
+        return json(reader.agents(now));
+      case '/api/approvals':
+        return json(
+          reader.approvals(query.get('recent') === '50' ? 50 : undefined),
+        );
+      case '/api/schedules':
+        if (reader.schedules) return json(reader.schedules());
+        break;
+      case '/api/chat': {
+        const adapterId = query.get('adapter');
+        const chatId = query.get('id');
+        const cursor = query.get('before');
+        const before = positiveInt(cursor);
+        if (!adapterId || !chatId || (cursor !== null && !before))
+          return apiError(response, 400, 'invalidChat');
+        const data = reader.chat({ adapterId, chatId }, before);
+        if (data) return json(data);
+        break;
+      }
+      case '/api/trace': {
+        const trace = task ? reader.trace(task) : undefined;
+        if (trace) return json(trace);
+        break;
+      }
+      case '/api/tool-call': {
+        const seq = positiveInt(query.get('seq'));
+        const call = task && seq ? reader.toolCall(task, seq) : undefined;
+        if (call) return json(call);
+        break;
+      }
     }
-    if (route === '/trace') {
-      const taskId = url.searchParams.get('task');
-      const data = taskId ? reader.trace(taskId) : undefined;
-      if (data) return show(m.traceTitle, 'chats', data, traceView);
-    }
-    this.#error(request, response, 404, 'notFound', ctx);
+    return apiError(response, 404, 'notFound');
   }
 }

@@ -36,11 +36,20 @@ For remote access, configure an HTTPS hostname on a named Cloudflare Tunnel that
 
 There is no web-specific `doctor` probe or dedicated `/status` row for the listener. Core checks report duplicate configured listener addresses, and a failure to bind the web port stops startup. After starting, open the admin URL to check routing and access.
 
+## Build and development
+
+Run `corepack pnpm --filter @tsugimori/web build` to emit the app into `dist/ui`. The workspace build also builds the console. The gateway serves JSON when the UI build is absent.
+
+For development, run the gateway on loopback with `allowLocalWithoutAccess: true`, then run `corepack pnpm --filter @tsugimori/web dev`. Vite proxies `/api`, including the live event stream, to `http://127.0.0.1:8787`. Set `TSUGIMORI_UI_GATEWAY` to use a different loopback gateway address.
+
 ## Views
 
-- **Overview** (`/`) shows today's task and failure totals, pending approvals, and chat cards with activity, routing, and summary progress. **Chats** (`/chats`) opens the chat list directly.
-- **Chat** shows the message and task timeline, recorded token usage, tool calls, and links to full traces.
-- **Trace** shows elapsed time by span, expandable attributes, and any recorded tool details.
+The console fetches the current state and then updates it over one Server-Sent Events connection. The header shows the connection state and the last event time. Reconnecting replays recent changes or refreshes the current page when the replay window has passed.
+
+- **Overview** (`/`) shows today's task and failure totals, pending approvals, and chat cards with message previews, tool activity, routing, and summary progress. **Chats** (`/chats`) opens the chat list directly.
+- **Agents** (`/agents`) shows agent state, model, sign-in, chat and task counts, and links to recent tasks.
+- **Chat** (`/chat/:adapter/:chatId[/:topic]`) follows the live timeline and opens task or message links. The details panel shows routing, summary coverage, approvals, and schedules. Expand a tool call to load its arguments and result in a JSON tree or raw view.
+- **Trace** (`/trace/:taskId`) shows elapsed time by span, expandable attributes, and any recorded tool details.
 - **Approvals** lists pending requests, the 50 latest handled requests, and grants. [Decisions go through the chat platform](../../README.md#approvals-and-schedules).
 - **Schedules** lists scheduled work, its status, and its next run.
 

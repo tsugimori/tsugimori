@@ -651,9 +651,11 @@ export function definePlugin(plugin: PluginDefinition): PluginDefinition {
 
 export type {
   AccessIdentity,
+  AdminAgent,
   AdminApprovals,
   AdminChat,
   AdminConversation,
+  AdminEvent,
   AdminOverview,
   AdminReader,
   AdminSchedules,

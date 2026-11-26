@@ -7,7 +7,7 @@ corepack pnpm install
 corepack pnpm check
 ```
 
-The check runs TypeScript, ESLint, Prettier, Node's test runner, and the package build. Run `corepack pnpm format` to apply formatting.
+The check runs TypeScript, Svelte diagnostics, ESLint, Prettier, Node's test runner, and the package build. The build includes the Svelte admin UI, which you can build separately with `corepack pnpm --filter @tsugimori/web build`. Run `corepack pnpm format` to apply formatting.
 
 Core libraries and the CLI live in `packages/`. Official plugins belong in `plugins/` and import framework contracts from `@tsugimori/plugin-sdk`. Keep platform and agent implementations out of the core packages. Use `definePlugin` for plugin definitions and register their factories by kind. For external approval requests, await `AgentIO.requestApproval` before performing the operation.
 

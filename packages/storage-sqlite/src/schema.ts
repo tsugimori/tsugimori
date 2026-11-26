@@ -132,18 +132,33 @@ export const agentSessions = sqliteTable(
   ],
 );
 
-export const tasks = sqliteTable('tasks', {
-  ...chatScope(),
-  id: text('id').primaryKey().notNull(),
-  sourceChatId: text('source_chat_id'),
-  sourceMessageId: text('source_message_id').notNull(),
-  status: text('status').$type<TaskStatus>().notNull(),
-  agentId: text('agent_id'),
-  model: text('model'),
-  createdAt: integer('created_at').notNull(),
-  startedAt: integer('started_at'),
-  finishedAt: integer('finished_at'),
-});
+export const tasks = sqliteTable(
+  'tasks',
+  {
+    ...chatScope(),
+    id: text('id').primaryKey().notNull(),
+    sourceChatId: text('source_chat_id'),
+    sourceMessageId: text('source_message_id').notNull(),
+    status: text('status').$type<TaskStatus>().notNull(),
+    agentId: text('agent_id'),
+    model: text('model'),
+    createdAt: integer('created_at').notNull(),
+    startedAt: integer('started_at'),
+    finishedAt: integer('finished_at'),
+  },
+  (table) => [
+    index('tasks_chat_created').on(
+      table.adapterId,
+      table.chatId,
+      table.createdAt,
+    ),
+    index('tasks_agent_created').on(table.agentId, table.createdAt),
+    index('tasks_created').on(table.createdAt),
+    index('tasks_failed_at')
+      .on(sql`coalesce(${table.finishedAt}, ${table.createdAt})`)
+      .where(sql`${table.status} in ('failed', 'delivery-unknown')`),
+  ],
+);
 
 export const toolCalls = sqliteTable(
   'tool_calls',
@@ -270,6 +285,11 @@ export const traceSpans = sqliteTable(
   },
   (table) => [
     index('trace_spans_started_at').on(table.startedAt),
+    index('trace_spans_task_started').on(
+      sql`json_extract(${table.attrs}, '$.taskId')`,
+      table.startedAt,
+      table.id,
+    ),
     index('trace_spans_session')
       .on(sessionScope(table.attrs), table.id)
       .where(sql`${sessionScope(table.attrs)} is not null`),

@@ -1,5 +1,6 @@
 import type {
   AdapterCursor,
+  AdminEvent,
   AdminToolCall,
   ApprovalFeedback,
   ChatRef,
@@ -287,18 +288,33 @@ export interface ToolCallRecord extends AdminToolCall {
 }
 
 export interface Store {
+  adminAgentActivity(
+    agentId: string,
+    since: number,
+    now: number,
+  ): {
+    active: number;
+    failedToday: number;
+    lastActivity: number | null;
+    recent: readonly TaskRecord[];
+    tasksToday: number;
+  };
   adminChatActivity(
     ref: ChatRef,
     now: number,
   ): {
     activeTask: TaskRecord | undefined;
+    currentTool: string | null;
     lastTask: TaskRecord | undefined;
     latestSeq: number;
     messageCount: number;
     messageTime: number | null;
     pendingApprovals: number;
+    preview: { sender: string | null; text: string } | null;
     threadId: string | null;
   };
+  adminChatApprovals(ref: ChatRef, now: number): readonly ApprovalRecord[];
+  adminChatSchedules(ref: ChatRef): readonly ScheduleRecord[];
   adminChatTasks(
     ref: ChatRef,
     page: {
@@ -307,6 +323,7 @@ export interface Store {
       oldestTime?: number | null;
     },
   ): (TaskRecord & { sourceSeq: number | null })[];
+  adminLastScheduleRun(id: string): number | null;
   adminTaskCounts(
     since: number,
     now: number,
@@ -315,6 +332,7 @@ export interface Store {
     pendingApprovals: number;
     tasksToday: number;
   };
+  adminToolCall(taskId: string, seq: number): ToolCallRecord | undefined;
   approvalStatus(
     ref: ChatRef,
     now: number,
@@ -505,6 +523,7 @@ export interface Store {
   ): void;
   setSession(session: AgentSession): void;
   setWorkspaceSettings(ref: ChatRef, settings: WorkspaceSettings): void;
+  subscribeAdmin?(listener: (event: AdminEvent) => void): () => void;
   summaryMessages(
     ref: ChatRef,
     afterSeq: number,
@@ -512,7 +531,10 @@ export interface Store {
     limit: number,
     offset?: number,
   ): MessageRecord[];
-  taskToolCalls(taskIds: readonly string[]): ToolCallRecord[];
+  taskToolCalls(
+    taskIds: readonly string[],
+    details?: boolean,
+  ): ToolCallRecord[];
   taskTrace(taskId: string): TraceSpan[];
   updateSchedule(
     schedule: ScheduleRecord,
