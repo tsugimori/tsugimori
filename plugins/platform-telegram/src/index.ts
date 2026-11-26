@@ -118,6 +118,11 @@ export class TelegramAdapter implements PlatformAdapter {
     return this.#botIdentity;
   }
 
+  async contactLink() {
+    const username = this.#botIdentity?.username;
+    if (username) return `https://t.me/${username}`;
+  }
+
   async start(ctx: AdapterContext) {
     if (this.#controller)
       throw new Error('Telegram adapter is already started');

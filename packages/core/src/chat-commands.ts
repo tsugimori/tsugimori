@@ -30,8 +30,8 @@ const descriptions = {
     'zh-TW': '查看或設定模型（default 還原）',
   },
   pair: {
-    en: 'Pair with the bot as its owner',
-    'zh-TW': '配對並成為機器人主人',
+    en: 'Get a new pairing code in DM (/pair new <adapterId>)',
+    'zh-TW': '在私訊取得新配對碼（/pair new <adapterId>）',
   },
   preview: { en: 'Close a preview', 'zh-TW': '關閉預覽' },
   previews: { en: 'List open previews', 'zh-TW': '列出開啟中的預覽' },
@@ -73,12 +73,19 @@ export function parseCommand(
 }
 
 export function chatCommands(locale: Config['locale']) {
-  const { pair, ...owner } = descriptions;
   return {
-    owner: Object.entries(owner).map(([name, localized]) => ({
+    owner: Object.entries(descriptions).map(([name, localized]) => ({
       name,
       description: localized[locale],
     })),
-    pair: [{ name: 'pair', description: pair[locale] }],
+    pair: [
+      {
+        name: 'pair',
+        description:
+          locale === 'zh-TW'
+            ? '配對並成為機器人主人'
+            : 'Pair with the bot as its owner',
+      },
+    ],
   };
 }

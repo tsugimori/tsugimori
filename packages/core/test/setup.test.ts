@@ -8,14 +8,16 @@ import type {
 } from '@tsugimori/plugin-sdk';
 import type { TestContext } from 'node:test';
 
+import { Auth } from '@tsugimori/auth';
 import { loadSettings } from '@tsugimori/config';
-import { SetupError } from '@tsugimori/plugin-sdk';
+import { PlatformStartError, SetupError } from '@tsugimori/plugin-sdk';
 import { SqliteStore } from '@tsugimori/storage-sqlite';
 import { Tracer } from '@tsugimori/trace';
 import assert from 'node:assert/strict';
 import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 
@@ -32,7 +34,19 @@ const group = {
   chatKind: 'supergroup',
 } as const;
 
-function fixturePlatform() {
+function fixturePlatform({
+  contactLink,
+  kind = 'chat',
+  onSend,
+  onStart,
+  setupSteps,
+}: {
+  contactLink?: string;
+  kind?: string;
+  onSend?(message: OutboundMessage): void;
+  onStart?(): void;
+  setupSteps?: PluginDefinition['setupSteps'];
+} = {}) {
   let callback: AdapterContext | undefined;
   const sent: (OutboundMessage & { messageId: string })[] = [];
   const removed: string[] = [];
@@ -40,14 +54,19 @@ function fixturePlatform() {
     sent,
     removed,
     plugin: {
-      name: 'chat',
+      name: kind,
       credentialNames: () => [],
+      setupSteps,
       adapters: {
-        chat: ({ id }) => ({
+        [kind]: ({ id }) => ({
           id,
-          kind: 'chat',
+          kind,
           capabilities: {},
+          async contactLink() {
+            return contactLink;
+          },
           async start(ctx) {
+            onStart?.();
             callback = ctx;
           },
           async stop() {
@@ -57,9 +76,10 @@ function fixturePlatform() {
             removed.push(messageId);
           },
           async send(message) {
+            onSend?.(message);
             const messageId = String(sent.length + 100);
             sent.push({ ...message, messageId });
-            return { messageId };
+            return { messageId, raw: { text: message.text } };
           },
         }),
       },
@@ -130,6 +150,274 @@ async function until<T>(find: () => T | undefined) {
     await delay(10, undefined, { signal });
   }
 }
+
+const codeLine = /^\/pair ([\w-]{16})$/m;
+const contactLink = 'https://example.com/new-bot';
+const configureTrial = {
+  id: 'configure',
+  title: 'Configure the trial bot',
+  asks: [],
+  run() {},
+};
+
+test('owner DM setup includes a usable code and contact link without saving the secret', async (t) => {
+  const origin = fixturePlatform();
+  const target = fixturePlatform({
+    kind: 'trial',
+    contactLink,
+    setupSteps: [configureTrial],
+  });
+  const { logs, store, trace, workspace } = await fixture(
+    t,
+    new PluginRegistry([origin.plugin, target.plugin]),
+  );
+  await origin.receive('add', '/add platform trial --id target');
+  const finish = await until(() =>
+    origin.sent.find(({ text }) => text.startsWith('target is attached.')),
+  );
+  assert.equal(finish.chatId, ownerId);
+  assert.match(
+    finish.text,
+    /direct message to the new bot .*within 10 minutes/,
+  );
+  assert.ok(finish.text.includes(contactLink));
+  const code = codeLine.exec(finish.text)?.[1];
+  assert.ok(code);
+  const dm = { adapterId, chatId: ownerId };
+  assert.equal(store.getMessage(dm, finish.messageId), undefined);
+  assert.ok(store.isSetupSecret(dm, finish.messageId));
+
+  await origin.receive('quote', 'Thanks', {
+    replyTo: { id: finish.messageId, text: finish.text },
+    raw: { reply: finish.text },
+  });
+  assert.equal(store.getMessage(dm, 'quote'), undefined);
+  await origin.receive('forward', finish.text, {
+    ...group,
+    raw: { forwardedMessage: finish.text },
+  });
+  const forwarded = store.getMessage(
+    { adapterId, chatId: '-100_7' },
+    'forward',
+  );
+  assert.match(forwarded?.text ?? '', /\/pair \[redacted\]/);
+  assert.equal(forwarded?.raw, null);
+
+  const db = new DatabaseSync(join(workspace, 'state.db'), { readOnly: true });
+  t.after(() => db.close());
+  const [row] = db.prepare('SELECT * FROM pairing_codes').all();
+  assert.equal(row?.adapter_id, 'target');
+  assert.equal(typeof row?.digest, 'string');
+  assert.ok(!JSON.stringify(row).includes(code));
+  await target.receive('claim', `/pair ${code}`, { raw: { code } });
+  assert.equal(store.getOwner('target'), ownerId);
+  assert.equal(target.sent.at(-1)?.text, 'Owner paired.');
+  assert.equal(
+    store.getMessage({ adapterId: 'target', chatId: ownerId }, 'claim')?.text,
+    '/pair [redacted]',
+  );
+  await trace.flush();
+  for (const table of [
+    'messages',
+    'tasks',
+    'task_records',
+    'setup_runs',
+    'trace_spans',
+  ]) {
+    const rows = db.prepare(`SELECT * FROM ${table}`).all();
+    assert.ok(!JSON.stringify(rows).includes(code), table);
+  }
+  assert.ok(!JSON.stringify([trace.recent, logs]).includes(code));
+});
+
+for (const fail of [false, true]) {
+  test(`group setup ${fail ? 'gives a private retry hint when DM fails' : 'sends the pairing code only in DM'}`, async (t) => {
+    const attempts: OutboundMessage[] = [];
+    const origin = fixturePlatform({
+      onSend(message) {
+        if (!codeLine.test(message.text)) return;
+        attempts.push(message);
+        if (fail) throw new Error(`API rejected message: ${message.text}`);
+      },
+    });
+    const target = fixturePlatform({
+      kind: 'trial',
+      contactLink,
+      setupSteps: [configureTrial],
+    });
+    const { logs, trace } = await fixture(
+      t,
+      new PluginRegistry([origin.plugin, target.plugin]),
+    );
+    await origin.receive('add', '/add platform trial --id target', group);
+    const finish = await until(() =>
+      origin.sent.find(({ text }) => text.startsWith('target is attached.')),
+    );
+    assert.equal(finish.chatId, group.chatId);
+    assert.equal(finish.threadId, group.threadId);
+    assert.match(
+      finish.text,
+      fail
+        ? /couldn’t deliver.*\/pair new target/
+        : /sent the pairing code in a direct message/,
+    );
+    assert.equal(attempts.length, 1);
+    const dm = attempts[0]!;
+    assert.equal(dm.chatId, ownerId);
+    assert.equal(dm.threadId, undefined);
+    assert.ok(dm.text.includes(contactLink));
+    const code = codeLine.exec(dm.text)?.[1];
+    assert.ok(code);
+    assert.ok(!JSON.stringify([finish, logs, trace.recent]).includes(code));
+    assert.equal(
+      origin.sent.some(({ text }) => codeLine.test(text)),
+      !fail,
+    );
+  });
+}
+
+test('setup does not issue a code for an already-paired adapter', async (t) => {
+  const origin = fixturePlatform();
+  const target = fixturePlatform({
+    kind: 'trial',
+    setupSteps: [configureTrial],
+  });
+  const { store } = await fixture(
+    t,
+    new PluginRegistry([origin.plugin, target.plugin]),
+  );
+  const auth = new Auth({ store });
+  assert.ok(
+    auth.claimPairing('target', 'existing', auth.createPairingCode('target')),
+  );
+  await origin.receive('add', '/add platform trial --id target');
+  const finish = await until(() =>
+    origin.sent.find(({ text }) => text.startsWith('target is attached.')),
+  );
+  assert.equal(finish.text, 'target is attached.');
+  assert.equal(store.getOwner('target'), 'existing');
+});
+
+for (const disabled of [false, true]) {
+  test(`setup gives a pairing hint for a ${disabled ? 'disabled' : 'saved but unattached'} platform`, async (t) => {
+    const timeout = AbortSignal.timeout;
+    t.mock.method(AbortSignal, 'timeout', (ms: number) =>
+      timeout(ms === 15_000 ? 250 : ms),
+    );
+    const origin = fixturePlatform();
+    const target = fixturePlatform({
+      kind: 'trial',
+      onStart() {
+        throw new PlatformStartError('Trial bot could not start', {
+          failure: {
+            id: 'trial.start',
+            title: 'Trial startup',
+            status: 'fail',
+            detail: 'Trial bot could not start',
+          },
+        });
+      },
+      setupSteps: [
+        {
+          ...configureTrial,
+          run(ctx) {
+            ctx.writeConfig({ entry: { enabled: !disabled } });
+          },
+        },
+      ],
+    });
+    const { workspace } = await fixture(
+      t,
+      new PluginRegistry([origin.plugin, target.plugin]),
+    );
+    await origin.receive('add', '/add platform trial --id target');
+    const finish = await until(() =>
+      origin.sent.find(({ text }) => text.includes('/pair new target')),
+    );
+    assert.match(
+      finish.text,
+      disabled
+        ? /target .*disabled/
+        : /Setup saved for target, but it has not attached/,
+    );
+    assert.match(finish.text, /Once the platform is running/);
+    assert.doesNotMatch(finish.text, codeLine);
+    const db = new DatabaseSync(join(workspace, 'state.db'), {
+      readOnly: true,
+    });
+    t.after(() => db.close());
+    assert.deepEqual(db.prepare('SELECT * FROM pairing_codes').all(), []);
+  });
+}
+
+test('/pair new is an owner DM command and replaces the previous code', async (t) => {
+  const origin = fixturePlatform();
+  const target = fixturePlatform({ kind: 'trial' });
+  const owned = fixturePlatform({ kind: 'owned-kind' });
+  const { store } = await fixture(
+    t,
+    new PluginRegistry([
+      origin.plugin,
+      target.plugin,
+      owned.plugin,
+      {
+        name: 'dummy-agent',
+        agents: { dummy: () => assert.fail('Disabled agent started') },
+      },
+    ]),
+    {
+      owner: { [adapterId]: ownerId, 'owned-kind': 'someone' },
+      platforms: [
+        { id: adapterId, kind: 'chat' },
+        { id: 'target', kind: 'trial' },
+        { id: 'owned', kind: 'owned-kind', enabled: false },
+      ],
+      agents: [{ id: 'agent-target', kind: 'dummy', enabled: false }],
+    },
+  );
+  const command = '/pair new target';
+  const previousCount = origin.sent.length;
+  await origin.receive('member', command, { userId: '43', chatId: '43' });
+  await target.receive('unowned', command);
+  assert.equal(origin.sent.length, previousCount);
+  assert.equal(target.sent.length, 0);
+  await origin.receive('group', command, group);
+  assert.match(
+    origin.sent.at(-1)?.text ?? '',
+    /Use \/pair new in a direct message/,
+  );
+  await origin.receive('unknown', '/pair new unknown');
+  assert.match(origin.sent.at(-1)?.text ?? '', /Unknown adapter: unknown/);
+  await origin.receive('wrong-category', '/pair new agent-target');
+  assert.match(
+    origin.sent.at(-1)?.text ?? '',
+    /Pairing requires a platform adapter/,
+  );
+  await origin.receive('owned', '/pair new owned');
+  assert.match(origin.sent.at(-1)?.text ?? '', /owned already has an owner/);
+
+  await origin.receive('first', command);
+  const first = codeLine.exec(origin.sent.at(-1)?.text ?? '')?.[1];
+  assert.ok(first);
+  await origin.receive('second', command);
+  const latest = origin.sent.at(-1)!;
+  const second = codeLine.exec(latest.text)?.[1];
+  assert.ok(second);
+  assert.notEqual(second, first);
+  assert.doesNotMatch(latest.text, /https?:/);
+  assert.equal(
+    store.getMessage({ adapterId, chatId: ownerId }, latest.messageId),
+    undefined,
+  );
+  await target.receive('old', `/pair ${first}`);
+  assert.equal(target.sent.at(-1)?.text, 'Pairing code is invalid or expired.');
+  await target.receive('new', `/pair ${second}`);
+  assert.equal(target.sent.at(-1)?.text, 'Owner paired.');
+  await origin.receive('paired', command);
+  assert.match(origin.sent.at(-1)?.text ?? '', /target already has an owner/);
+  await origin.receive('help', '/help');
+  assert.match(origin.sent.at(-1)?.text ?? '', /\/pair new <adapterId>/);
+});
 
 test('guided add suggests available platform names, retries once, and honors explicit IDs', async (t) => {
   const workspace = await mkdtemp(join(tmpdir(), 'tsugimori-names-'));

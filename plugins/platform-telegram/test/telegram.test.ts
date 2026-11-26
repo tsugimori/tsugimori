@@ -89,6 +89,7 @@ test(
     };
     const adapter = new TelegramAdapter({ fetch: fakeFetch }, 'tg', '1:fake');
     t.after(() => adapter.stop());
+    assert.equal(await adapter.contactLink(), undefined);
     const events: InboundEvent[] = [];
     let cursor: AdapterCursor | undefined;
     const context = {
@@ -107,6 +108,7 @@ test(
     };
     const ready = Promise.withResolvers<void>();
     await adapter.start({ ...context, ready: ready.promise });
+    assert.equal(await adapter.contactLink(), 'https://t.me/examplebot');
     assert.equal(polls.length, 0);
     ready.resolve();
     await received.promise;

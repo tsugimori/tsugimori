@@ -221,6 +221,7 @@ test(
         'help',
         'login',
         'model',
+        'pair',
         'preview',
         'previews',
         'remove',

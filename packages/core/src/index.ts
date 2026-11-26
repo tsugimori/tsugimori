@@ -66,9 +66,14 @@ import { Executions, sandboxScope } from './executions.ts';
 import { guideTools } from './guides.ts';
 import { historyTools } from './history.ts';
 import { HookRunner, logToStderr } from './hooks.ts';
-import { hasPrivateArguments, resolveReplyTarget } from './inbound-message.ts';
+import {
+  hasPrivateArguments,
+  redactPairingCodes,
+  resolveReplyTarget,
+} from './inbound-message.ts';
 import { Memory, memoryAction } from './memory.ts';
 import { conversationId, Outbound } from './outbound.ts';
+import { pairingContact } from './pairing.ts';
 import { Previews } from './previews.ts';
 import { PluginRegistry } from './registry.ts';
 import { removalMessages } from './removal-messages.ts';
@@ -289,6 +294,7 @@ export class Gateway {
       store,
     });
     this.#chatSetup = new ChatSetup({
+      auth: this.#auth,
       redact: (text) => toolDetails.redactor()(text),
       choices: this.#chatChoices,
       setup: new GuidedSetup({
@@ -298,8 +304,8 @@ export class Gateway {
         registry,
         webhooks: this.#webhooks,
       }),
-      isOwner: (adapterId, userId) => this.#auth.isOwner({ adapterId, userId }),
       runtime: this.#runtime,
+      outbound: this.#outbound,
       log,
       store,
       trace: this.#trace,
@@ -1044,6 +1050,8 @@ export class Gateway {
       return;
     }
     const privateCommand = command && hasPrivateArguments(command.name);
+    const redactedText = redactPairingCodes(event.text);
+    const privateRaw = privateCommand || redactedText !== event.text;
     const replyId = event.replyTo?.id;
     const { replyTo, sensitiveReply } = resolveReplyTarget(
       { store, bot: adapter.botIdentity },
@@ -1078,11 +1086,11 @@ export class Gateway {
           text:
             privateCommand && command?.args
               ? `/${command.name} [redacted]`
-              : event.text ||
+              : redactedText ||
                 (event.attachments?.length
                   ? `[${event.attachments[0]!.kind}]`
                   : ''),
-          raw: privateCommand || sensitiveReply ? null : (event.raw ?? null),
+          raw: privateRaw || sensitiveReply ? null : (event.raw ?? null),
         },
         event.edited,
       ),
@@ -1103,7 +1111,7 @@ export class Gateway {
     const message = {
       ...event,
       replyTo,
-      raw: privateCommand || sensitiveReply ? undefined : event.raw,
+      raw: privateRaw || sensitiveReply ? undefined : event.raw,
       text: stored.text,
     };
     await this.#hooks.emit('inbound.received', { chat, message });
@@ -1758,6 +1766,55 @@ export class Gateway {
     }
   }
 
+  async #newPairingCode(
+    adapter: PlatformAdapter,
+    message: InboundMessage,
+    args: string,
+  ) {
+    const { config } = this.#runtime;
+    const { pairing } = systemMessages(config.locale);
+    const send = (text: string) =>
+      this.#outbound.send(adapter, reply(message, text));
+    if (message.chatKind !== 'dm') {
+      await send(pairing.directOnly);
+      return;
+    }
+    const id = /^new\s+([A-Za-z0-9_][A-Za-z0-9_.:-]*)$/i.exec(args)?.[1];
+    if (!id) {
+      await send(pairing.useNew);
+      return;
+    }
+    const target = this.#runtime.getAdapter(id);
+    const link = await pairingContact(this.#trace, target);
+    if (
+      this.#isStopping() ||
+      this.#runtime.getAdapter(adapter.id) !== adapter ||
+      !this.#auth.isOwner({ adapterId: adapter.id, userId: message.userId })
+    )
+      return;
+    const current = this.#runtime.config;
+    if (!current.platforms.some((entry) => entry.id === id)) {
+      await send(
+        current.agents.some((entry) => entry.id === id)
+          ? pairing.platformOnly(id)
+          : pairing.unknown(id),
+      );
+      return;
+    }
+    if (this.#auth.owner(id)) {
+      await send(pairing.owned(id));
+      return;
+    }
+    const code = this.#auth.createPairingCode(id);
+    const text = pairing.code(
+      id,
+      code,
+      this.#runtime.getAdapter(id) === target ? link : undefined,
+    );
+    if (!(await this.#outbound.sendSecret(adapter, reply(message, text))))
+      await send(pairing.sendFailed(id));
+  }
+
   async #command(
     adapter: PlatformAdapter,
     chat: ChatRef,
@@ -1858,6 +1915,10 @@ export class Gateway {
       else if (finish) await finish(selectedCommand);
     };
     if (name === 'pair') {
+      if (/^new(?:\s|$)/i.test(args)) {
+        if (owner) await this.#newPairingCode(adapter, message, args);
+        return;
+      }
       if (message.chatKind !== 'dm' || this.#auth.owner(adapter.id)) return;
       const paired = this.#auth.claimPairing(adapter.id, message.userId, args);
       if (paired) this.#commandMenus.sync(adapter);

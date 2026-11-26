@@ -248,6 +248,10 @@ test('webhook validates the raw signature and body, and acknowledges before emit
     username: 'test-bot',
     displayName: bot.displayName,
   });
+  assert.equal(
+    await f.adapter.contactLink(),
+    'https://line.me/R/ti/p/%40test-bot',
+  );
   const event = message(
     'm1',
     { type: 'user', userId },

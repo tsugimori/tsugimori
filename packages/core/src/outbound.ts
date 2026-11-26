@@ -92,6 +92,31 @@ export class Outbound {
     return update;
   }
 
+  async sendSecret(adapter: PlatformAdapter, message: OutboundMessage) {
+    const { log, store, trace } = this.#deps;
+    const chat = { adapterId: adapter.id, chatId: conversationId(message) };
+    const mark = (parts: readonly Pick<SendPart, 'chatId' | 'messageId'>[]) => {
+      for (const { chatId, messageId } of parts)
+        store.markSetupSecret(
+          chatId === undefined ? chat : { ...chat, chatId },
+          messageId,
+        );
+    };
+    // Send directly so the secret and provider receipt stay out of hooks and history.
+    let receipt: SendReceipt;
+    try {
+      receipt = await trace.span('outbound.secret', chat, () =>
+        adapter.send(message),
+      );
+    } catch (error) {
+      if (error instanceof SendFailure) mark(error.parts);
+      log({ level: 'warn', event: 'outbound.secret_failed', ...chat });
+      return false;
+    }
+    mark(receipt.parts?.length ? receipt.parts : [receipt]);
+    return true;
+  }
+
   async send(
     adapter: PlatformAdapter,
     message: OutboundMessage,

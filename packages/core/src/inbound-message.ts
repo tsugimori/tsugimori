@@ -13,6 +13,13 @@ export function hasPrivateArguments(name: string) {
   );
 }
 
+export function redactPairingCodes(text: string) {
+  return text.replace(
+    /(\/pair(?:@[a-z0-9_]+)?\s+)[\w-]{16}(?![\w-])/gi,
+    '$1[redacted]',
+  );
+}
+
 export function resolveReplyTarget(
   { store, bot }: { bot: PlatformAdapter['botIdentity']; store: Store },
   chat: ChatRef,
@@ -27,6 +34,10 @@ export function resolveReplyTarget(
   if (
     quoted?.deleted ||
     store.isSetupSecret(chat, reply.id) ||
+    (reply.text !== undefined &&
+      redactPairingCodes(reply.text) !== reply.text) ||
+    (reply.quote !== undefined &&
+      redactPairingCodes(reply.quote) !== reply.quote) ||
     (command && command !== 'other-bot' && hasPrivateArguments(command.name))
   )
     return { replyTo: { id: reply.id }, sensitiveReply: true };

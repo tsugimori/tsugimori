@@ -134,6 +134,12 @@ export class LineAdapter implements PlatformAdapter {
     return this.#botIdentity;
   }
 
+  async contactLink() {
+    const username = this.#botIdentity?.username;
+    if (username)
+      return `https://line.me/R/ti/p/${encodeURIComponent(`@${username}`)}`;
+  }
+
   async start(ctx: AdapterContext) {
     if (this.#listener) throw new Error('LINE adapter is already started');
     const controller = new AbortController();

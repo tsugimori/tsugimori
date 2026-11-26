@@ -283,6 +283,8 @@ export interface PlatformAdapter {
   /** The bot's native identity. The username excludes the @ prefix. */
   readonly botIdentity?: { id?: string; username: string };
   capabilities: PlatformCapabilities;
+  /** A public link for opening a direct chat with the bot, when available. */
+  contactLink?(): Promise<string | undefined>;
   deleteMessage?(
     message: Pick<InboundMessage, 'chatId' | 'messageId'>,
   ): Promise<void>;

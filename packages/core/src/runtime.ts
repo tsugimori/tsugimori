@@ -163,7 +163,10 @@ export class Runtime {
   }
 
   adapterKind(id: string) {
-    return this.#adapters.get(id)?.config.kind;
+    return (
+      this.#adapters.get(id)?.config.kind ??
+      this.config.platforms.find((entry) => entry.id === id)?.kind
+    );
   }
 
   getAdapter(id: string) {

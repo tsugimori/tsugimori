@@ -1,3 +1,4 @@
+import type { Auth } from '@tsugimori/auth';
 import type {
   ChatRef,
   InboundMessage,
@@ -13,6 +14,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import type { ChatChoices } from './chat-choices.ts';
 import type { Command } from './chat-commands.ts';
 import type { Logger } from './hooks.ts';
+import type { Outbound } from './outbound.ts';
 import type { Runtime } from './runtime.ts';
 import type { GuidedSetup, SetupRequest } from './setup.ts';
 
@@ -21,6 +23,7 @@ import { choiceLabel, supportsChoices } from './chat-choices.ts';
 import { failureText } from './checks.ts';
 import { describeError } from './errors.ts';
 import { conversationId } from './outbound.ts';
+import { pairingContact } from './pairing.ts';
 import { SetupCancelled } from './setup.ts';
 import { systemMessages } from './system-messages.ts';
 import { reply } from './tasks.ts';
@@ -46,9 +49,10 @@ interface Running {
 }
 
 interface Dependencies {
+  auth: Auth;
   choices: ChatChoices;
-  isOwner(adapterId: string, userId: string): boolean;
   log: Logger;
+  outbound: Outbound;
   redact(text: string): string;
   runtime: Runtime;
   setup: GuidedSetup;
@@ -73,9 +77,12 @@ export class ChatSetup {
     message: InboundMessage,
     command?: Command['name'] | 'other-bot',
   ) {
-    const { store, trace } = this.#deps;
+    const { auth, store, trace } = this.#deps;
     const prompt = this.#pending;
-    const owner = this.#deps.isOwner(adapter.id, message.userId);
+    const owner = auth.isOwner({
+      adapterId: adapter.id,
+      userId: message.userId,
+    });
     if (command === 'cancel') {
       if (owner && !message.edited)
         await trace.span('trigger.command', { ...chat, command }, () =>
@@ -87,6 +94,7 @@ export class ChatSetup {
       prompt &&
       !this.#running?.cancel.signal.aborted &&
       command !== 'other-bot' &&
+      command !== 'pair' &&
       owner &&
       prompt.adapterId === chat.adapterId &&
       prompt.userId === message.userId;
@@ -217,16 +225,17 @@ export class ChatSetup {
     message: InboundMessage,
     request: SetupRequest,
   ) {
-    const { log, redact, runtime, setup, store, trace } = this.#deps;
+    const { auth, log, outbound, redact, runtime, setup, store, trace } =
+      this.#deps;
     const { locale } = runtime.config;
-    const m = systemMessages(locale).setup;
+    const { pairing, setup: m } = systemMessages(locale);
     const adapterId = adapter.id;
     const cancel = new AbortController();
     const signal = AbortSignal.any([this.#shutdown.signal, cancel.signal]);
     const platform = () => {
       signal.throwIfAborted();
       const current = runtime.getAdapter(adapterId);
-      if (!current || !this.#deps.isOwner(adapterId, message.userId))
+      if (!current || !auth.isOwner({ adapterId, userId: message.userId }))
         throw new SetupError(m.changedOwner);
       return current;
     };
@@ -421,34 +430,86 @@ export class ChatSetup {
         });
         if (this.#running?.cancel === cancel) this.#running.finished = true;
         if (cancel.signal.aborted) return;
-        const finish = (text: string) =>
-          show([text, result.summary].filter(Boolean).join('\n'));
-        if (result.category === 'webhook' || result.summaryOnly) {
+        const finishText = (status?: string, pairingNote?: string) =>
+          [status, result.summary, pairingNote].filter(Boolean).join('\n');
+        if (result.category === 'webhook') {
           if (result.summary) await show(result.summary);
           return;
         }
+        const isPlatform = result.category === 'platform';
+        const retry = isPlatform
+          ? pairing.retryWhenRunning(result.id)
+          : undefined;
         if (!result.enabled) {
-          await finish(m.disabled(result.id));
+          await show(finishText(m.disabled(result.id), retry));
           return;
         }
         const attached = () =>
           result.category === 'agent'
             ? runtime.getAgent(result.id)
             : runtime.getAdapter(result.id);
-        const wait = AbortSignal.any([signal, AbortSignal.timeout(15_000)]);
-        try {
-          while (!attached()) await delay(50, undefined, { signal: wait });
-          await finish(m.attached(result.id));
-        } catch (error) {
-          if (signal.aborted) throw error;
+        const saved = () => {
           const details = failureText(
             runtime.reports.filter(
               ({ target }) => target === `${result.category}/${result.id}`,
             ),
             locale,
           );
-          await finish(m.saved(result.id) + '\n' + (details || m.checkStatus));
+          return show(
+            finishText(
+              m.saved(result.id) + '\n' + (details || m.checkStatus),
+              retry,
+            ),
+          );
+        };
+        const wait = AbortSignal.any([signal, AbortSignal.timeout(15_000)]);
+        try {
+          while (!attached()) await delay(50, undefined, { signal: wait });
+        } catch (error) {
+          if (signal.aborted) throw error;
+          await saved();
+          return;
         }
+        const heading =
+          result.summaryOnly && result.summary
+            ? undefined
+            : m.attached(result.id);
+        const target = isPlatform ? runtime.getAdapter(result.id) : undefined;
+        if (!target || auth.owner(result.id)) {
+          await show(finishText(heading));
+          return;
+        }
+        const link = await pairingContact(trace, target);
+        const originAdapter = platform();
+        const current = runtime.getAdapter(result.id);
+        if (!current) {
+          await saved();
+          return;
+        }
+        if (auth.owner(result.id)) {
+          await show(finishText(heading));
+          return;
+        }
+        const code = auth.createPairingCode(result.id);
+        const instructions = pairing.code(
+          result.id,
+          code,
+          current === target ? link : undefined,
+        );
+        const direct = message.chatKind === 'dm';
+        const delivered = await outbound.sendSecret(
+          originAdapter,
+          direct
+            ? reply(message, finishText(heading, instructions))
+            : { chatId: message.userId, text: instructions },
+        );
+        if (!direct || !delivered)
+          await show(
+            finishText(
+              heading,
+              delivered ? pairing.sentPrivately : pairing.sendFailed(result.id),
+            ),
+          );
       } catch (error) {
         if (error instanceof SetupCancelled) return error;
         if (!this.#shutdown.signal.aborted && !cancel.signal.aborted) {
