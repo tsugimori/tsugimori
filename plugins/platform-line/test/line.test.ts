@@ -794,6 +794,27 @@ test('setup hides credentials, validates the token, and confirms the bot', async
     checks?.find(({ id }) => id === 'line-webhook')?.detail,
     'Public route is unavailable.',
   );
+  const checking = {
+    ...publicIngress('https://hooks.example.com'),
+    status: () => ({ state: 'checking' as const }),
+  };
+  const startup = await line.checks?.({
+    ...context,
+    entry: { ...entry, ...patch?.entry },
+    startup: true,
+    webhookIngress: checking,
+  });
+  assert.equal(
+    startup?.find(({ id }) => id === 'line-webhook'),
+    undefined,
+    'startup skips the endpoint check while the ingress probe is pending',
+  );
+  const manual = await line.checks?.({
+    ...context,
+    entry: { ...entry, ...patch?.entry },
+    webhookIngress: checking,
+  });
+  assert.equal(manual?.find(({ id }) => id === 'line-webhook')?.status, 'fail');
 });
 
 test('LINE completion confirms an endpoint change before setting and testing it', async () => {

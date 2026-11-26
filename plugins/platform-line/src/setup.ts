@@ -131,6 +131,9 @@ export async function lineChecks(ctx: CheckContext): Promise<CheckItem[]> {
     }
   }
   const ingress = ctx.webhookIngress?.status();
+  // The gateway probes its ingress right after startup checks and reports its
+  // own failures; skip this item until that first probe settles.
+  if (ctx.startup && ingress?.state === 'checking') return items;
   const path = webhookPath(ctx.entry.id);
   const url =
     ingress?.state === 'ok' && ingress.baseUrl
