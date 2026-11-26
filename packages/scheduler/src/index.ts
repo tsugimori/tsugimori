@@ -555,27 +555,20 @@ export class Scheduler {
         dueAt: due,
         kind: action.kind,
         recipients: [
-          ...new Set([
-            ...mentions.map(
-              (id) =>
-                reminder?.mentions.find(({ userId }) => userId === id)
-                  ?.displayName ??
-                store.getUserDisplay({
-                  adapterId: chat.adapterId,
-                  userId: id,
-                }) ??
-                '',
-            ),
-            ...(target.kind === 'dm'
-              ? [
-                  store.getUserDisplay({
-                    adapterId: chat.adapterId,
-                    userId: target.userId,
-                  }) ?? '',
-                ]
-              : []),
-            ...(ordinary.match(/@[\p{L}\p{N}_]+/gu) ?? []),
-          ]),
+          ...[
+            ...new Set([
+              ...mentions,
+              ...(target.kind === 'dm' ? [target.userId] : []),
+            ]),
+          ].map((userId) => ({
+            userId,
+            name: reminder?.mentions.find(
+              (mention) => mention.userId === userId,
+            )?.displayName,
+          })),
+          ...[...new Set(ordinary.match(/@[\p{L}\p{N}_]+/gu))].map((name) => ({
+            name,
+          })),
         ],
         model,
         operation: previous ? 'update' : 'create',

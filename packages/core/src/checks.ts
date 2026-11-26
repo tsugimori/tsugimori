@@ -1,4 +1,4 @@
-import type { WorkspaceConfig } from '@tsugimori/config';
+import type { Config, WorkspaceConfig } from '@tsugimori/config';
 import type {
   CheckContext,
   CheckItem,
@@ -58,6 +58,9 @@ export class EnvironmentChecks {
         status: major >= 24 ? 'ok' : 'fail',
         detail: 'Node.js ' + process.versions.node,
         fix: major >= 24 ? undefined : { hint: 'Install Node.js 24 or newer.' },
+        localized: {
+          'zh-TW': { title: 'Node.js', hint: '請安裝 Node.js 24 或更新版本。' },
+        },
       },
       {
         id: 'database',
@@ -69,6 +72,12 @@ export class EnvironmentChecks {
         fix: database
           ? undefined
           : { hint: 'Choose a writable database path in tsugimori.json.' },
+        localized: {
+          'zh-TW': {
+            title: 'SQLite 資料庫路徑',
+            hint: '請在 tsugimori.json 設定可寫入的資料庫路徑。',
+          },
+        },
       },
       {
         id: 'git',
@@ -80,6 +89,12 @@ export class EnvironmentChecks {
         fix: git
           ? undefined
           : { hint: 'Run tsugimori setup to see the install command.' },
+        localized: {
+          'zh-TW': {
+            title: 'Git',
+            hint: '請執行 tsugimori setup 查看安裝指令。',
+          },
+        },
         capabilities: ['workspace.record'],
       },
     ].map((item): CheckReport => ({
@@ -108,6 +123,10 @@ export class EnvironmentChecks {
           status: 'fail',
           title: 'Plugin checks',
           detail: 'The plugin could not complete its checks.',
+          fix: { hint: 'Check the plugin configuration and try again.' },
+          localized: {
+            'zh-TW': { title: '插件檢查', hint: '請檢查插件設定後重試。' },
+          },
           capabilities: [capability],
         },
       ];
@@ -207,9 +226,23 @@ async function commandWorks(ctx: CheckContext, command: [string, ...string[]]) {
   }
 }
 
-export function failureText(items: readonly CheckReport[]) {
+export function failureText(
+  items: readonly CheckReport[],
+  locale?: Config['locale'],
+) {
+  const separator = locale === 'zh-TW' ? '：' : ': ';
   return items
     .filter((item) => item.status === 'fail')
-    .map(({ target, title, detail }) => `${target} · ${title}: ${detail}`)
+    .map(({ target, title, detail, fix, localized }) => {
+      const translation = locale === 'zh-TW' ? localized?.[locale] : undefined;
+      const hint =
+        translation?.hint ??
+        (locale && (fix?.hint || fix?.command?.join(' '))) ??
+        detail;
+      return `${target} · ${translation?.title ?? title}${separator}${hint}`.replace(
+        /[\r\n\u2028\u2029]+/g,
+        ' ',
+      );
+    })
     .join('\n');
 }

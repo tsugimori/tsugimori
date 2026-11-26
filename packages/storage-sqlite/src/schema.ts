@@ -54,6 +54,7 @@ export const users = sqliteTable(
     adapterId: text('adapter_id').notNull(),
     userId: text('user_id').notNull(),
     display: text('display'),
+    username: text('username'),
   },
   (table) => [primaryKey({ columns: [table.adapterId, table.userId] })],
 );

@@ -417,6 +417,9 @@ export default definePlugin({
           title: 'Local sandbox',
           status: 'fail',
           detail: 'The local execution backend currently requires Linux.',
+          localized: {
+            'zh-TW': { title: '本機沙箱', hint: '請在 Linux 上執行本機沙箱。' },
+          },
           capabilities,
         },
       ];
@@ -436,6 +439,12 @@ export default definePlugin({
           detail:
             'Bubblewrap is unavailable. Shell and file tools are disabled.',
           fix: { hint: 'Run tsugimori setup to see the install command.' },
+          localized: {
+            'zh-TW': {
+              title: 'Bubblewrap',
+              hint: '請執行 tsugimori setup 查看安裝指令。',
+            },
+          },
           capabilities,
         },
       ];
@@ -468,6 +477,12 @@ export default definePlugin({
           : {
               hint: 'Check your distribution’s user namespace and AppArmor configuration.',
             },
+        localized: {
+          'zh-TW': {
+            title: '非特權使用者命名空間',
+            hint: '請檢查系統的使用者命名空間及 AppArmor 設定。',
+          },
+        },
         capabilities,
       },
     ];

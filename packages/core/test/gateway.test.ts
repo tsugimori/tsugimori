@@ -82,6 +82,9 @@ function createPlatform() {
       assert.ok(context, 'adapter attached');
       await context.emit(event);
     },
+    getUser(userId: string) {
+      return context?.getUser?.(userId);
+    },
   };
 }
 
@@ -835,7 +838,7 @@ test(
           mentions: ['80'],
           trigger: { kind: 'once', at },
           needsApproval: true,
-          reason: '提醒 Telegram ID 79 可能打擾開會。',
+          reason: '提醒 Telegram ID 79\n可能打擾開會。',
         });
         yield { type: 'text.final', text: '等管理員同意後就會排上' };
       },
@@ -854,6 +857,7 @@ test(
         ...group,
         userId: '79',
         userDisplay: '小林',
+        userUsername: 'old_username',
       }),
     );
     await f.platform.emit(
@@ -898,9 +902,26 @@ test(
       offset: prompt.text.length - deliveredText.length,
       length: deliveredText.length,
     };
-    assert.deepEqual(prompt.entities, [{ ...pre, type: 'pre' }]);
-    assert.ok(lines.includes('原因：會提及特定的人'));
-    assert.ok(lines.includes('代理程式提供的理由：提醒 小林 可能打擾開會。'));
+    assert.deepEqual(prompt.entities, [
+      {
+        type: 'mention',
+        userId: '79',
+        offset: prompt.text.indexOf('@小林'),
+        length: 3,
+      },
+      {
+        type: 'mention',
+        userId: '80',
+        offset: prompt.text.indexOf('@小白'),
+        length: 3,
+      },
+      { ...pre, type: 'pre' },
+    ]);
+    assert.deepEqual(
+      lines.filter((line) => line.startsWith('原因：')),
+      ['原因：會提及特定的人；提醒 小林 可能打擾開會。'],
+    );
+    assert.doesNotMatch(prompt.text, /代理程式提供的理由|代理程式要求主人審核/);
     assert.doesNotMatch(lines.join('\n'), /tg:\/\/|"kind"|room/);
     await f.gateway.idle();
     const pending = result as {
@@ -944,6 +965,15 @@ test(
         { userId: '80', displayName: '小白', ranges: [] },
       ],
     });
+    await f.platform.emit(
+      inbound('member-1-rename', 'Hello again', {
+        ...group,
+        userId: '79',
+        userDisplay: '小林',
+        userUsername: 'new_username',
+      }),
+    );
+    assert.equal(f.platform.getUser('79')?.username, 'new_username');
     await until(t, () =>
       f.platform.sent.some((message) => message.text === deliveredText),
     );

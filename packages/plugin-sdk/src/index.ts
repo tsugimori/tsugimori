@@ -48,6 +48,7 @@ export interface InboundMessage extends InboundBase {
   type: 'message';
   userDisplay?: string;
   userId: string;
+  userUsername?: string | null;
 }
 
 export type ApprovalDecision = 'deny' | 'once' | 'always';
@@ -91,6 +92,7 @@ export type TextEntity = TextRange &
   ({ type: 'pre' } | { type: 'mention'; userId: string });
 
 export interface SendReceipt {
+  approvalEntities?: readonly TextEntity[];
   messageId: string;
   parts?: readonly SendPart[];
   raw?: unknown;
@@ -126,6 +128,9 @@ export interface AdapterCursor {
 
 export interface AdapterContext {
   emit(event: PlatformInboundEvent): Promise<void>;
+  getUser?(
+    userId: string,
+  ): { display: string | null; username: string | null } | undefined;
   loadCursor?(stream: string): AdapterCursor | undefined;
   logError?(event: string, error?: unknown): void;
   ready?: Promise<void>;
@@ -136,6 +141,7 @@ export interface ApprovalFeedback {
   chatId: string;
   decision?: ApprovalDecision;
   decisionText?: string;
+  entities?: readonly TextEntity[];
   messageId: string;
   notice: string;
   pre?: TextRange;
@@ -206,7 +212,7 @@ export interface ScheduleApprovalRequest {
   model?: string;
   operation: 'create' | 'update';
   reasons: readonly ScheduleApprovalReason[];
-  recipients: readonly string[];
+  recipients: readonly { name?: string; userId?: string }[];
   repeat?: { cron: string } | { minutes: number };
   scope: string;
   target: ChatRef;

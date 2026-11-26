@@ -17,6 +17,11 @@ export interface ChatRecord extends ChatRef {
   title: string | null;
 }
 
+export interface UserRecord extends PrincipalRef {
+  display: string | null;
+  username: string | null;
+}
+
 export interface MessageRecord extends ChatRef {
   deleted: boolean;
   direction: 'inbound' | 'outbound';
@@ -252,6 +257,7 @@ export interface Store {
   getSetupRun(id: string): SetupRun | undefined;
   getSummary(ref: ChatRef): ChatSummary | undefined;
   getTask(id: string): TaskRecord | undefined;
+  getUser(ref: PrincipalRef): UserRecord | undefined;
   getUserDisplay(ref: PrincipalRef): string | undefined;
   getWorkspaceSettings(ref: ChatRef): WorkspaceSettings | undefined;
   insertGrant(grant: StoredGrant): void;
@@ -281,11 +287,14 @@ export interface Store {
   ): MessageRecord[];
   recordInbound(
     chat: ChatRef & Pick<ChatRecord, 'kind' | 'title'>,
-    user: PrincipalRef & { display: string | null },
+    user: Omit<UserRecord, 'username'> & Partial<Pick<UserRecord, 'username'>>,
     message: InboundRecord,
     edited?: boolean,
   ): MessageRecord | undefined;
   recordOutbound(message: NewMessage, taskId?: string): void;
+  recordUser(
+    user: Omit<UserRecord, 'username'> & Partial<Pick<UserRecord, 'username'>>,
+  ): void;
   saveCursor(adapterId: string, stream: string, cursor: AdapterCursor): void;
   savePairingCode(adapterId: string, digest: string, expiresAt: number): void;
   saveSetupRun(run: SetupRun, lease: string): boolean;

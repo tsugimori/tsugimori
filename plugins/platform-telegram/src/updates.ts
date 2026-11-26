@@ -111,6 +111,7 @@ export function mapUpdate(
     edited: edited !== undefined,
     userId,
     userDisplay: userDisplay || undefined,
+    userUsername: typeof sender?.username === 'string' ? sender.username : null,
     text,
     replyTo: nativeId(reply?.message_id),
     repliesToBot,

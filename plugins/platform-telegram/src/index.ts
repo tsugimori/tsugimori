@@ -4,6 +4,7 @@ import type {
   OutboundMessage,
   PlatformAdapter,
   SendPart,
+  TextEntity,
 } from '@tsugimori/plugin-sdk';
 
 import { definePlugin, SendFailure } from '@tsugimori/plugin-sdk';
@@ -182,7 +183,7 @@ export class TelegramAdapter implements PlatformAdapter {
     const parts: SendPart[] = [];
     let messages: ReturnType<typeof telegramMessageParts>;
     try {
-      messages = telegramMessageParts(message);
+      messages = telegramMessageParts(message, this.#ctx?.getUser);
     } catch (error) {
       throw new SendFailure({ parts, deliveryUnknown: false }, error);
     }
@@ -231,7 +232,23 @@ export class TelegramAdapter implements PlatformAdapter {
         error,
       );
     }
-    return { messageId: parts[controls]!.messageId, parts };
+    const approvalEntities = message.approval
+      ? (messages[controls]?.entities ?? []).map((entity): TextEntity =>
+          entity.type === 'pre'
+            ? entity
+            : {
+                offset: entity.offset,
+                length: entity.length,
+                type: 'mention',
+                userId: String(entity.user.id),
+              },
+        )
+      : undefined;
+    return {
+      messageId: parts[controls]!.messageId,
+      parts,
+      approvalEntities,
+    };
   }
 
   typing(
@@ -274,6 +291,7 @@ export class TelegramAdapter implements PlatformAdapter {
   async respondToApproval({
     chatId,
     decisionText,
+    entities,
     messageId,
     notice,
     pre,
@@ -296,17 +314,27 @@ export class TelegramAdapter implements PlatformAdapter {
               .slice(0, maxMessage - suffix.length)
               .replace(/[\uD800-\uDBFF]$/u, '')
           : '';
-        const length = pre && Math.min(display.length - pre.offset, pre.length);
+        const text = display ? display + suffix : notice;
+        const formatting = (
+          entities ?? (pre ? [{ ...pre, type: 'pre' as const }] : [])
+        )
+          .filter(({ offset }) => offset < display.length)
+          .map((entity) => ({
+            ...entity,
+            length: Math.min(entity.length, display.length - entity.offset),
+          }));
+        const rendered = telegramMessageParts({
+          chatId,
+          text,
+          entities: formatting,
+        });
         await this.#api.call(
           'editMessageText',
           {
             chat_id: chatId,
             message_id: Number(messageId),
-            text: display ? display + suffix : notice,
-            entities:
-              pre && length && length > 0
-                ? [{ type: 'pre', offset: pre.offset, length }]
-                : undefined,
+            text,
+            entities: rendered[0]?.entities,
             reply_markup: { inline_keyboard: [] },
           },
           signal,

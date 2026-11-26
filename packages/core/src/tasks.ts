@@ -2,6 +2,7 @@ import type { Auth } from '@tsugimori/auth';
 import type { ContextAssembler } from '@tsugimori/context';
 import type {
   AgentIO,
+  ApprovalFeedback,
   ApprovalRequest,
   ChatRef,
   ExecBackend,
@@ -10,7 +11,6 @@ import type {
   PlatformAdapter,
   ScheduleApproval,
   ScheduleApprovalRequest,
-  TextRange,
   ToolContext,
   ToolDefinition,
 } from '@tsugimori/plugin-sdk';
@@ -32,6 +32,7 @@ import { approvalMessages, approvalPrompt } from './approval-messages.ts';
 import { describeError } from './errors.ts';
 import { conversationId, DeliveryError, Outbound } from './outbound.ts';
 import { Supplements } from './supplements.ts';
+import { systemMessages } from './system-messages.ts';
 import { shouldTrigger } from './trigger.ts';
 import { prepareWorkspace, recordWorkspace } from './workspace-files.ts';
 
@@ -79,7 +80,10 @@ export class Tasks {
   readonly #scheduleApprovalWork = new Set<{ work: Work }>();
   readonly #approvals = new Map<
     string,
-    { pre?: TextRange; resolve(result?: ApprovalAnswer): void }
+    {
+      format: Pick<ApprovalFeedback, 'entities' | 'pre'>;
+      resolve(result?: ApprovalAnswer): void;
+    }
   >();
 
   constructor(deps: TaskDependencies) {
@@ -194,7 +198,7 @@ export class Tasks {
   resolveApproval(result: ApprovalAnswer & { id: string }) {
     const approval = this.#approvals.get(result.id);
     approval?.resolve(result);
-    return approval?.pre;
+    return approval?.format;
   }
 
   async #execute(work: Work) {
@@ -267,7 +271,11 @@ export class Tasks {
         else if (owner)
           await outbound.send(
             adapter,
-            reply(message, explicitUnavailable || 'No agent is attached.'),
+            reply(
+              message,
+              explicitUnavailable ||
+                systemMessages(runtime.config.locale).noAgent,
+            ),
             {
               taskId: id,
               signal: abort.signal,
@@ -625,7 +633,7 @@ export class Tasks {
         const { locale } = runtime.config;
         const { buttons } = approvalMessages(locale);
         const useButtons = adapter.capabilities.inlineButtons === true;
-        const { text, pre } = approvalPrompt({
+        const { text, pre, entities } = approvalPrompt({
           chat,
           locale,
           request,
@@ -636,7 +644,8 @@ export class Tasks {
             input.message.userDisplay ??
             store.getUserDisplay({ ...chat, userId: input.message.userId }),
         });
-        const pending = { resolve: answer.resolve, pre };
+        const format: Pick<ApprovalFeedback, 'entities' | 'pre'> = { pre };
+        const pending = { resolve: answer.resolve, format };
         this.#approvals.set(approval.id, pending);
         await outbound.send(
           adapter,
@@ -646,7 +655,7 @@ export class Tasks {
               : reply(input.message, text)),
             approval: true,
             parseTextMentions: false,
-            entities: pre ? [{ ...pre, type: 'pre' }] : undefined,
+            entities: entities.length ? entities : undefined,
             buttons: useButtons
               ? [
                   {
@@ -670,15 +679,24 @@ export class Tasks {
           },
           {
             signal,
-            onReceipt: ({ messageId, parts }) => {
-              if (pre && parts) {
+            onReceipt: ({ messageId, parts, approvalEntities }) => {
+              if (approvalEntities) {
+                format.entities = approvalEntities;
+                const rendered = approvalEntities.find(
+                  ({ type }) => type === 'pre',
+                );
+                format.pre = rendered && {
+                  offset: rendered.offset,
+                  length: rendered.length,
+                };
+              } else if (pre && parts) {
                 let start = 0;
                 for (const part of parts) {
                   const end = start + part.text.length;
                   if (part.messageId === messageId) {
                     const from = Math.max(start, pre.offset);
                     const to = Math.min(end, pre.offset + pre.length);
-                    pending.pre =
+                    format.pre =
                       to > from
                         ? { offset: from - start, length: to - from }
                         : undefined;

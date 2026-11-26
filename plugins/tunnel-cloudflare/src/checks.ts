@@ -22,6 +22,12 @@ export default definePlugin({
         fix: cloudflared
           ? undefined
           : { hint: 'Install cloudflared from Cloudflare.' },
+        localized: {
+          'zh-TW': {
+            title: 'Cloudflare Tunnel CLI',
+            hint: '請從 Cloudflare 安裝 cloudflared。',
+          },
+        },
       },
     ] as const;
     const named = entry.options?.named as
@@ -77,6 +83,16 @@ export default definePlugin({
               : !access
                 ? 'Configure the Cloudflare Access team and owner. Named previews are disabled.'
                 : 'Configure a valid named preview router port.',
+        localized: {
+          'zh-TW': {
+            title: 'Cloudflare DNS 憑證',
+            hint: !valid
+              ? '請設定有權存取此 DNS 區域的權杖。'
+              : !access
+                ? '請設定 Cloudflare Access 的團隊與主人身分。'
+                : '請為具名預覽路由器設定有效的連接埠。',
+          },
+        },
         capabilities: ['preview.named'],
       },
     ];

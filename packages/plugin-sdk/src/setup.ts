@@ -53,6 +53,7 @@ export interface CheckItem {
   detail: string;
   fix?: { command?: string[]; hint?: string; sudo?: boolean };
   id: string;
+  localized?: { 'zh-TW'?: { hint: string; title: string } };
   status: 'ok' | 'warn' | 'fail';
   title: string;
 }
@@ -64,6 +65,7 @@ export interface SetupPatch {
 
 export interface SetupContext extends CheckContext {
   install(): Promise<void>;
+  locale?: 'en' | 'zh-TW';
   prompt(options: { secret?: boolean; text: string }): Promise<string>;
   runCheck(id: string): Promise<CheckItem>;
   show(text: string): Promise<void>;
@@ -75,6 +77,7 @@ export interface SetupContext extends CheckContext {
 
 export interface SetupStep {
   id: string;
+  localized?: { 'zh-TW'?: string };
   run(ctx: SetupContext): void | Promise<void>;
   title: string;
 }

@@ -20,10 +20,12 @@ import { join } from 'node:path';
 import type { PluginRegistry } from './registry.ts';
 
 import { EnvironmentChecks, failureText } from './checks.ts';
+import { systemMessages } from './system-messages.ts';
 
 type Category = SetupRun['category'];
 
 export interface SetupIO {
+  locale?: Config['locale'];
   measure?<T>(step: string, run: () => Promise<T>): Promise<T>;
   prompt(options: Parameters<SetupContext['prompt']>[0]): Promise<string>;
   show(text: string): Promise<void>;
@@ -59,28 +61,24 @@ export class GuidedSetup {
 
   async run(request: SetupRequest, io: SetupIO) {
     const { store, registry, workspace } = this.#deps;
+    const m = systemMessages(io.locale ?? 'en').setup;
     const { id, mode } = request;
-    if (!validId.test(id))
-      throw new SetupError('Use a valid plugin instance ID.');
+    if (!validId.test(id)) throw new SetupError(m.invalidId);
     const config = await loadSettings(workspace, registry);
     const category = mode === 'login' ? 'agent' : request.category;
     const existing = entries(config, category).find((item) => item.id === id);
     const kind = mode === 'login' ? existing?.kind : request.kind;
-    if (!kind) throw new SetupError('No configured agent has that ID.');
+    if (!kind) throw new SetupError(m.agentMissing);
     const plugin = registry.forInstance(category, kind);
     const steps = (plugin?.setupSteps ?? []).filter(
       (step) => mode === 'add' || step.id === 'login',
     );
     if (!steps.length)
-      throw new SetupError(
-        `No ${mode === 'login' ? 'login step' : 'guided setup'} is registered for ${category} ${kind}.`,
-      );
+      throw new SetupError(m.noSteps(mode === 'login', category, kind));
     const key = JSON.stringify([mode, category, id]);
     const previous = store.getSetupRun(key);
     if (previous?.status === 'pending' && previous.draft.entry.kind !== kind)
-      throw new SetupError(
-        'That ID belongs to a pending setup for a different plugin kind. Use a different ID.',
-      );
+      throw new SetupError(m.pendingId);
     if (
       mode === 'add' &&
       existing &&
@@ -90,9 +88,7 @@ export class GuidedSetup {
         existing.kind === kind
       )
     )
-      throw new SetupError(
-        'That plugin ID is already configured. Choose a different ID.',
-      );
+      throw new SetupError(m.configuredId);
     const now = Date.now();
     const lease = randomUUID();
     const run = store.claimSetupRun(
@@ -108,10 +104,7 @@ export class GuidedSetup {
       },
       now,
     );
-    if (!run)
-      throw new SetupError(
-        'Another setup is in progress. Retry once it has finished.',
-      );
+    if (!run) throw new SetupError(m.busy);
     const lost = new AbortController();
     const signal = AbortSignal.any([io.signal, lost.signal]);
     let checkpoint = structuredClone(run);
@@ -119,9 +112,7 @@ export class GuidedSetup {
       signal.throwIfAborted();
       checkpoint.leaseUntil = Date.now() + leaseLength;
       if (!store.saveSetupRun(checkpoint, lease))
-        throw new SetupError(
-          'The setup lease expired. Rerun the setup command.',
-        );
+        throw new SetupError(m.leaseExpired);
     };
     const heartbeat = setInterval(() => {
       try {
@@ -148,23 +139,23 @@ export class GuidedSetup {
           const target = config.agents.find(
             (agent) => agent.id === id && agent.kind === kind,
           );
-          if (!target)
-            throw new SetupError(
-              'The configured agent changed during sign-in.',
-            );
+          if (!target) throw new SetupError(m.changedAgent);
           target.enabled = false;
         });
         await io.waitForDetach?.(id);
       }
       for (const step of steps.slice(run.step)) {
         const current = await snapshot();
-        await io.show(step.title);
+        await io.show(
+          (io.locale === 'zh-TW' && step.localized?.[io.locale]) || step.title,
+        );
         const ctx: SetupContext = {
           ...current,
           get entry() {
             return run.draft.entry;
           },
           signal,
+          locale: io.locale,
           show: io.show,
           prompt: (options) => {
             signal.throwIfAborted();
@@ -181,8 +172,7 @@ export class GuidedSetup {
           },
           runCheck: async (id) => {
             const item = (await check()).find((result) => result.id === id);
-            if (!item)
-              throw new SetupError(`The plugin did not report check ${id}.`);
+            if (!item) throw new SetupError(m.missingCheck(id));
             return item;
           },
           install: async () => {
@@ -192,7 +182,8 @@ export class GuidedSetup {
             });
             if (version) ctx.writeConfig({ entry: { version } });
           },
-          testTurn: () => this.#testTurn(run.draft.entry, current, signal),
+          testTurn: () =>
+            this.#testTurn(run.draft.entry, current, signal, m.testFailed),
         };
         if (io.measure) await io.measure(step.id, async () => step.run(ctx));
         else await step.run(ctx);
@@ -200,7 +191,7 @@ export class GuidedSetup {
         checkpoint = structuredClone(run);
         save();
       }
-      const failures = failureText(await check());
+      const failures = failureText(await check(), io.locale);
       if (failures) {
         run.step = 0;
         checkpoint = structuredClone(run);
@@ -214,7 +205,7 @@ export class GuidedSetup {
         if (index < 0 && mode === 'add') list.push(run.draft.entry);
         else if (index >= 0 && list[index]?.kind === kind)
           list[index] = run.draft.entry;
-        else throw new SetupError('The configuration changed during setup.');
+        else throw new SetupError(m.changedConfig);
         if (run.draft.ownerId !== undefined)
           Object.defineProperty(config.owner, id, {
             value: run.draft.ownerId,
@@ -240,6 +231,7 @@ export class GuidedSetup {
     entry: AgentInstanceConfig,
     ctx: ReturnType<EnvironmentChecks['context']>,
     outerSignal: AbortSignal,
+    errorMessage: string,
   ) {
     const { registry, workspace, testAgent } = this.#deps;
     const signal = AbortSignal.any([outerSignal, AbortSignal.timeout(60_000)]);
@@ -287,9 +279,7 @@ export class GuidedSetup {
         await agent.stop?.();
       }
     } catch {
-      throw new SetupError(
-        'The test turn failed. Check the agent login, model access, and connectivity, then rerun setup.',
-      );
+      throw new SetupError(errorMessage);
     } finally {
       await rm(workdir, { recursive: true, force: true });
     }

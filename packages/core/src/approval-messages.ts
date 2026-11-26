@@ -4,6 +4,7 @@ import type {
   ApprovalRequest,
   ChatRef,
   ScheduleApprovalRequest,
+  TextEntity,
   TextRange,
 } from '@tsugimori/plugin-sdk';
 import type { Store } from '@tsugimori/storage';
@@ -59,8 +60,8 @@ const catalogs = {
         'The schedule can run faster than the configured minimum interval.',
       model: 'The selected model requires owner approval.',
     },
-    agentReason: 'Agent’s reason',
     separator: ': ',
+    reasonSeparator: '; ',
     names: ', ',
   },
   'zh-TW': {
@@ -103,8 +104,8 @@ const catalogs = {
       frequency: '這項排程的執行間隔可能短於設定的下限。',
       model: '所選模型需要主人授權。',
     },
-    agentReason: '代理程式提供的理由',
     separator: '：',
+    reasonSeparator: '；',
     names: '、',
   },
 };
@@ -124,7 +125,9 @@ export function approvalDecisionText(
 }
 
 function withoutPings(text: string) {
-  return text.replace(/@(?=[a-z0-9_])/gi, '＠').replace(/[\r\n]+/g, ' ');
+  return text
+    .replace(/@(?=[a-z0-9_])/gi, '＠')
+    .replace(/[\r\n\u2028\u2029]+/g, ' ');
 }
 
 export function approvalPrompt({
@@ -145,16 +148,20 @@ export function approvalPrompt({
   schedule?: ScheduleApprovalRequest;
   store: Store;
   useButtons: boolean;
-}): { pre?: TextRange; text: string } {
+}): { entities: TextEntity[]; pre?: TextRange; text: string } {
   const m = approvalMessages(locale);
+  const entities: TextEntity[] = [];
   const field = (label: string, value: string) => label + m.separator + value;
   const withContent = (lines: string[], content?: string) => {
     const header = lines.join('\n');
-    if (!content) return { text: header };
+    if (!content) return { text: header, entities };
     const prefix = header + '\n' + m.content + m.separator.trimEnd() + '\n';
+    const pre = { offset: prefix.length, length: content.length };
+    entities.push({ ...pre, type: 'pre' });
     return {
       text: prefix + content,
-      pre: { offset: prefix.length, length: content.length },
+      entities,
+      pre,
     };
   };
   if (!schedule) {
@@ -187,14 +194,30 @@ export function approvalPrompt({
   const { recipients, timezone } = schedule;
   const date = (timestamp: number) =>
     scheduleTime(timestamp, timezone, locale, now);
-  const names = recipients.map((name) =>
-    name
-      ? withoutPings(name.startsWith('@') ? name : '@' + name)
-      : m.unknownUser,
-  );
+  const title = field('🔔 ' + m.title, m[schedule.operation][schedule.kind]);
+  const recipientsPrefix = field(m.recipient, '');
+  let names = '';
+  for (const { name, userId } of recipients) {
+    if (names) names += m.names;
+    const user = userId
+      ? store.getUser({ adapterId: schedule.target.adapterId, userId })
+      : undefined;
+    const display = user?.display || name;
+    const label = display
+      ? withoutPings(display.startsWith('@') ? display : '@' + display)
+      : m.unknownUser;
+    if (userId && (display || user?.username))
+      entities.push({
+        type: 'mention',
+        userId,
+        offset: title.length + 1 + recipientsPrefix.length + names.length,
+        length: label.length,
+      });
+    names += label;
+  }
   const lines = [
-    field('🔔 ' + m.title, m[schedule.operation][schedule.kind]),
-    field(m.recipient, names.join(m.names) || m.everyone),
+    title,
+    recipientsPrefix + (names || m.everyone),
     field(
       m.when,
       date(schedule.dueAt) + scheduleCadence(schedule.repeat, locale),
@@ -210,11 +233,15 @@ export function approvalPrompt({
   if (schedule.until !== undefined)
     lines.push(field(m.until, date(schedule.until)));
   if (schedule.model) lines.push(field(m.model, withoutPings(schedule.model)));
-  for (const reason of schedule.reasons) {
-    const mentions =
-      reason === 'delivery' && recipients.length > 0 && !schedule.targetUserId;
-    lines.push(field(m.reason, m.reasons[mentions ? 'mentions' : reason]));
-  }
+  const reasons = schedule.reasons
+    .filter((reason) => reason !== 'agent')
+    .map((reason) => {
+      const mentions =
+        reason === 'delivery' &&
+        recipients.length > 0 &&
+        !schedule.targetUserId;
+      return m.reasons[mentions ? 'mentions' : reason];
+    });
   if (schedule.agentReason) {
     const reason = schedule.agentReason.replace(
       /\b(?:Telegram\s+)?(?:user\s+)?ID\s*[:：=]?\s*([1-9]\d{0,19})\b/gi,
@@ -224,8 +251,29 @@ export function approvalPrompt({
           userId,
         }) || m.unknownUser,
     );
-    lines.push(field(m.agentReason, withoutPings(reason)));
+    const description = withoutPings(reason).replace(/\s+/g, ' ').trim();
+    if (description) reasons.push(description);
   }
+  const withoutPeriod = (reason: string) => reason.replace(/[.。]+$/u, '');
+  const unique = new Map<string, string>();
+  for (const reason of reasons) {
+    const key = withoutPeriod(reason);
+    if (key && key !== withoutPeriod(m.reasons.agent) && !unique.has(key))
+      unique.set(key, reason);
+  }
+  const specific = [...unique.values()];
+  lines.push(
+    field(
+      m.reason,
+      specific.length
+        ? specific
+            .map((reason, index) =>
+              index === specific.length - 1 ? reason : withoutPeriod(reason),
+            )
+            .join(m.reasonSeparator)
+        : m.reasons.agent,
+    ),
+  );
   if (!useButtons)
     lines.push(schedule.operation === 'update' ? m.replyOnce : m.reply);
   return withContent(lines, schedule.content);

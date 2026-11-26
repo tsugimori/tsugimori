@@ -5,7 +5,49 @@ import { SqliteStore } from '@tsugimori/storage-sqlite';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
+import { approvalPrompt } from '../src/approval-messages.ts';
+
 const minute = 60_000;
+
+test('approval reasons deduplicate program text and retain the generic fallback', (t) => {
+  const store = new SqliteStore(':memory:');
+  t.after(() => store.close());
+  const chat = { adapterId: 'fake', chatId: 'room' };
+  const prompt = (reasons: ('agent' | 'delivery')[], agentReason?: string) =>
+    approvalPrompt({
+      chat,
+      locale: 'zh-TW',
+      request: {
+        action: 'schedule.create',
+        resource: { type: 'chat', ...chat },
+      },
+      schedule: {
+        address: chat,
+        agentReason,
+        content: '提醒',
+        dueAt: 60_000,
+        id: 'schedule',
+        kind: 'message',
+        operation: 'create',
+        reasons,
+        recipients: [{ userId: '42', name: '小林' }],
+        scope: 'schedule',
+        target: chat,
+        timezone: 'UTC',
+      },
+      store,
+      useButtons: true,
+    })
+      .text.split('\n')
+      .filter((line) => line.startsWith('原因：'));
+  assert.deepEqual(prompt(['agent', 'delivery'], '會提及特定的人。'), [
+    '原因：會提及特定的人',
+  ]);
+  assert.deepEqual(prompt(['agent'], '  '), ['原因：代理程式要求主人審核。']);
+  assert.deepEqual(prompt(['agent'], '需要使用大量資源。'), [
+    '原因：需要使用大量資源。',
+  ]);
+});
 
 test('a restarted scheduler claims only the latest missed fire and preserves its next due time', async (t) => {
   const store = new SqliteStore(':memory:');

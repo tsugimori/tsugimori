@@ -44,6 +44,12 @@ export async function telegramChecks(ctx: CheckContext): Promise<CheckItem[]> {
           status: 'fail',
           detail:
             'Telegram getMe failed. Check the bot token and Telegram connectivity.',
+          localized: {
+            'zh-TW': {
+              title: 'Telegram 機器人權杖',
+              hint: '請檢查機器人權杖以及與 Telegram 的連線。',
+            },
+          },
         },
       ];
     }
@@ -53,23 +59,48 @@ export async function telegramChecks(ctx: CheckContext): Promise<CheckItem[]> {
       ...identity,
       status: 'fail',
       detail: 'Set the environment variable named by tokenEnv.',
+      localized: {
+        'zh-TW': {
+          title: 'Telegram 機器人權杖',
+          hint: '請設定 tokenEnv 指定的環境變數。',
+        },
+      },
     },
   ];
 }
+
+const setupMessages = {
+  en: {
+    token: 'Enter the Telegram bot token.',
+    invalidToken: 'Enter a valid Telegram bot token.',
+    rejectedToken: 'Telegram getMe failed. Check the token and try again.',
+    owner: 'Enter the Telegram owner’s numeric user ID.',
+    invalidOwner: 'A numeric Telegram user ID is required.',
+  },
+  'zh-TW': {
+    token: '請輸入 Telegram 機器人權杖。',
+    invalidToken: '請輸入有效的 Telegram 機器人權杖。',
+    rejectedToken: 'Telegram getMe 檢查失敗。請確認權杖後重試。',
+    owner: '請輸入 Telegram 主人的數字使用者 ID。',
+    invalidOwner: '請使用數字形式的 Telegram 使用者 ID。',
+  },
+};
 
 export const telegramSetup: SetupStep[] = [
   {
     id: 'token',
     title: 'Verify Telegram bot token',
+    localized: { 'zh-TW': '驗證 Telegram 機器人權杖' },
     async run(ctx) {
+      const m = setupMessages[ctx.locale ?? 'en'];
       const token = (
         await ctx.prompt({
           secret: true,
-          text: 'Enter the Telegram bot token.',
+          text: m.token,
         })
       ).trim();
       if (!/^\d+:[A-Za-z0-9_-]+$/.test(token))
-        throw new SetupError('Enter a valid Telegram bot token.');
+        throw new SetupError(m.invalidToken);
       try {
         await telegramIdentity(
           ctx.fetch,
@@ -77,9 +108,7 @@ export const telegramSetup: SetupStep[] = [
           AbortSignal.any([ctx.signal, AbortSignal.timeout(8_000)]),
         );
       } catch {
-        throw new SetupError(
-          'Telegram getMe failed. Check the token and try again.',
-        );
+        throw new SetupError(m.rejectedToken);
       }
       const tokenEnv = credentialKey('TELEGRAM_BOT_TOKEN', ctx.entry.id);
       await ctx.writeEnv(tokenEnv, token);
@@ -89,14 +118,16 @@ export const telegramSetup: SetupStep[] = [
   {
     id: 'owner',
     title: 'Set Telegram owner',
+    localized: { 'zh-TW': '設定 Telegram 主人' },
     async run(ctx) {
+      const m = setupMessages[ctx.locale ?? 'en'];
       const ownerId = (
         await ctx.prompt({
-          text: 'Enter the Telegram owner’s numeric user ID.',
+          text: m.owner,
         })
       ).trim();
       if (!/^[1-9]\d{0,19}$/.test(ownerId))
-        throw new SetupError('A numeric Telegram user ID is required.');
+        throw new SetupError(m.invalidOwner);
       ctx.writeConfig({ ownerId });
     },
   },

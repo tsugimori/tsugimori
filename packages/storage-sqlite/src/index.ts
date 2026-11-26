@@ -20,6 +20,7 @@ import type {
   StoredPreview,
   TaskRecord,
   TraceSpan,
+  UserRecord,
   WorkspaceSettings,
 } from '@tsugimori/storage';
 
@@ -119,6 +120,23 @@ function createDatabase(path: string) {
   }
 }
 
+function saveUser(
+  db: Pick<ReturnType<typeof createDatabase>['db'], 'insert'>,
+  user: Omit<UserRecord, 'username'> & Partial<Pick<UserRecord, 'username'>>,
+) {
+  const insert = db.insert(users).values(user);
+  if (user.display === null && user.username === undefined) {
+    insert.onConflictDoNothing().run();
+  } else {
+    insert
+      .onConflictDoUpdate({
+        target: [users.adapterId, users.userId],
+        set: { display: user.display ?? undefined, username: user.username },
+      })
+      .run();
+  }
+}
+
 export class SqliteStore implements Store {
   readonly #db;
   readonly #sqlite;
@@ -206,14 +224,20 @@ export class SqliteStore implements Store {
     return this.#db.select().from(chats).where(chatScope(chats, ref)).get();
   }
 
-  getUserDisplay({ adapterId, userId }: PrincipalRef) {
-    return (
-      this.#db
-        .select({ display: users.display })
-        .from(users)
-        .where(and(eq(users.adapterId, adapterId), eq(users.userId, userId)))
-        .get()?.display ?? undefined
-    );
+  getUser({ adapterId, userId }: PrincipalRef) {
+    return this.#db
+      .select()
+      .from(users)
+      .where(and(eq(users.adapterId, adapterId), eq(users.userId, userId)))
+      .get();
+  }
+
+  getUserDisplay(ref: PrincipalRef) {
+    return this.getUser(ref)?.display ?? undefined;
+  }
+
+  recordUser(user: Parameters<Store['recordUser']>[0]) {
+    saveUser(this.#db, user);
   }
 
   openPreview(preview: StoredPreview) {
@@ -564,7 +588,7 @@ export class SqliteStore implements Store {
 
   recordInbound(
     chat: ChatRef & Pick<ChatRecord, 'kind' | 'title'>,
-    user: PrincipalRef & { display: string | null },
+    user: Parameters<Store['recordInbound']>[1],
     message: InboundRecord,
     edited = false,
   ) {
@@ -598,17 +622,7 @@ export class SqliteStore implements Store {
           set: { kind: chat.kind, title: chat.title ?? undefined },
         })
         .run();
-      const upsertUser = tx.insert(users).values(user);
-      if (user.display === null) {
-        upsertUser.onConflictDoNothing().run();
-      } else {
-        upsertUser
-          .onConflictDoUpdate({
-            target: [users.adapterId, users.userId],
-            set: { display: user.display },
-          })
-          .run();
-      }
+      saveUser(tx, user);
       return result;
     });
   }

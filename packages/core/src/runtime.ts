@@ -40,7 +40,7 @@ interface RuntimeDeps {
   measure<T>(target: string, run: () => Promise<T>): Promise<T>;
   receive(adapter: PlatformAdapter, event: PlatformInboundEvent): Promise<void>;
   registry: PluginRegistry;
-  store: Pick<Store, 'getCursor' | 'getSetupRun' | 'saveCursor'>;
+  store: Pick<Store, 'getCursor' | 'getSetupRun' | 'getUser' | 'saveCursor'>;
   workspace: string;
 }
 
@@ -113,6 +113,7 @@ export class Runtime {
     if (!first || this.getAgent(first)) return '';
     return failureText(
       this.#reports.filter(({ target }) => target === `agent/${first}`),
+      this.config.locale,
     );
   }
 
@@ -175,6 +176,9 @@ export class Runtime {
         status: 'fail',
         detail:
           'The plugin could not start. Check its configuration and try again.',
+        localized: {
+          'zh-TW': { title: '插件啟動', hint: '請檢查插件設定後重試。' },
+        },
       });
     };
     const nextAgents = new Map<string, AgentEntry>();
@@ -199,6 +203,12 @@ export class Runtime {
               title: 'Login pending',
               status: 'fail',
               detail: `Sign-in is incomplete. Run /login ${entry.id} to resume.`,
+              localized: {
+                'zh-TW': {
+                  title: '等待登入',
+                  hint: `請執行 /login ${entry.id} 繼續登入。`,
+                },
+              },
             });
           }
           continue;
@@ -385,6 +395,7 @@ export class Runtime {
           await this.#deps.receive(entry.adapter, event);
       },
       ready: ready.promise,
+      getUser: (userId) => store.getUser({ adapterId: adapter.id, userId }),
       loadCursor: (stream) => store.getCursor(adapter.id, stream),
       saveCursor: (stream, cursor) =>
         store.saveCursor(adapter.id, stream, cursor),

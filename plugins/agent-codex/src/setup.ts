@@ -14,6 +14,30 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { asRecord } from './app-server.ts';
 import { codexBinary, hasCodexCodeModeHost, pinnedVersion } from './install.ts';
 
+const loginMessages = {
+  en: {
+    open: (url: string) => `Open ${url} and sign in to ChatGPT.`,
+    code: (code: string) => `Enter the one-time device code ${code}.`,
+    incomplete: 'Codex device login did not complete.',
+    missingAccount: 'Codex did not report a ChatGPT account to confirm.',
+    confirm: (email: string) =>
+      `Codex signed in as ${email}. Reply yes to confirm this account.`,
+    unconfirmed:
+      'The Codex account was not confirmed. Rerun the command to sign in again.',
+  },
+  'zh-TW': {
+    installFailed:
+      '無法安裝 Codex CLI。請檢查網路連線，並在工作區執行 tsugimori setup 查看詳細資訊。',
+    open: (url: string) => `請開啟 ${url} 並登入 ChatGPT。`,
+    code: (code: string) => `請輸入一次性裝置驗證碼 ${code}。`,
+    incomplete: 'Codex 裝置登入未完成。',
+    missingAccount: 'Codex 未回報可供確認的 ChatGPT 帳號。',
+    confirm: (email: string) =>
+      `Codex 已使用 ${email} 登入。請回覆 yes 確認此帳號。`,
+    unconfirmed: 'Codex 帳號尚未確認。請重新執行指令登入。',
+  },
+};
+
 export function codexLocation(
   entry: PluginInstanceConfig,
   workspace: string,
@@ -104,6 +128,12 @@ export async function codexChecks(ctx: CheckContext): Promise<CheckItem[]> {
         detail:
           'The managed Codex CLI is missing its codex-code-mode-host helper.',
         fix: { hint: 'Run tsugimori setup --upgrade' },
+        localized: {
+          'zh-TW': {
+            title: cli.title,
+            hint: '請執行 tsugimori setup --upgrade。',
+          },
+        },
         capabilities,
       },
     ];
@@ -124,6 +154,12 @@ export async function codexChecks(ctx: CheckContext): Promise<CheckItem[]> {
         detail:
           'The configured Codex executable or pinned version is unavailable.',
         fix: { hint: 'Run tsugimori setup for this workspace.' },
+        localized: {
+          'zh-TW': {
+            title: cli.title,
+            hint: '請在此工作區執行 tsugimori setup。',
+          },
+        },
         capabilities,
       },
     ];
@@ -140,6 +176,12 @@ export async function codexChecks(ctx: CheckContext): Promise<CheckItem[]> {
       fix: login
         ? undefined
         : { hint: `Ask the owner to run /login ${ctx.entry.id}.` },
+      localized: {
+        'zh-TW': {
+          title: 'Codex 登入',
+          hint: `請主人執行 /login ${ctx.entry.id}。`,
+        },
+      },
       capabilities,
     },
   ];
@@ -188,8 +230,13 @@ async function codexAccount(ctx: SetupContext) {
 }
 
 async function login(ctx: SetupContext) {
+  const m = loginMessages[ctx.locale ?? 'en'];
   const check = await ctx.runCheck('codex-cli');
-  if (check.status !== 'ok') throw new SetupError(check.detail);
+  if (check.status !== 'ok')
+    throw new SetupError(
+      (ctx.locale === 'zh-TW' && check.localized?.[ctx.locale]?.hint) ||
+        check.detail,
+    );
   await mkdir(codexLocation(ctx.entry, ctx.workspace, ctx.platform).codexHome, {
     recursive: true,
     mode: 0o700,
@@ -211,14 +258,14 @@ async function login(ctx: SetupContext) {
           /^https:\/\/auth\.openai\.com\/codex\/device$/.test(line)
         ) {
           sawUrl = true;
-          await ctx.show(`Open ${line} and sign in to ChatGPT.`);
+          await ctx.show(m.open(line));
         } else if (
           sawUrl &&
           !sawCode &&
           /^[A-Z0-9]{3,6}-[A-Z0-9]{3,6}$/.test(line)
         ) {
           sawCode = true;
-          await ctx.show(`Enter the one-time device code ${line}.`);
+          await ctx.show(m.code(line));
         }
       },
     })
@@ -235,28 +282,46 @@ async function login(ctx: SetupContext) {
   };
   const [result] = await Promise.all([device, status()]);
   if (result.exitCode !== 0 || !(await loggedIn(ctx, ctx.signal)))
-    throw new SetupError('Codex device login did not complete.');
+    throw new SetupError(m.incomplete);
   const email = await codexAccount(ctx);
   if (
     typeof email !== 'string' ||
     !/^[^\s@]{1,100}@[A-Za-z0-9.-]{1,100}\.[A-Za-z]{2,24}$/.test(email)
   )
-    throw new SetupError('Codex did not report a ChatGPT account to confirm.');
+    throw new SetupError(m.missingAccount);
   const answer = await ctx.prompt({
-    text: `Codex signed in as ${email}. Reply yes to confirm this account.`,
+    text: m.confirm(email),
   });
   if (answer.trim().toLowerCase() !== 'yes')
-    throw new SetupError(
-      'The Codex account was not confirmed. Rerun the command to sign in again.',
-    );
+    throw new SetupError(m.unconfirmed);
 }
 
 export const codexSetup: SetupStep[] = [
   {
     id: 'install',
     title: 'Install the pinned Codex CLI',
-    run: (ctx) => ctx.install(),
+    localized: { 'zh-TW': '安裝指定版本的 Codex CLI' },
+    async run(ctx) {
+      try {
+        await ctx.install();
+      } catch (error) {
+        if (ctx.locale !== 'zh-TW' || ctx.signal.aborted) throw error;
+        throw new SetupError(loginMessages[ctx.locale].installFailed, {
+          cause: error,
+        });
+      }
+    },
   },
-  { id: 'login', title: 'Sign in to Codex', run: login },
-  { id: 'test', title: 'Run a Codex test turn', run: (ctx) => ctx.testTurn() },
+  {
+    id: 'login',
+    title: 'Sign in to Codex',
+    localized: { 'zh-TW': '登入 Codex' },
+    run: login,
+  },
+  {
+    id: 'test',
+    title: 'Run a Codex test turn',
+    localized: { 'zh-TW': '執行 Codex 測試回合' },
+    run: (ctx) => ctx.testTurn(),
+  },
 ];

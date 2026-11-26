@@ -15,7 +15,9 @@ import type { Runtime } from './runtime.ts';
 import type { GuidedSetup, SetupRequest } from './setup.ts';
 
 import { untilAborted } from './abort.ts';
+import { failureText } from './checks.ts';
 import { conversationId } from './outbound.ts';
+import { systemMessages } from './system-messages.ts';
 import { reply } from './tasks.ts';
 
 interface Pending {
@@ -97,10 +99,9 @@ export class ChatSetup {
       (prompt.secret ? message.chatKind === 'dm' : !secret);
     if (accepted) prompt.response.resolve(message.text);
     else if (secret && owner && !message.edited && !previouslySecret) {
+      const m = systemMessages(this.#deps.runtime.config.locale).setup;
       const text =
-        message.chatKind === 'dm'
-          ? 'Reply directly to the current private setup prompt to submit credentials.'
-          : 'Submit setup credentials only in the bot’s direct message.';
+        message.chatKind === 'dm' ? m.replyPrivately : m.useDirectMessage;
       await adapter.send(reply(message, text)).catch(() =>
         this.#deps.log({
           level: 'warn',
@@ -118,27 +119,28 @@ export class ChatSetup {
     request: SetupRequest,
   ) {
     const { log, runtime, setup, store, trace } = this.#deps;
+    const { locale } = runtime.config;
+    const m = systemMessages(locale).setup;
     const adapterId = adapter.id;
     const signal = this.#shutdown.signal;
     const platform = () => {
       signal.throwIfAborted();
       const current = runtime.getAdapter(adapterId);
       if (!current || !this.#deps.isOwner(adapterId, message.userId))
-        throw new SetupError('The platform or its owner changed during setup.');
+        throw new SetupError(m.changedOwner);
       return current;
     };
     const show = async (text: string) => {
       await platform().send(reply(message, text));
     };
     if (this.#running) {
-      await show(
-        'A guided setup is already running. Finish the current prompts first.',
-      );
+      await show(m.alreadyRunning);
       return;
     }
     this.#running = (async () => {
       try {
         const result = await setup.run(request, {
+          locale,
           show,
           signal,
           measure: (step, run) =>
@@ -164,14 +166,11 @@ export class ChatSetup {
             };
             this.#pending = pending;
             try {
-              if (privatePrompt)
-                await show(
-                  'I’ll send the credential prompt in a direct message. Continue there for that step.',
-                );
+              if (privatePrompt) await show(m.sendingPrivately);
               signal.throwIfAborted();
               const receipt = await platform().send({
                 ...address,
-                text: text + ' Reply directly to this message.',
+                text: text + ' ' + m.reply,
               });
               if (secret)
                 store.markSetupSecret(
@@ -187,9 +186,7 @@ export class ChatSetup {
                 );
               } catch (error) {
                 if (!timeout.aborted) throw error;
-                throw new SetupError(
-                  'The setup prompt expired. Rerun the command to continue.',
-                );
+                throw new SetupError(m.expired);
               }
             } finally {
               if (this.#pending === pending) this.#pending = undefined;
@@ -197,9 +194,7 @@ export class ChatSetup {
           },
         });
         if (!result.enabled) {
-          await show(
-            `${result.id} signed in. It is disabled in the workspace configuration.`,
-          );
+          await show(m.disabled(result.id));
           return;
         }
         const attached = () =>
@@ -209,27 +204,20 @@ export class ChatSetup {
         const wait = AbortSignal.any([signal, AbortSignal.timeout(15_000)]);
         try {
           while (!attached()) await delay(50, undefined, { signal: wait });
-          await show(`${result.id} is attached.`);
+          await show(m.attached(result.id));
         } catch (error) {
           if (signal.aborted) throw error;
-          const details = runtime.reports
-            .filter(
-              ({ target, status }) =>
-                target === `${result.category}/${result.id}` &&
-                status === 'fail',
-            )
-            .map(({ detail }) => detail)
-            .join('\n');
-          await show(
-            `Setup saved for ${result.id}, but it has not attached. ${details || 'Check /status for the latest state.'}`,
+          const details = failureText(
+            runtime.reports.filter(
+              ({ target }) => target === `${result.category}/${result.id}`,
+            ),
+            locale,
           );
+          await show(m.saved(result.id) + '\n' + (details || m.checkStatus));
         }
       } catch (error) {
         if (!signal.aborted) {
-          const text =
-            error instanceof SetupError
-              ? error.message
-              : 'Setup could not complete. Check the workspace and rerun the command to resume.';
+          const text = error instanceof SetupError ? error.message : m.failed;
           await show(text).catch(() =>
             log({ level: 'warn', event: 'setup.feedback_failed', adapterId }),
           );

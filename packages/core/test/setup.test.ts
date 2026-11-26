@@ -282,6 +282,7 @@ test('runtime isolates agent and execution failures and keeps owner-visible chat
           title: 'Login',
           status: entry.id === 'bad' ? 'fail' : 'ok',
           detail: 'Sign in first.',
+          localized: { 'zh-TW': { title: '代理程式登入', hint: '請先登入。' } },
           capabilities: ['agent'],
         },
       ],
@@ -311,6 +312,9 @@ test('runtime isolates agent and execution failures and keeps owner-visible chat
           title: 'Bubblewrap',
           status: 'fail',
           detail: 'Missing bwrap.',
+          localized: {
+            'zh-TW': { title: 'Bubblewrap', hint: '請安裝 bwrap。' },
+          },
           capabilities: ['exec'],
         },
       ],
@@ -334,27 +338,36 @@ test('runtime isolates agent and execution failures and keeps owner-visible chat
       },
     ],
     defaultAgent: 'bad',
+    locale: 'zh-TW',
     exec: {},
     context: { summary: { enabled: false } },
   });
-  assert.match(platform.sent[0]?.text ?? '', /Environment checks failed/);
+  assert.deepEqual(platform.sent[0]?.text.split('\n'), [
+    '環境檢查有問題：',
+    'core · Git：請執行 tsugimori setup 查看安裝指令。',
+    'exec/local-sandbox · Bubblewrap：請安裝 bwrap。',
+    'agent/bad · 代理程式登入：請先登入。',
+  ]);
   assert.equal(platform.sent[0]?.chatId, ownerId);
   await platform.receive('status', '/status');
   assert.match(
     platform.sent.at(-1)?.text ?? '',
-    /agent\/bad · Login: Sign in first/,
+    /^閘道器運作中，已接上 1 個平台與 1 個代理程式。\n[\s\S]+代理程式登入：請先登入。$/,
   );
   await platform.receive('unavailable', 'Hello');
   await f.gateway.idle();
-  assert.match(platform.sent.at(-1)?.text ?? '', /Sign in first/);
+  assert.equal(
+    platform.sent.at(-1)?.text,
+    'agent/bad · 代理程式登入：請先登入。',
+  );
   await platform.receive('route', '/agent good');
+  assert.equal(platform.sent.at(-1)?.text, '已切換到代理程式 good。');
   await platform.receive('works', 'Hello');
   await f.gateway.idle();
   assert.equal(platform.sent.at(-1)?.text, 'Still working.');
   assert.equal(
-    platform.sent.filter(({ text }) =>
-      text.startsWith('Environment checks failed'),
-    ).length,
+    platform.sent.filter(({ text }) => text.startsWith('環境檢查有問題：'))
+      .length,
     1,
   );
   assert.equal(requests[0]?.toolsDisabled, true);

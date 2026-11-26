@@ -39,7 +39,7 @@ test(
         update_id: 10,
         message: {
           ...address,
-          from,
+          from: { ...from, username: 'ExampleUser' },
           message_id: 21,
           caption: '😀 @EXAMPLEBOT',
           caption_entities: [{ type: 'mention', offset: 3, length: 11 }],
@@ -128,11 +128,13 @@ test(
     assert.equal(first?.type, 'message');
     assert.equal(first.chatKind, 'supergroup');
     assert.equal(first.userId, '79');
+    assert.equal(first.userUsername, 'ExampleUser');
     assert.equal(first.text, '😀 @EXAMPLEBOT');
     assert.equal(first.replyTo, '9');
     assert.equal(first.mentionsBot, true);
     assert.equal(edit?.type, 'message');
     assert.equal(edit.edited, true);
+    assert.equal(edit.userUsername, null);
     assert.equal(edit.text, 'edited');
     assert.equal(edit.mentionsBot, true);
     assert.equal(reply?.type, 'message');
@@ -229,7 +231,7 @@ test(
 );
 
 test(
-  'sends links and native IDs as UTF-16 mention entities with literal surrounding text',
+  'renders native IDs as current @usernames or UTF-16 text mentions',
   { timeout: 4_000 },
   async (t) => {
     const sent: Record<string, unknown>[] = [];
@@ -244,7 +246,12 @@ test(
     };
     const adapter = new TelegramAdapter({ fetch: fakeFetch }, 'tg', '1:fake');
     t.after(() => adapter.stop());
-    await adapter.start({ emit: () => Promise.resolve() });
+    let username: string | null = null;
+    await adapter.start({
+      emit: () => Promise.resolve(),
+      getUser: (userId) =>
+        userId === '79' ? { display: 'First 👋', username } : undefined,
+    });
     const first = '😀 **literal** @example_user [other](https://example.com) ';
     const name = 'First 👋';
     const padding = 'x'.repeat(4094 - first.length - name.length);
@@ -265,10 +272,10 @@ test(
           text: first + name + padding,
           entities: [
             {
-              type: 'text_link',
+              type: 'text_mention',
               offset: first.length,
               length: name.length,
-              url: 'tg://user?id=79',
+              user: { id: 79 },
             },
           ],
         },
@@ -276,8 +283,8 @@ test(
           chat_id: '-1001',
           text: '第二位 😀!\n\nuser 81',
           entities: [
-            { type: 'text_link', offset: 0, length: 6, url: 'tg://user?id=80' },
-            { type: 'text_link', offset: 9, length: 7, url: 'tg://user?id=81' },
+            { type: 'text_mention', offset: 0, length: 6, user: { id: 80 } },
+            { type: 'text_mention', offset: 9, length: 7, user: { id: 81 } },
           ],
         },
       ],
@@ -285,6 +292,20 @@ test(
     assert.deepEqual(
       receipt.parts?.map(({ text }) => text),
       sent.map(({ text }) => text),
+    );
+    sent.length = 0;
+    username = 'current_user';
+    await adapter.send({
+      chatId: '-1001',
+      text: '請[原稿](tg://user?id=79)記得喝水。',
+    });
+    await adapter.send({ chatId: '-1001', text: '提醒', mentions: ['79'] });
+    assert.deepEqual(
+      [...sent],
+      [
+        { chat_id: '-1001', text: '請 @current_user 記得喝水。' },
+        { chat_id: '-1001', text: '提醒\n\n@current_user' },
+      ],
     );
     sent.length = 0;
     const prefix = '提醒😀 ';
@@ -328,6 +349,68 @@ test(
         },
       ],
     );
+    sent.length = 0;
+    username = 'renamed_user';
+    const reminderWithBoth = '😀 月光 👋，請提醒 小林。';
+    await adapter.send({
+      chatId: '-1001',
+      text: reminderWithBoth,
+      entities: [
+        { type: 'mention', offset: 3, length: 5, userId: '79' },
+        {
+          type: 'mention',
+          offset: reminderWithBoth.indexOf('小林'),
+          length: 2,
+          userId: '80',
+        },
+      ],
+    });
+    const delivered = '😀 @renamed_user，請提醒 小林。';
+    assert.deepEqual(
+      [...sent],
+      [
+        {
+          chat_id: '-1001',
+          text: delivered,
+          entities: [
+            {
+              type: 'text_mention',
+              offset: delivered.indexOf('小林'),
+              length: 2,
+              user: { id: 80 },
+            },
+          ],
+        },
+      ],
+    );
+    const recipientLine = '🔔 對象：';
+    const prompt = recipientLine + '@月光\n內容：\n';
+    const approvalWithMention = await adapter.send({
+      approval: true,
+      chatId: '-1001',
+      text: prompt + reminder,
+      entities: [
+        {
+          type: 'mention',
+          offset: recipientLine.length,
+          length: 3,
+          userId: '79',
+        },
+        { type: 'pre', offset: prompt.length, length: reminder.length },
+      ],
+    });
+    const renderedPrompt = recipientLine + '@renamed_user\n內容：\n';
+    const pre = {
+      type: 'pre',
+      offset: renderedPrompt.length,
+      length: reminder.length,
+    };
+    assert.deepEqual(approvalWithMention.approvalEntities, [pre]);
+    assert.deepEqual(sent.at(-1), {
+      chat_id: '-1001',
+      text: renderedPrompt + reminder,
+      entities: [pre],
+    });
     sent.length = 0;
     const long = '🌙'.repeat(2200) + '\n記得喝水';
     const approval = await adapter.send({
@@ -400,6 +483,10 @@ test(
       notice: '✅ 已允許一次',
       prompt: '🔔 同意\n你好😀',
       pre: { offset: 6, length: 4 },
+      entities: [
+        { type: 'mention', offset: 3, length: 2, userId: '79' },
+        { type: 'pre', offset: 6, length: 4 },
+      ],
     });
     await delay(30);
     assert.deepEqual(
@@ -425,7 +512,10 @@ test(
       chat_id: '-1001',
       message_id: 50,
       text: '🔔 同意\n你好😀\n\n✅ 已允許一次',
-      entities: [{ type: 'pre', offset: 6, length: 4 }],
+      entities: [
+        { type: 'text_mention', offset: 3, length: 2, user: { id: 79 } },
+        { type: 'pre', offset: 6, length: 4 },
+      ],
       reply_markup: { inline_keyboard: [] },
     });
   },

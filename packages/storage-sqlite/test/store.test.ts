@@ -26,9 +26,25 @@ test('applies generated migrations, enables WAL, and reopens existing data', asy
       threadId: 'topic',
     };
     const group = { ...chat, kind: 'group' as const, title: 'Test group' };
-    const user = { ...owner, display: 'Owner' };
+    const user = { ...owner, display: 'Owner', username: 'old_username' };
     assert.ok(store.recordInbound(group, user, source));
+    assert.ok(
+      store.recordInbound(
+        group,
+        { ...user, username: 'new_username' },
+        source,
+        true,
+      ),
+    );
     assert.equal(store.recordInbound(group, user, source), undefined);
+    assert.ok(
+      store.recordInbound(
+        group,
+        { ...owner, display: null },
+        { ...source, messageId: 'm2' },
+      ),
+    );
+    store.markDeleted(chat, 'm2');
     store.setAllowlisted(chat, true);
     store.saveCursor('a', 'bot', { offset: 3, updatedAt: 123 });
     store.saveCursor('a', 'bot', { offset: 5, updatedAt: 456 });
@@ -66,6 +82,17 @@ test('applies generated migrations, enables WAL, and reopens existing data', asy
 
   const reopened = new SqliteStore(path);
   try {
+    assert.deepEqual(reopened.getUser(owner), {
+      ...owner,
+      display: 'Owner',
+      username: 'new_username',
+    });
+    reopened.recordUser({ ...owner, display: null, username: null });
+    assert.deepEqual(reopened.getUser(owner), {
+      ...owner,
+      display: 'Owner',
+      username: null,
+    });
     assert.equal(reopened.getChat(chat)?.allowlisted, true);
     assert.deepEqual(reopened.getCursor('a', 'bot'), {
       offset: 5,

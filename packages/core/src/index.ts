@@ -44,6 +44,7 @@ import { PluginRegistry } from './registry.ts';
 import { Runtime } from './runtime.ts';
 import { GuidedSetup } from './setup.ts';
 import { BackgroundSummaries } from './summary.ts';
+import { systemMessages } from './system-messages.ts';
 import { reply, Tasks } from './tasks.ts';
 import { shouldTrigger } from './trigger.ts';
 
@@ -310,7 +311,8 @@ export class Gateway {
 
   async #reportFailures() {
     if (this.#reportedFailures) return;
-    const failures = failureText(this.#runtime.reports);
+    const { locale } = this.#runtime.config;
+    const failures = failureText(this.#runtime.reports, locale);
     if (!failures) return;
     for (const id of this.#runtime.adapterIds) {
       const owner = this.#auth.owner(id);
@@ -320,8 +322,7 @@ export class Gateway {
       try {
         await this.#outbound.send(adapter, {
           chatId: owner,
-          text: `Environment checks failed:
-${failures}`,
+          text: `${systemMessages(locale).environment}\n${failures}`,
         });
       } catch {
         this.#deps.log({
@@ -414,10 +415,20 @@ ${failures}`,
         queryId: event.queryId,
         decision: result?.decision,
         pre: result?.pre,
+        entities: result?.entities,
       });
       return;
     }
-    if (await this.#chatSetup.receive(adapter, chat, event)) return;
+    const user = {
+      adapterId: chat.adapterId,
+      userId: event.userId,
+      display: event.userDisplay ?? null,
+      username: event.userUsername,
+    };
+    if (await this.#chatSetup.receive(adapter, chat, event)) {
+      store.recordUser(user);
+      return;
+    }
     const command = parseCommand(event.text);
     const privateCommand =
       command?.name === 'pair' ||
@@ -430,11 +441,7 @@ ${failures}`,
           kind: event.chatKind,
           title: event.chatTitle ?? null,
         },
-        {
-          adapterId: chat.adapterId,
-          userId: event.userId,
-          display: event.userDisplay ?? null,
-        },
+        user,
         {
           ...chat,
           messageId: event.messageId,
@@ -471,6 +478,7 @@ ${failures}`,
           messageId: event.replyTo,
           decision: result.decision,
           pre: result.pre,
+          entities: result.entities,
         });
         return;
       }
@@ -541,7 +549,9 @@ ${failures}`,
         }
       }
       const delayNote = delayed
-        ? `[Delayed schedule, originally due ${new Date(run.dueAt).toISOString()}]\n\n`
+        ? systemMessages(this.#runtime.config.locale).delayed(
+            new Date(run.dueAt).toISOString(),
+          ) + '\n\n'
         : '';
       const target: Omit<OutboundMessage, 'text'> = {
         ...schedule.target,
@@ -608,7 +618,7 @@ ${failures}`,
     if (result)
       return {
         ...result,
-        pre: this.#tasks.resolveApproval({
+        ...this.#tasks.resolveApproval({
           ...result,
           decidedBy: input.userId,
         }),
@@ -652,14 +662,14 @@ ${failures}`,
     { name, args }: Command,
   ) {
     const { store } = this.#deps;
+    const { locale } = this.#runtime.config;
+    const m = systemMessages(locale);
     const send = (text: string) =>
       this.#outbound.send(adapter, reply(message, text));
     if (name === 'pair') {
       if (message.chatKind !== 'dm' || this.#auth.owner(adapter.id)) return;
       const paired = this.#auth.claimPairing(adapter.id, message.userId, args);
-      await send(
-        paired ? 'Owner paired.' : 'Pairing code is invalid or expired.',
-      );
+      await send(paired ? m.pairing.success : m.pairing.invalid);
       if (paired) await this.#reportFailures();
       return;
     }
@@ -671,7 +681,7 @@ ${failures}`,
             args,
           );
         if (!match?.[2]) {
-          await send('Usage: /add <agent|platform> <kind> [--id <id>]');
+          await send(m.addUsage);
           break;
         }
         await this.#chatSetup.start(adapter, message, {
@@ -683,7 +693,7 @@ ${failures}`,
         break;
       }
       case 'login':
-        if (!args) await send('Usage: /login <agentId>');
+        if (!args) await send(m.loginUsage);
         else
           await this.#chatSetup.start(adapter, message, {
             mode: 'login',
@@ -693,70 +703,66 @@ ${failures}`,
       case 'allow':
       case 'deny':
         store.setAllowlisted(chat, name === 'allow');
-        await send(
-          name === 'allow'
-            ? 'Chat allowlisted.'
-            : 'Chat removed from the allowlist.',
-        );
+        await send(name === 'allow' ? m.allowlisted : m.removedFromAllowlist);
         break;
       case 'agent':
         if (!this.#runtime.getAgent(args)) {
-          await send(
-            this.#runtime.unavailable(args) || 'That agent is not attached.',
-          );
+          await send(this.#runtime.unavailable(args) || m.agentUnavailable);
           break;
         }
         if (store.getChat(chat)?.agentId !== args) {
           this.#tasks.invalidateSession(chat);
           store.setChatRoute(chat, { agentId: args });
         }
-        await send(`Agent set to ${args}.`);
+        await send(m.agentSet(args));
         break;
       case 'model':
         if (!args) {
-          await send('Usage: /model <name>');
+          await send(m.modelUsage);
           break;
         }
         if (store.getChat(chat)?.model !== args) {
           this.#tasks.invalidateSession(chat);
           store.setChatRoute(chat, { model: args });
         }
-        await send(`Model set to ${args}.`);
+        await send(m.modelSet(args));
         break;
       case 'previews': {
         const open = this.#previews?.list(chat.adapterId) ?? [];
         await send(
           open.length
             ? open
-                .map(
-                  (item) =>
-                    `${item.id} · ${item.url} · port ${item.port} · expires ${new Date(item.expiresAt).toISOString()}`,
+                .map((item) =>
+                  m.preview(
+                    item.id,
+                    item.url,
+                    item.port,
+                    new Date(item.expiresAt).toISOString(),
+                  ),
                 )
                 .join('\n')
-            : 'No open previews.',
+            : m.noPreviews,
         );
         break;
       }
       case 'preview': {
         const match = /^close\s+(\S+)$/.exec(args);
         if (!match?.[1]) {
-          await send('Usage: /preview close <id>');
+          await send(m.previewCloseUsage);
           break;
         }
         const closed = await this.#previews?.ownerClose(
           chat.adapterId,
           match[1],
         );
-        await send(
-          closed ? 'Preview closed.' : 'No open preview with that ID.',
-        );
+        await send(closed ? m.previewClosed : m.previewMissing);
         break;
       }
       case 'status':
         await send(
           [
-            `Gateway running with ${this.#runtime.adapterCount} platform(s) and ${this.#runtime.agentCount} agent(s).`,
-            failureText(this.#runtime.reports),
+            m.status(this.#runtime.adapterCount, this.#runtime.agentCount),
+            failureText(this.#runtime.reports, locale),
           ]
             .filter(Boolean)
             .join('\n'),
