@@ -68,15 +68,32 @@ export interface SetupPatch {
   ownerId?: string;
 }
 
+export interface PromptChoice {
+  label: string;
+  localized?: { 'zh-TW'?: string };
+  value: string;
+}
+
+export interface SetupPrompt {
+  choices?: readonly PromptChoice[];
+  secret?: boolean;
+  text: string;
+}
+
+export const yesNoChoices: readonly PromptChoice[] = [
+  { value: 'yes', label: 'Yes', localized: { 'zh-TW': '是' } },
+  { value: 'no', label: 'No', localized: { 'zh-TW': '否' } },
+];
+
 export interface SetupContext extends CheckContext {
   install(): Promise<void>;
   locale?: 'en' | 'zh-TW';
-  prompt(options: {
-    /** Override the plan's question count for a conditional path. */
-    questions?: { maximum?: boolean; total: number };
-    secret?: boolean;
-    text: string;
-  }): Promise<string>;
+  prompt(
+    options: SetupPrompt & {
+      /** Override the plan's question count for a conditional path. */
+      questions?: { maximum?: boolean; total: number };
+    },
+  ): Promise<string>;
   /** Report a credential saved by an external login command. Pass its name only. */
   recordCredential(name: string): void;
   runCheck(id: string): Promise<CheckItem>;

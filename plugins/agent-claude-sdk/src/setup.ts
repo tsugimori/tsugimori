@@ -7,7 +7,12 @@ import type {
   SetupStep,
 } from '@tsugimori/plugin-sdk';
 
-import { agentHome, credentialKey, SetupError } from '@tsugimori/plugin-sdk';
+import {
+  agentHome,
+  credentialKey,
+  SetupError,
+  yesNoChoices,
+} from '@tsugimori/plugin-sdk';
 import { constants } from 'node:fs';
 import { access, mkdir, stat } from 'node:fs/promises';
 import { createRequire } from 'node:module';
@@ -29,7 +34,7 @@ const loginMessages = {
     missingAccount:
       'Claude did not report a signed-in account. Retry with login or use a setup token.',
     confirm: (email: string) =>
-      `Claude signed in as ${email}. Reply yes to confirm this account.`,
+      `Claude signed in as ${email}. Reply yes to confirm this account or no to decline.`,
     unconfirmed: 'The Claude account was not confirmed.',
     open: (url: string) => `Open this Claude sign-in link: ${url}`,
     code: 'Enter the one-time authorization code shown by Claude.',
@@ -49,7 +54,7 @@ const loginMessages = {
     missingAccount:
       'Claude 未回報已登入的帳號。請重新以 login 登入，或使用設定權杖。',
     confirm: (email: string) =>
-      `Claude 已使用 ${email} 登入。請回覆 yes 確認此帳號。`,
+      `Claude 已使用 ${email} 登入。請回覆 yes 確認此帳號，或回覆 no 拒絕。`,
     unconfirmed: 'Claude 帳號尚未確認。',
     open: (url: string) => `請開啟 Claude 登入連結：${url}`,
     code: '請輸入 Claude 顯示的一次性授權碼。',
@@ -315,6 +320,18 @@ async function login(ctx: SetupContext) {
   const cli = resolveBundledCli(ctx.platform, ctx.arch, ctx.locale);
   const method = (
     await ctx.prompt({
+      choices: [
+        {
+          value: 'login',
+          label: 'Browser sign-in',
+          localized: { 'zh-TW': '瀏覽器登入' },
+        },
+        {
+          value: 'token',
+          label: 'Setup token',
+          localized: { 'zh-TW': '設定權杖' },
+        },
+      ],
       questions: { maximum: true, total: 3 },
       text: m.method,
     })
@@ -375,6 +392,7 @@ async function login(ctx: SetupContext) {
   )
     throw new SetupError(m.missingAccount);
   const answer = await ctx.prompt({
+    choices: yesNoChoices,
     questions: { total: result?.prompted ? 3 : 2 },
     text: m.confirm(email),
   });

@@ -21,6 +21,8 @@ Add an entry under `platforms` in `tsugimori.json`.
 
 Run `corepack pnpm exec tsugimori add platform telegram --dir ./ws` for the first bot, or `/add platform telegram [--id <id>]` from an existing owner chat.
 
+Telegram shows inline buttons for guided setup and command choices, and owners can also type their answers.
+
 1. Enter the bot token in the terminal's hidden prompt or reply directly to the bot's secret prompt in DM. Setup validates the token with `getMe` and saves it in `.env` as `TELEGRAM_BOT_TOKEN_<ID_HEX>`, where `ID_HEX` is the uppercase UTF-8 hex encoding of the instance ID.
 2. Enter the numeric user ID of the owner. Setup checks the instance, then writes the platform entry and owner mapping to the workspace configuration. A running gateway attaches the bot on reload.
 

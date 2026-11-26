@@ -99,7 +99,12 @@ for await (const line of createInterface({ input: process.stdin })) {
   } else if (method === 'config/read') {
     answer({ config: settings ? { model: null, model_reasoning_effort: null, service_tier: null } : {} });
   } else if (method === 'model/list') {
-    answer({ data: [{ model: 'fake-model', isDefault: true, defaultReasoningEffort: 'medium' }] });
+    answer(params.cursor === 'page-2'
+      ? { data: [{ id: 'alternate' }, { model: 'hidden-model', hidden: true }] }
+      : {
+          data: [{ model: 'fake-model', isDefault: true, defaultReasoningEffort: 'medium' }],
+          nextCursor: 'page-2',
+        });
   } else if (method === 'thread/start' || method === 'thread/resume') {
     assert.ok(initialized);
     assert.equal(params.cwd, '/tmp/work');
@@ -627,7 +632,9 @@ test(
       { command: 'fake-codex', codexHome: '/tmp/fake-codex-home' },
     );
     t.after(() => agent.stop());
+    assert.deepEqual(await agent.listModels(), []);
     await agent.start();
+    assert.deepEqual(await agent.listModels(), ['fake-model', 'alternate']);
     assert.equal(agent.describeQuota(), undefined);
 
     const seen: string[] = [];

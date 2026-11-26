@@ -137,6 +137,10 @@ export class ClaudeAgent implements AgentConnector {
     return { ...(model && { model }), ...(effort && { effort }) };
   }
 
+  listModels() {
+    return ['sonnet', 'opus', 'haiku'];
+  }
+
   describeSession(
     sessionId: string,
     settings?: Pick<AgentRequest, 'model' | 'serviceTier' | 'thinking'>,

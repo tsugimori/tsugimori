@@ -8,6 +8,7 @@ import type {
   OutboundMessage,
   PlatformAdapter,
   PlatformInboundEvent,
+  PromptChoice,
   ScheduledInboundEvent,
   SetupDependencies,
   TunnelProvider,
@@ -46,8 +47,10 @@ import type { PreviewProviders } from './previews.ts';
 import type { RemovalPlan } from './removal.ts';
 import type { PlatformNotice } from './runtime.ts';
 
+import { untilAborted } from './abort.ts';
 import { acceptsServiceTier, formatServiceTier } from './agent-settings.ts';
 import { approvalDecisionText, approvalMessages } from './approval-messages.ts';
+import { ChatChoices, supportsChoices } from './chat-choices.ts';
 import { chatCommands, parseCommand } from './chat-commands.ts';
 import { ChatRemoval } from './chat-removal.ts';
 import { ChatSetup } from './chat-setup.ts';
@@ -95,6 +98,12 @@ type LinkedApproval = Exclude<
   record: ApprovalRecord;
 };
 
+function commandChoices(values: Iterable<string>): PromptChoice[] {
+  return [...new Set(values)].map((value) => ({ value, label: value }));
+}
+
+const choicesPerPage = 80;
+
 export class Gateway {
   readonly #deps;
   readonly #registry: PluginRegistry;
@@ -111,6 +120,7 @@ export class Gateway {
   readonly #chatSetup: ChatSetup;
   readonly #chatRemoval: ChatRemoval;
   readonly removal: Removal;
+  readonly #chatChoices: ChatChoices;
   readonly #commandMenus: CommandMenus;
   readonly #platformNotifications = new Map<string, Promise<void>>();
   readonly #ownerDeliveries = new Map<Promise<void>, string>();
@@ -239,7 +249,17 @@ export class Gateway {
       store,
       trace: this.#trace,
     });
+    this.#chatChoices = new ChatChoices({
+      isOwner: (adapter, userId) =>
+        !this.#isStopping() &&
+        this.#runtime.getAdapter(adapter.id) === adapter &&
+        this.#auth.isOwner({ adapterId: adapter.id, userId }),
+      locale: () => this.#runtime.config.locale,
+      log,
+      trace: this.#trace,
+    });
     this.#chatSetup = new ChatSetup({
+      choices: this.#chatChoices,
       setup: new GuidedSetup({ ...setup, store, workspace, registry }),
       isOwner: (adapterId, userId) => this.#auth.isOwner({ adapterId, userId }),
       runtime: this.#runtime,
@@ -667,6 +687,7 @@ export class Gateway {
     } finally {
       try {
         await this.#chatSetup.stop();
+        await this.#chatChoices.stop();
         await this.#summaries.stop();
         await this.#expiry;
         await this.#runtime.stop();
@@ -808,6 +829,14 @@ export class Gateway {
         display: event.userDisplay ?? null,
         username: event.userUsername,
       });
+      if (
+        await this.#chatChoices.receive(
+          adapter,
+          event,
+          migratedFrom !== undefined,
+        )
+      )
+        return;
       const result =
         migratedFrom === undefined
           ? this.#resolveApproval(adapter, {
@@ -931,10 +960,30 @@ export class Gateway {
       userId: event.userId,
     });
     if (command) {
+      const finish = owner
+        ? this.#chatChoices.claimReply(adapter, message, command)
+        : undefined;
       await this.#trace.span(
         'trigger.command',
         { ...chat, command: command.name },
-        () => this.#command(adapter, chat, message, stored.seq, owner, command),
+        async () => {
+          try {
+            await this.#command(
+              adapter,
+              chat,
+              message,
+              stored.seq,
+              owner,
+              command,
+              finish,
+            );
+          } catch (error) {
+            await finish?.(
+              systemMessages(this.#runtime.config.locale).choices.failed,
+            );
+            throw error;
+          }
+        },
       );
       return;
     }
@@ -1323,7 +1372,12 @@ export class Gateway {
     const field = name === 'fast' ? 'serviceTier' : name;
     const label = m.settingLabels[field];
     const fastTier = args === 'on' ? 'fast' : 'default';
-    if (name === 'fast' && (!agent || !acceptsServiceTier(agent, fastTier)))
+    if (
+      name === 'fast' &&
+      (!agent ||
+        (!acceptsServiceTier(agent, fastTier) &&
+          (args || !acceptsServiceTier(agent, 'fast'))))
+    )
       return m.fastUnsupported;
 
     if (!args) {
@@ -1371,6 +1425,34 @@ export class Gateway {
         );
   }
 
+  async #settingChoices(chat: ChatRef, name: 'fast' | 'model' | 'thinking') {
+    const agent = this.#tasks.route(chat).selected?.agent;
+    if (name === 'thinking')
+      return commandChoices([...(agent?.settings?.thinking ?? []), 'default']);
+    if (name === 'fast')
+      return commandChoices([
+        ...(agent && acceptsServiceTier(agent, 'fast') ? ['on'] : []),
+        ...(agent && acceptsServiceTier(agent, 'default')
+          ? ['off', 'default']
+          : []),
+      ]);
+    if (!agent?.listModels) return [];
+    try {
+      const models = await untilAborted(
+        AbortSignal.timeout(2_000),
+        async () => agent.listModels?.() ?? [],
+      );
+      return models.length ? commandChoices([...models, 'default']) : [];
+    } catch {
+      this.#deps.log({
+        level: 'warn',
+        event: 'choice.models_unavailable',
+        ...chat,
+      });
+      return [];
+    }
+  }
+
   async #command(
     adapter: PlatformAdapter,
     chat: ChatRef,
@@ -1378,12 +1460,92 @@ export class Gateway {
     seq: number,
     owner: boolean,
     { name, args }: Command,
+    finish?: (text: string) => Promise<void>,
   ) {
     const { store } = this.#deps;
     const { locale } = this.#runtime.config;
     const m = systemMessages(locale);
-    const send = (text: string) =>
-      this.#outbound.send(adapter, reply(message, text));
+    const selectedCommand = m.choices.answer(`/${name} ${args}`);
+    const send = async (
+      text: string,
+      choices: readonly PromptChoice[] = [],
+    ) => {
+      if (!choices.length) {
+        if (finish) await finish(text);
+        else await this.#outbound.send(adapter, reply(message, text));
+        return;
+      }
+      if (!supportsChoices(adapter)) {
+        await this.#outbound.send(
+          adapter,
+          reply(
+            message,
+            [
+              text,
+              m.choices.values(
+                choices.map(({ value }) => `/${name} ${value}`).join(' · '),
+              ),
+            ].join('\n'),
+          ),
+        );
+        return;
+      }
+      if (finish) await finish(selectedCommand);
+      const pages = Math.ceil(choices.length / choicesPerPage);
+      const showPage = async (index: number) => {
+        if (this.#isStopping()) return;
+        const offset = index * choicesPerPage;
+        const page = choices.slice(offset, offset + choicesPerPage);
+        const previous = { value: '', label: m.choices.previous };
+        const next = { value: '', label: m.choices.next };
+        if (index > 0) page.push(previous);
+        if (index + 1 < pages) page.push(next);
+        const prompt =
+          pages > 1 ? `${text}\n${m.choices.page(index + 1, pages)}` : text;
+        await this.#chatChoices.send(
+          adapter,
+          reply(message, prompt),
+          message.userId,
+          page,
+          async (choice, edit) => {
+            if (choice === previous || choice === next) {
+              const target = index + (choice === previous ? -1 : 1);
+              await edit(prompt);
+              await showPage(target);
+              return;
+            }
+            await this.#trace.span(
+              'trigger.command',
+              { ...chat, command: name },
+              () =>
+                this.#command(
+                  adapter,
+                  chat,
+                  message,
+                  seq,
+                  this.#auth.isOwner({
+                    adapterId: adapter.id,
+                    userId: message.userId,
+                  }),
+                  { name, args: choice.value },
+                  edit,
+                ),
+            );
+          },
+          {
+            command: name,
+            deliver: (outbound) => this.#outbound.send(adapter, outbound),
+            expires: true,
+          },
+        );
+      };
+      await showPage(0);
+    };
+    const setup = async (request: Parameters<ChatSetup['start']>[2]) => {
+      const started = await this.#chatSetup.start(adapter, message, request);
+      if (!started) await send(m.setup.alreadyRunning);
+      else if (finish) await finish(selectedCommand);
+    };
     if (name === 'pair') {
       if (message.chatKind !== 'dm' || this.#auth.owner(adapter.id)) return;
       const paired = this.#auth.claimPairing(adapter.id, message.userId, args);
@@ -1405,6 +1567,35 @@ export class Gateway {
         );
         break;
       case 'add': {
+        if (!args) {
+          await send(m.addUsage, [
+            {
+              value: 'agent',
+              label: 'Agent',
+              localized: { 'zh-TW': '代理程式' },
+            },
+            {
+              value: 'platform',
+              label: 'Platform',
+              localized: { 'zh-TW': '平台' },
+            },
+          ]);
+          break;
+        }
+        if (args === 'agent' || args === 'platform') {
+          const kinds =
+            args === 'agent'
+              ? this.#registry.agentKinds
+              : this.#registry.platformKinds;
+          await send(
+            kinds.size ? m.choices.addKind(args) : m.choices.noPlugins(args),
+            [...kinds].map((kind) => ({
+              value: `${args} ${kind}`,
+              label: kind,
+            })),
+          );
+          break;
+        }
         const match =
           /^(agent|platform)\s+([A-Za-z0-9_.:-]+)(?:\s+--id\s+([A-Za-z0-9_.:-]+))?$/.exec(
             args,
@@ -1413,7 +1604,7 @@ export class Gateway {
           await send(m.addUsage);
           break;
         }
-        await this.#chatSetup.start(adapter, message, {
+        await setup({
           mode: 'add',
           category: match[1] === 'agent' ? 'agent' : 'platform',
           kind: match[2],
@@ -1422,9 +1613,13 @@ export class Gateway {
         break;
       }
       case 'login':
-        if (!args) await send(m.loginUsage);
+        if (!args)
+          await send(
+            m.loginUsage,
+            commandChoices(this.#runtime.config.agents.map(({ id }) => id)),
+          );
         else
-          await this.#chatSetup.start(adapter, message, {
+          await setup({
             mode: 'login',
             id: args,
           });
@@ -1454,6 +1649,29 @@ export class Gateway {
         await send(name === 'allow' ? m.allowlisted : m.removedFromAllowlist);
         break;
       case 'agent': {
+        if (!args) {
+          const current = store.getChat(chat);
+          const route = this.#tasks.route(chat, current);
+          const chatAgent =
+            current?.agentId ?? store.getWorkspaceSettings(chat)?.agentId;
+          const source =
+            chatAgent !== undefined && chatAgent === route.agentId
+              ? m.settingSources.chat
+              : m.settingSources.default;
+          await send(
+            m.settingCurrent(
+              m.settingLabels.agent,
+              route.agentId ?? m.unset,
+              source,
+            ),
+            commandChoices(
+              this.#runtime.config.agents.flatMap(({ id }) =>
+                this.#runtime.getAgent(id) ? [id] : [],
+              ),
+            ),
+          );
+          break;
+        }
         const next = this.#runtime.getAgent(args);
         if (!next) {
           await send(this.#runtime.unavailable(args) || m.agentUnavailable);
@@ -1496,7 +1714,10 @@ export class Gateway {
       case 'model':
       case 'thinking':
       case 'fast':
-        await send(this.#chatAgentSetting(chat, name, args));
+        await send(
+          this.#chatAgentSetting(chat, name, args),
+          args ? [] : await this.#settingChoices(chat, name),
+        );
         break;
       case 'compact':
         if (
@@ -1527,6 +1748,14 @@ export class Gateway {
         break;
       }
       case 'preview': {
+        if (args === 'close') {
+          const open = this.#previews?.list(chat.adapterId) ?? [];
+          await send(
+            open.length ? m.previewCloseUsage : m.noPreviews,
+            open.map(({ id }) => ({ value: `close ${id}`, label: id })),
+          );
+          break;
+        }
         const match = /^close\s+(\S+)$/.exec(args);
         if (!match?.[1]) {
           await send(m.previewCloseUsage);

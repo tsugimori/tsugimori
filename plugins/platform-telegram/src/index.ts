@@ -299,21 +299,23 @@ export class TelegramAdapter implements PlatformAdapter {
       throw new SendFailure({ parts, deliveryUnknown: false }, error);
     }
     const controls = message.approval ? messages.length - 1 : 0;
+    const keyboard = [];
+    const buttons = message.buttons ?? [];
+    for (let index = 0; index < buttons.length; index += 4)
+      keyboard.push(
+        buttons.slice(index, index + 4).map(({ id, label }) => ({
+          text: label,
+          callback_data: id,
+        })),
+      );
     try {
       for (const [index, part] of messages.entries()) {
         const { text, entities } = part;
         const body = {
           text,
           reply_markup:
-            index === controls && message.buttons?.length
-              ? {
-                  inline_keyboard: [
-                    message.buttons.map((button) => ({
-                      text: button.label,
-                      callback_data: button.id,
-                    })),
-                  ],
-                }
+            index === controls && keyboard.length
+              ? { inline_keyboard: keyboard }
               : undefined,
         };
         const post = (entities: typeof part.entities, retries?: number) => {
@@ -459,7 +461,7 @@ export class TelegramAdapter implements PlatformAdapter {
       if (queryId)
         await this.#api.call(
           'answerCallbackQuery',
-          { callback_query_id: queryId, text: notice },
+          { callback_query_id: queryId, text: notice || undefined },
           signal,
         );
     } finally {

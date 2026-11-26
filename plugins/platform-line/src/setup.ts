@@ -11,6 +11,7 @@ import {
   parseWebhookBaseUrl,
   SetupError,
   webhookBaseUrlPattern,
+  yesNoChoices,
 } from '@tsugimori/plugin-sdk';
 import { createServer } from 'node:http';
 
@@ -273,7 +274,7 @@ const messages = {
     rejectedToken:
       'LINE bot info failed. Check the channel access token and try again.',
     confirm: (name: string) =>
-      `LINE identified the bot as ${name}. Type yes to confirm.`,
+      `LINE identified the bot as ${name}. Type yes to confirm or no to decline.`,
     unconfirmed: 'LINE bot identity was not confirmed.',
     askUrl:
       'Enter the public HTTPS base URL for LINE (a path prefix is optional), or reply skip.',
@@ -303,7 +304,8 @@ const messages = {
     token: '請輸入 LINE 頻道的長效存取權杖。',
     invalidToken: '請輸入有效的 LINE 頻道存取權杖。',
     rejectedToken: '無法取得 LINE 機器人資訊。請檢查頻道存取權杖後重試。',
-    confirm: (name: string) => `LINE 機器人名稱為 ${name}。請輸入 yes 確認。`,
+    confirm: (name: string) =>
+      `LINE 機器人名稱為 ${name}。請輸入 yes 確認或 no 拒絕。`,
     unconfirmed: '尚未確認 LINE 機器人身分。',
     askUrl:
       '請輸入 LINE 公開的 HTTPS 基底網址（可包含路徑前綴），或回覆 skip 略過。',
@@ -384,7 +386,10 @@ export const lineSetup: SetupStep[] = [
         throw new SetupError(m.rejectedToken);
       }
       const name = bot.displayName.replace(/[\r\n\u2028\u2029]+/gu, ' ');
-      const answer = await ctx.prompt({ text: m.confirm(name) });
+      const answer = await ctx.prompt({
+        choices: yesNoChoices,
+        text: m.confirm(name),
+      });
       if (answer.trim().toLowerCase() !== 'yes')
         throw new SetupError(m.unconfirmed);
       const secretEnv = credentialKey(defaultSecretEnv, ctx.entry.id);
@@ -411,7 +416,14 @@ export const lineSetup: SetupStep[] = [
       const m = messages[ctx.locale ?? 'en'];
       let question = m.askUrl;
       for (let attempt = 0; attempt < 2; attempt++) {
-        const answer = (await ctx.prompt({ text: question })).trim();
+        const answer = (
+          await ctx.prompt({
+            choices: [
+              { value: 'skip', label: 'Skip', localized: { 'zh-TW': '略過' } },
+            ],
+            text: question,
+          })
+        ).trim();
         if (answer.toLowerCase() === 'skip') return;
         if (parseWebhookBaseUrl(answer)) {
           ctx.writeConfig({ entry: { publicUrl: answer } });
@@ -455,7 +467,10 @@ export const lineCompletion: SetupCompletion = {
       ctx.signal.throwIfAborted();
       return `${instructions}\n${m.unknown}`;
     }
-    const answer = await ctx.prompt({ text: m.confirmWebhook(status, url) });
+    const answer = await ctx.prompt({
+      choices: yesNoChoices,
+      text: m.confirmWebhook(status, url),
+    });
     if (answer.trim().toLowerCase() !== 'yes')
       return `${instructions}\n${status}`;
     try {

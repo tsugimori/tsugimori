@@ -2931,9 +2931,22 @@ test(
     assert.ok(
       f.store.listPreviews().every(({ url }) => !url.includes('token')),
     );
-    await f.platform.emit(
-      inbound('owner-close', '/preview close preview-1', group),
-    );
+    await f.platform.emit(inbound('owner-close', '/preview close', group));
+    const menu = f.platform.sent.at(-1);
+    assert.ok(menu?.buttons?.length);
+    assert.deepEqual(menu.buttons.map(({ label }) => label).sort(), [
+      'preview-1',
+      'preview-2',
+    ]);
+    await f.platform.emit({
+      type: 'callback',
+      chatId: chat.chatId,
+      messageId: menu.messageId,
+      callbackId: menu.buttons.find(({ label }) => label === 'preview-1')!.id,
+      queryId: 'close-preview',
+      userId: 'owner',
+    });
+    assert.equal(f.platform.feedback.at(-1)?.decisionText, 'Preview closed.');
     assert.deepEqual(closed, ['preview-1']);
     controller.abort();
     await until(t, () => f.store.listPreviews().length === 0);

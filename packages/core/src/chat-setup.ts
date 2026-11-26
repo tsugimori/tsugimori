@@ -10,12 +10,14 @@ import type { Tracer } from '@tsugimori/trace';
 import { SetupError } from '@tsugimori/plugin-sdk';
 import { setTimeout as delay } from 'node:timers/promises';
 
+import type { ChatChoices } from './chat-choices.ts';
 import type { Command } from './chat-commands.ts';
 import type { Logger } from './hooks.ts';
 import type { Runtime } from './runtime.ts';
 import type { GuidedSetup, SetupRequest } from './setup.ts';
 
 import { untilAborted } from './abort.ts';
+import { choiceLabel, supportsChoices } from './chat-choices.ts';
 import { failureText } from './checks.ts';
 import { conversationId } from './outbound.ts';
 import { SetupCancelled } from './setup.ts';
@@ -27,7 +29,7 @@ interface Pending {
   chatId: string;
   messageId?: string;
   origin: string;
-  response: ReturnType<typeof Promise.withResolvers<string>>;
+  respond(text: string): void;
   secret: boolean;
   userId: string;
 }
@@ -43,6 +45,7 @@ interface Running {
 }
 
 interface Dependencies {
+  choices: ChatChoices;
   isOwner(adapterId: string, userId: string): boolean;
   log: Logger;
   runtime: Runtime;
@@ -138,7 +141,7 @@ export class ChatSetup {
       !message.edited &&
       !previouslySecret &&
       (prompt.secret ? message.chatKind === 'dm' : !secret);
-    if (accepted) prompt.response.resolve(message.text);
+    if (accepted) prompt.respond(message.text);
     else if (
       secret &&
       !privateReply &&
@@ -227,15 +230,13 @@ export class ChatSetup {
     const show = async (text: string) => {
       await platform().send(reply(message, text));
     };
-    if (this.#running) {
-      await show(m.alreadyRunning);
-      return;
-    }
+    if (this.#running) return false;
     const origin = conversationId(message);
     const originName = (
       message.chatTitle ||
       (message.chatKind === 'dm' ? m.directMessage : origin)
     ).replace(/\s+/gu, ' ');
+    let promptClosed: Promise<void> | undefined;
     const done = (async () => {
       try {
         const result = await setup.run(request, {
@@ -250,18 +251,50 @@ export class ChatSetup {
             while (runtime.getAgent(id))
               await delay(50, undefined, { signal: wait });
           },
-          prompt: async ({ secret = false, text }, progress) => {
+          prompt: async ({ choices, secret = false, text }, progress) => {
+            const closed = Promise.withResolvers<void>();
+            promptClosed = closed.promise;
             const privatePrompt = secret && message.chatKind !== 'dm';
             const address: Omit<OutboundMessage, 'text'> = privatePrompt
               ? { chatId: message.userId }
               : reply(message, '');
+            const messages = systemMessages(locale).choices;
+            const options = secret ? [] : (choices ?? []);
+            const response = Promise.withResolvers<string>();
+            let timeout: AbortSignal | undefined;
+            let answered = false;
+            let feedback: Promise<void> | undefined;
+            let buttons: Awaited<ReturnType<ChatChoices['send']>> | undefined;
+            const respond = (
+              answer: string,
+              finish = buttons?.finish,
+              label?: string,
+            ) => {
+              if (answered || signal.aborted || timeout?.aborted) return;
+              answered = true;
+              if (finish) {
+                const typed = answer.trim();
+                const value =
+                  !typed || typed === '-' ? 'default' : typed.toLowerCase();
+                const choice = options.find((choice) => choice.value === value);
+                const display =
+                  label ??
+                  (choice
+                    ? choiceLabel(choice, locale)
+                    : Array.from(typed.replace(/\s+/gu, ' '))
+                        .slice(0, 120)
+                        .join(''));
+                feedback = finish(messages.answer(display), true);
+              }
+              response.resolve(answer);
+            };
             const pending: Pending = {
               adapterId,
               chatId: privatePrompt ? message.userId : origin,
               origin,
               secret,
               userId: message.userId,
-              response: Promise.withResolvers<string>(),
+              respond,
             };
             this.#pending = pending;
             if (secret && this.#running?.cancel === cancel)
@@ -270,12 +303,41 @@ export class ChatSetup {
               if (privatePrompt)
                 await show(m.stepMessage(progress, m.sendingPrivately));
               signal.throwIfAborted();
-              const receipt = await platform().send({
+              const current = platform();
+              const inline = options.length > 0 && supportsChoices(current);
+              const prompt = {
                 ...address,
                 text: secret
                   ? `${text} ${m.reply}\n${m.origin(originName)}`
-                  : `${text} ${m.reply}`,
-              });
+                  : [
+                      `${text} ${m.reply}`,
+                      ...(!inline && options.length
+                        ? [
+                            messages.values(
+                              options.map(({ value }) => value).join(' / '),
+                            ),
+                          ]
+                        : []),
+                    ].join('\n'),
+              };
+              if (inline)
+                buttons = await this.#deps.choices.send(
+                  current,
+                  prompt,
+                  message.userId,
+                  options,
+                  (choice, finish) =>
+                    respond(choice.value, finish, choiceLabel(choice, locale)),
+                  {
+                    active: () =>
+                      this.#pending === pending &&
+                      !answered &&
+                      !signal.aborted &&
+                      !timeout?.aborted,
+                  },
+                );
+              const receipt = buttons?.address ?? (await current.send(prompt));
+              if (buttons) pending.chatId = conversationId(buttons.address);
               // A cancellation can arrive before the platform returns the prompt ID.
               if (secret || cancel.signal.aborted)
                 store.markSetupSecret(
@@ -283,11 +345,11 @@ export class ChatSetup {
                   receipt.messageId,
                 );
               pending.messageId = receipt.messageId;
-              const timeout = AbortSignal.timeout(10 * 60_000);
+              timeout = AbortSignal.timeout(10 * 60_000);
               try {
                 return await untilAborted(
                   AbortSignal.any([signal, timeout]),
-                  () => pending.response.promise,
+                  () => response.promise,
                 );
               } catch (error) {
                 if (!timeout.aborted) throw error;
@@ -295,6 +357,15 @@ export class ChatSetup {
               }
             } finally {
               if (this.#pending === pending) this.#pending = undefined;
+              try {
+                await (feedback ??
+                  buttons?.finish(
+                    signal.aborted ? messages.cancelled : messages.expired,
+                    true,
+                  ));
+              } finally {
+                closed.resolve();
+              }
             }
           },
         });
@@ -336,7 +407,8 @@ export class ChatSetup {
         }
       }
       return undefined;
-    })().finally(() => {
+    })().finally(async () => {
+      await promptClosed;
       this.#running = undefined;
     });
     this.#running = {
@@ -346,6 +418,7 @@ export class ChatSetup {
       done,
       userId: message.userId,
     };
+    return true;
   }
 
   async stop() {

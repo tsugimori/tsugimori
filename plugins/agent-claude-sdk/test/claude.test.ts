@@ -148,6 +148,7 @@ test('Claude reports configured defaults and tracks SDK init metadata per sessio
   };
   const input = { ...request(tmpdir()), model: 'default', thinking: undefined };
   const agent = new ClaudeAgent(deps, 'claude', null);
+  assert.deepEqual(agent.listModels(), ['sonnet', 'opus', 'haiku']);
   assert.deepEqual(agent.describeDefaults(), {});
   assert.equal(agent.describeSession('first'), undefined);
   await collect(agent.run(input, io));

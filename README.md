@@ -92,6 +92,8 @@ Run `/add <agent|platform> <kind> [--id <id>]` or `/login <agentId>` as an owner
 
 The wizard begins with a plan showing the steps, what each asks for, and when it saves credentials and configuration. Follow numbered progress in the originating conversation and reply directly to each prompt. Secret prompts go to the owner's DM and identify the origin. The gateway excludes secret replies from message history and attempts deletion where supported. Enter secrets in an interactive terminal to hide input there.
 
+Guided setup offers buttons for preset answers on supported platforms and displays typed choices on LINE and in the terminal.
+
 Rerun the same command and ID to resume an interrupted attempt from its saved checkpoint. To cancel, send `/cancel` in the originating chat or in the DM with the pending secret prompt. In a terminal, enter `/cancel` or press Ctrl+C. Cancellation reports credentials saved and any agent it left disabled. An explicitly cancelled attempt starts again at step 1. Re-login temporarily disables an enabled agent. If cancelled, that agent stays disabled until sign-in succeeds again. Successful setup saves configuration for the running gateway to reload.
 
 ### Remove an instance

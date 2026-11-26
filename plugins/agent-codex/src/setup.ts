@@ -6,7 +6,7 @@ import type {
   SetupStep,
 } from '@tsugimori/plugin-sdk';
 
-import { agentHome, SetupError } from '@tsugimori/plugin-sdk';
+import { agentHome, SetupError, yesNoChoices } from '@tsugimori/plugin-sdk';
 import { mkdir } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -22,7 +22,7 @@ const loginMessages = {
     incomplete: 'Codex device login did not complete.',
     missingAccount: 'Codex did not report a ChatGPT account to confirm.',
     confirm: (email: string) =>
-      `Codex signed in as ${email}. Reply yes to confirm this account.`,
+      `Codex signed in as ${email}. Reply yes to confirm this account or no to decline.`,
     unconfirmed:
       'The Codex account was not confirmed. Rerun the command to sign in again.',
   },
@@ -34,7 +34,7 @@ const loginMessages = {
     incomplete: 'Codex 裝置登入未完成。',
     missingAccount: 'Codex 未回報可供確認的 ChatGPT 帳號。',
     confirm: (email: string) =>
-      `Codex 已使用 ${email} 登入。請回覆 yes 確認此帳號。`,
+      `Codex 已使用 ${email} 登入。請回覆 yes 確認此帳號，或回覆 no 拒絕。`,
     unconfirmed: 'Codex 帳號尚未確認。請重新執行指令登入。',
   },
 };
@@ -342,6 +342,7 @@ async function login(ctx: SetupContext) {
   )
     throw new SetupError(m.missingAccount);
   const answer = await ctx.prompt({
+    choices: yesNoChoices,
     text: m.confirm(email),
   });
   if (answer.trim().toLowerCase() !== 'yes')

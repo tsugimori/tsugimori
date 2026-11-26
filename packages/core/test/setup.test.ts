@@ -160,6 +160,7 @@ test('guided add suggests available platform names, retries once, and honors exp
       { mode: 'add', category, kind: 'demo', id },
       {
         signal: AbortSignal.timeout(2000),
+        secretInput: 'terminal',
         show: async (text) => {
           shown.push(text);
         },
@@ -174,6 +175,7 @@ test('guided add suggests available platform names, retries once, and honors exp
     );
   };
   const first = (await run('platform', ['default'])).id;
+  assert.match(prompts[0] ?? '', /Choices: default/);
   assert.match(first, /^[0-9a-f]{6}$/);
   assert.match(shown[0]!, /^Setup plan\n1\. Name the instance/);
   assert.match(prompts[0]!, new RegExp(`use ${first}`));
@@ -197,6 +199,46 @@ test('guided add suggests available platform names, retries once, and honors exp
     (await loadSettings(workspace, registry)).platforms.map(({ id }) => id),
     [first, second, 'fixed'],
   );
+});
+
+test('setup offers typed choices when the chat platform has no inline buttons', async (t) => {
+  const platform = fixturePlatform();
+  const answers: string[] = [];
+  const registry = new PluginRegistry([
+    platform.plugin,
+    {
+      name: 'choice',
+      agents: { choice: () => assert.fail('The test agent stays disabled') },
+      setupSteps: [
+        {
+          id: 'choice',
+          title: '登入方式',
+          async run(ctx) {
+            answers.push(
+              await ctx.prompt({
+                text: '請選擇登入方式。',
+                choices: [
+                  { value: 'login', label: 'Sign in' },
+                  { value: 'token', label: 'Token' },
+                ],
+              }),
+            );
+            ctx.writeConfig({ entry: { enabled: false } });
+          },
+        },
+      ],
+    },
+  ]);
+  await fixture(t, registry, { locale: 'zh-TW' });
+  await platform.receive('add', '/add agent choice --id choice');
+  const prompt = await until(() =>
+    platform.sent.find(({ text }) => text.includes('請選擇登入方式。')),
+  );
+  assert.match(prompt.text, /選項：login \/ token/);
+  assert.equal(prompt.buttons, undefined);
+  await platform.receive('selection', 'token', { replyTo: prompt.messageId });
+  await until(() => answers[0]);
+  assert.deepEqual(answers, ['token']);
 });
 
 test('guided chat setup uses the original topic for progress and consumes secrets only in owner DM', async (t) => {

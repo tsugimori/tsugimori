@@ -13,13 +13,15 @@ export type {
   CheckItem,
   CommandOptions,
   CommandRunner,
+  PromptChoice,
   SetupCompletion,
   SetupContext,
   SetupDependencies,
   SetupPatch,
+  SetupPrompt,
   SetupStep,
 } from './setup.ts';
-export { agentHome, credentialKey, SetupError } from './setup.ts';
+export { agentHome, credentialKey, SetupError, yesNoChoices } from './setup.ts';
 export { parseWebhookBaseUrl, webhookBaseUrlPattern } from './webhooks.ts';
 export {
   containsMention,
@@ -527,6 +529,8 @@ export interface AgentConnector {
   /** Human-readable, unlocalized connector name. */
   implementation?: string;
   kind: string;
+  /** Return model IDs from a local catalog or an already-connected provider. */
+  listModels?(): readonly string[] | Promise<readonly string[]>;
   loop: 'framework' | 'external';
   run(request: AgentRequest, io: AgentIO): AsyncIterable<AgentEvent>;
   settings?: AgentSettings;

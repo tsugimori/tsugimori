@@ -120,6 +120,15 @@ export class CodexAgent implements AgentConnector {
     return this.#quota;
   }
 
+  async listModels() {
+    if (!this.#server) return [];
+    const models = await this.#models(this.#server);
+    return models.flatMap(({ model, id, hidden }) => {
+      const value = typeof model === 'string' ? model : id;
+      return !hidden && typeof value === 'string' && value ? [value] : [];
+    });
+  }
+
   describeSession(
     sessionId: string,
     settings?: Pick<AgentRequest, 'model' | 'serviceTier' | 'thinking'>,
@@ -371,17 +380,37 @@ export class CodexAgent implements AgentConnector {
   #models(server: AppServer) {
     let catalog = this.#modelCatalogs.get(server);
     if (!catalog) {
-      catalog = server
-        .request('model/list', {})
-        .then(({ data }) => (Array.isArray(data) ? data.map(asRecord) : []))
-        .catch((error: unknown) => {
-          if (!(error instanceof RpcError)) throw error;
-          this.#modelCatalogs.delete(server);
-          return [];
-        });
+      catalog = this.#loadModels(server).catch((error: unknown) => {
+        this.#modelCatalogs.delete(server);
+        if (!(error instanceof RpcError)) throw error;
+        return [];
+      });
       this.#modelCatalogs.set(server, catalog);
     }
     return catalog;
+  }
+
+  async #loadModels(server: AppServer) {
+    const models: ReturnType<typeof asRecord>[] = [];
+    const seen = new Set<string>();
+    let cursor: string | undefined;
+    do {
+      const { data, nextCursor } = await server.request(
+        'model/list',
+        { cursor },
+        30_000,
+        { failOnTimeout: false },
+      );
+      if (Array.isArray(data)) models.push(...data.map(asRecord));
+      cursor =
+        typeof nextCursor === 'string' && nextCursor ? nextCursor : undefined;
+      if (cursor) {
+        if (seen.has(cursor))
+          throw new Error('Codex repeated a model catalog cursor');
+        seen.add(cursor);
+      }
+    } while (cursor);
+    return models;
   }
 
   async #turnSettings(

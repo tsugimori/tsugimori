@@ -3,6 +3,7 @@ import type {
   AgentInstanceConfig,
   SetupContext,
   SetupDependencies,
+  SetupPrompt,
   SetupStep,
 } from '@tsugimori/plugin-sdk';
 import type { SetupRun, Store } from '@tsugimori/storage';
@@ -30,10 +31,7 @@ export interface SetupIO {
   cancelSignal?: AbortSignal;
   locale?: Config['locale'];
   measure?<T>(step: string, run: () => Promise<T>): Promise<T>;
-  prompt(
-    options: { secret?: boolean; text: string },
-    progress: string,
-  ): Promise<string>;
+  prompt(options: SetupPrompt, progress: string): Promise<string>;
   secretInput?: 'terminal';
   show(text: string): Promise<void>;
   signal: AbortSignal;
@@ -128,6 +126,19 @@ export class GuidedSetup {
     let config = await loadSettings(workspace, registry);
     const locale = io.locale ?? config.locale;
     const m = systemMessages(locale).setup;
+    const prompt: SetupIO['prompt'] = (options, progress) => {
+      const { choices, secret, text } = options;
+      const values = systemMessages(locale).choices.values;
+      return io.prompt(
+        io.secretInput === 'terminal' && !secret && choices?.length
+          ? {
+              ...options,
+              text: `${text}\n${values(choices.map(({ value }) => value).join(' / '))}`,
+            }
+          : options,
+        progress,
+      );
+    };
     let id = request.id;
     if (id !== undefined && !validId.test(id))
       throw new SetupError(m.invalidId);
@@ -186,8 +197,9 @@ export class GuidedSetup {
           const question = m.askName(suggested);
           const ask = () =>
             untilAborted(inputSignal, () =>
-              io.prompt(
+              prompt(
                 {
+                  choices: [{ value: 'default', label: suggested }],
                   text: m.stepMessage(
                     progress,
                     reason ? `${reason} ${question}` : question,
@@ -355,7 +367,7 @@ export class GuidedSetup {
           signal,
           locale,
           show,
-          prompt: ({ questions, secret, text }) => {
+          prompt: ({ choices, questions, secret, text }) => {
             questionNumber++;
             const total = questions?.total ?? step.asks?.length ?? 0;
             const message =
@@ -369,7 +381,14 @@ export class GuidedSetup {
                   )
                 : m.stepMessage(progress, text);
             return untilAborted(signal, () =>
-              io.prompt({ secret, text: message }, progress),
+              prompt(
+                {
+                  choices: secret ? undefined : choices,
+                  secret,
+                  text: message,
+                },
+                progress,
+              ),
             );
           },
           recordCredential(name) {
@@ -462,10 +481,14 @@ export class GuidedSetup {
             ...(await snapshot()),
             signal,
             locale,
-            prompt: ({ secret, text }) =>
+            prompt: ({ choices, secret, text }) =>
               untilAborted(signal, () =>
-                io.prompt(
-                  { secret, text: m.stepMessage(progress, text) },
+                prompt(
+                  {
+                    choices: secret ? undefined : choices,
+                    secret,
+                    text: m.stepMessage(progress, text),
+                  },
                   progress,
                 ),
               ),

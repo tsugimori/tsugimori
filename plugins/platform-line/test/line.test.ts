@@ -732,6 +732,10 @@ test('setup hides credentials, validates the token, confirms the bot and prints 
     [true, true, false],
   );
   assert.match(prompts[2]!.text, /Test Bot/);
+  assert.deepEqual(
+    prompts[2]?.choices?.map(({ value }) => value),
+    ['yes', 'no'],
+  );
   assert.deepEqual([...writes.values()], [secret, token]);
   assert.deepEqual(line.credentialNames?.({ ...entry, ...patch?.entry }), [
     ...writes.keys(),
@@ -749,6 +753,10 @@ test('setup hides credentials, validates the token, confirms the bot and prints 
   });
   assert.match(prompts[3]!.text, /public HTTPS base URL/);
   assert.match(prompts[4]!.text, /valid HTTPS base URL/);
+  assert.deepEqual(
+    prompts[4]?.choices?.map(({ value }) => value),
+    ['skip'],
+  );
   assert.equal(patch?.entry?.publicUrl, undefined);
   const summary = await completion.run({ ...context, entry: savedEntry });
   assert.match(summary, /\/line\/main\/\..*HTTPS[\s\S]*Use webhook/);
@@ -881,8 +889,12 @@ test('LINE completion confirms an endpoint change before setting and testing it'
       signal: AbortSignal.timeout(2000),
       runCommand: async () => assert.fail('Unexpected command'),
       credential: () => token,
-      async prompt({ secret, text }) {
+      async prompt({ choices, secret, text }) {
         assert.equal(secret, undefined);
+        assert.deepEqual(
+          choices?.map(({ value }) => value),
+          ['yes', 'no'],
+        );
         assert.ok(text.includes(endpoint));
         assert.match(text, /Type yes to confirm/);
         assert.ok(scenario.answer);
