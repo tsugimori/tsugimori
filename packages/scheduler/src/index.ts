@@ -15,6 +15,7 @@ import type {
   Store,
 } from '@tsugimori/storage';
 
+import { containsMention, textMentionMatches } from '@tsugimori/plugin-sdk';
 import { createHash, randomUUID } from 'node:crypto';
 
 import { Cron, minuteMs } from './cron.ts';
@@ -33,6 +34,7 @@ export {
   scheduleTime,
 } from './messages.ts';
 export { prepareReminder, reminderEntities } from './reminders.ts';
+export { containsMention } from '@tsugimori/plugin-sdk';
 
 type Settings = {
   highCostModels?: readonly string[];
@@ -127,13 +129,6 @@ const fields = {
 };
 const id = { type: 'string', pattern: '^(#?[a-fA-F0-9]{6}|[a-f0-9-]{36})$' };
 const empty = object({}, []);
-const textMentions =
-  /@[\p{L}\p{N}_]+|(?:tg:\/\/user\?id=|(?:https?:\/\/)?t\.me\/)[^\s<>()]*/giu;
-
-export function containsMention(text: string) {
-  return text.search(textMentions) !== -1;
-}
-
 function deliveryKey({ action, mentions, target }: ScheduleRecord) {
   const ordinary =
     action.kind === 'agent'
@@ -147,7 +142,7 @@ function deliveryKey({ action, mentions, target }: ScheduleRecord) {
         target.threadId,
         action.kind,
         [...mentions].sort(),
-        [...new Set(ordinary.match(textMentions))].sort(),
+        [...new Set(textMentionMatches(ordinary))].sort(),
       ]),
     )
     .digest('hex');

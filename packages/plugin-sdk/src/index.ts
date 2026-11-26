@@ -11,7 +11,11 @@ export type {
   SetupStep,
 } from './setup.ts';
 export { agentHome, credentialKey, SetupError } from './setup.ts';
-export { userMentionLinks } from './mentions.ts';
+export {
+  containsMention,
+  textMentionMatches,
+  userMentionLinks,
+} from './mentions.ts';
 
 export interface ChatRef {
   adapterId: string;
@@ -74,10 +78,13 @@ export interface ScheduledInboundEvent extends Omit<InboundMessage, 'type'> {
 export type InboundEvent = PlatformInboundEvent | ScheduledInboundEvent;
 
 export interface OutboundMessage {
+  /** Whether agent output can add recipients through mentions in its text. */
+  allowTextMentions?: boolean;
   approval?: boolean;
   buttons?: readonly { id: string; label: string }[];
   chatId: string;
   entities?: readonly TextEntity[];
+  format?: 'markdown';
   mentions?: readonly string[];
   parseTextMentions?: boolean;
   replyTo?: string;
@@ -135,6 +142,7 @@ export interface AdapterContext {
   ): { display: string | null; username: string | null } | undefined;
   loadCursor?(stream: string): AdapterCursor | undefined;
   logError?(event: string, error?: unknown): void;
+  logWarning?(event: string): void;
   ready?: Promise<void>;
   saveCursor?(stream: string, cursor: AdapterCursor): void;
 }

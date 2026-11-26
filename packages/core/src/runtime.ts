@@ -423,6 +423,8 @@ export class Runtime {
           adapterId: adapter.id,
           ...(error === undefined ? {} : { error: describeError(error) }),
         }),
+      logWarning: (event) =>
+        log({ level: 'warn', event, adapterId: adapter.id }),
     });
   }
 

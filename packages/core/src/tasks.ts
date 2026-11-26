@@ -349,7 +349,11 @@ export class Tasks {
       if (result.text) {
         const scheduled = input.scheduled;
         const output = scheduled
-          ? { ...scheduled.target, text: scheduled.delayNote + result.text }
+          ? {
+              ...scheduled.target,
+              allowTextMentions: scheduled.allowTextMentions,
+              text: scheduled.delayNote + result.text,
+            }
           : reply(message, result.text);
         if (
           scheduled &&
@@ -357,10 +361,14 @@ export class Tasks {
           containsMention(result.text)
         )
           throw new Error('Scheduled response contains an unapproved mention');
-        await outbound.send(adapter, output, {
-          taskId: id,
-          signal: abort.signal,
-        });
+        await outbound.send(
+          adapter,
+          { ...output, format: 'markdown' },
+          {
+            taskId: id,
+            signal: abort.signal,
+          },
+        );
         delivered = true;
       } else {
         finish('completed');

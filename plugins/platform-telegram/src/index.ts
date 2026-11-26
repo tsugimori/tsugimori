@@ -24,7 +24,11 @@ export { splitText };
 export class TelegramAdapter implements PlatformAdapter {
   readonly id: string;
   readonly kind = 'telegram';
-  readonly capabilities = { deleteEvents: false, inlineButtons: true };
+  readonly capabilities = {
+    deleteEvents: false,
+    inlineButtons: true,
+    richText: true,
+  };
   readonly #api: BotApi;
   readonly #fetch: typeof globalThis.fetch;
   readonly #token: string;
@@ -189,34 +193,50 @@ export class TelegramAdapter implements PlatformAdapter {
     }
     const controls = message.approval ? messages.length - 1 : 0;
     try {
-      for (const [index, { text, entities }] of messages.entries()) {
+      for (const [index, part] of messages.entries()) {
+        const { text, entities } = part;
+        const body = {
+          ...destination(message),
+          text,
+          entities,
+          reply_parameters: message.replyTo
+            ? {
+                message_id: Number(message.replyTo),
+                allow_sending_without_reply: true,
+              }
+            : undefined,
+          reply_markup:
+            index === controls && message.buttons?.length
+              ? {
+                  inline_keyboard: [
+                    message.buttons.map((button) => ({
+                      text: button.label,
+                      callback_data: button.id,
+                    })),
+                  ],
+                }
+              : undefined,
+        };
         const sent = record(
-          await this.#api.call(
-            'sendMessage',
-            {
-              ...destination(message),
-              text,
-              entities,
-              reply_parameters: message.replyTo
-                ? {
-                    message_id: Number(message.replyTo),
-                    allow_sending_without_reply: true,
-                  }
-                : undefined,
-              reply_markup:
-                index === controls && message.buttons?.length
-                  ? {
-                      inline_keyboard: [
-                        message.buttons.map((button) => ({
-                          text: button.label,
-                          callback_data: button.id,
-                        })),
-                      ],
-                    }
-                  : undefined,
-            },
-            signal,
-          ),
+          await this.#api
+            .call('sendMessage', body, signal)
+            .catch((error: unknown) => {
+              if (
+                message.format !== 'markdown' ||
+                message.approval ||
+                !entities?.length ||
+                !(error instanceof BotApiError) ||
+                !error.invalidEntities
+              )
+                throw error;
+              this.#ctx?.logWarning?.('telegram.entities_rejected');
+              return this.#api.call(
+                'sendMessage',
+                { ...body, entities: undefined },
+                signal,
+                0,
+              );
+            }),
         );
         const messageId = nativeId(sent?.message_id);
         if (!messageId) throw new BotApiError('sendMessage', undefined);
@@ -233,15 +253,19 @@ export class TelegramAdapter implements PlatformAdapter {
       );
     }
     const approvalEntities = message.approval
-      ? (messages[controls]?.entities ?? []).map((entity): TextEntity =>
+      ? (messages[controls]?.entities ?? []).flatMap((entity): TextEntity[] =>
           entity.type === 'pre'
-            ? entity
-            : {
-                offset: entity.offset,
-                length: entity.length,
-                type: 'mention',
-                userId: String(entity.user.id),
-              },
+            ? [entity]
+            : entity.type === 'text_mention'
+              ? [
+                  {
+                    offset: entity.offset,
+                    length: entity.length,
+                    type: 'mention',
+                    userId: String(entity.user.id),
+                  },
+                ]
+              : [],
         )
       : undefined;
     return {

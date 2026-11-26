@@ -12,12 +12,19 @@ export function nativeId(value: unknown): string | undefined {
 
 export class BotApiError extends Error {
   readonly code: number | undefined;
+  readonly invalidEntities: boolean;
   readonly retryAfter?: number;
-  constructor(method: string, code: number | undefined, retryAfter?: number) {
+  constructor(
+    method: string,
+    code: number | undefined,
+    retryAfter?: number,
+    invalidEntities = false,
+  ) {
     super(
       `Telegram ${method} failed${code === undefined ? '' : ` (HTTP ${code})`}`,
     );
     this.code = code;
+    this.invalidEntities = invalidEntities;
     this.retryAfter = retryAfter;
   }
 
@@ -75,6 +82,9 @@ export class BotApi {
       typeof after === 'number' && Number.isFinite(after) && after >= 0
         ? after * 1_000
         : undefined,
+      code === 400 &&
+        typeof payload?.description === 'string' &&
+        /\b(?:can't|cannot) parse entities\b/iu.test(payload.description),
     );
   }
 

@@ -1080,7 +1080,7 @@ test(
           ({ name }) => name === 'schedule.create',
         );
         const result = await tool?.run({
-          action: { kind: 'message', text: 'Recipient reminder' },
+          action: { kind: 'message', text: '**Recipient reminder**' },
           trigger: { kind: 'once', at: Date.now() + 300 },
           targetChatId: 'recipient-dm',
           needsApproval: false,
@@ -1150,9 +1150,24 @@ test(
         f.platform.sent.some(({ text }) => text === 'Agent job delivered') &&
         f.platform.sent.some(
           ({ chatId, text }) =>
-            chatId === recipient.chatId && text === 'Recipient reminder',
+            chatId === recipient.chatId && text === '**Recipient reminder**',
         ),
     );
+    assert.equal(
+      f.platform.sent.find(({ text }) => text === '**Recipient reminder**')
+        ?.format,
+      undefined,
+    );
+    assert.equal(
+      f.platform.sent.find(({ text }) => text === 'Agent job scheduled')
+        ?.format,
+      'markdown',
+    );
+    const scheduled = f.platform.sent.find(
+      ({ text }) => text === 'Agent job delivered',
+    );
+    assert.equal(scheduled?.format, 'markdown');
+    assert.equal(scheduled.allowTextMentions, false);
     assert.equal(seen.at(-1)?.model, 'scheduled-model');
     assert.ok(f.trace.recent.some(({ name }) => name === 'inbound.scheduled'));
   },

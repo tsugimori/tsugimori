@@ -233,6 +233,90 @@ test(
 );
 
 test(
+  'retries a rejected Markdown chunk once with stripped text and no entities',
+  { timeout: 4_000 },
+  async (t) => {
+    const sent: Record<string, unknown>[] = [];
+    const warnings: string[] = [];
+    const rejected = (description: string) =>
+      Response.json(
+        { ok: false, error_code: 400, description },
+        { status: 400 },
+      );
+    const fakeFetch: typeof fetch = async (input, init) => {
+      const method = String(input).split('/').at(-1);
+      if (method === 'getMe') return ok(me);
+      if (method === 'getUpdates') return longPoll(init);
+      assert.equal(method, 'sendMessage');
+      assert.ok(typeof init?.body === 'string');
+      const body = JSON.parse(init.body);
+      sent.push(body);
+      assert.equal(body.parse_mode, undefined);
+      if (body.text === 'Other 400')
+        return rejected('Bad Request: chat not found');
+      if (body.entities || body.text === 'Second failure')
+        return rejected("Bad Request: can't parse entities: bad offset");
+      return ok({ message_id: sent.length });
+    };
+    const adapter = new TelegramAdapter({ fetch: fakeFetch }, 'tg', '1:fake');
+    t.after(() => adapter.stop());
+    await adapter.start({
+      emit: () => Promise.resolve(),
+      logWarning: (event) => warnings.push(event),
+    });
+    const first = 'x'.repeat(4094) + '\n\n';
+    const message = {
+      chatId: '-1001',
+      format: 'markdown',
+      replyTo: '21',
+      threadId: '17',
+    } as const;
+    const receipt = await adapter.send({
+      ...message,
+      text: first + '**70%** [weather](https://example.test)',
+    });
+    assert.deepEqual(
+      receipt.parts?.map(({ messageId, text }) => ({ messageId, text })),
+      [
+        { messageId: '1', text: first },
+        { messageId: '3', text: '70% weather' },
+      ],
+    );
+    assert.deepEqual(sent[1]?.entities, [
+      { type: 'bold', offset: 0, length: 3 },
+      { type: 'text_link', offset: 4, length: 7, url: 'https://example.test' },
+    ]);
+    assert.deepEqual(sent[2], {
+      chat_id: '-1001',
+      message_thread_id: 17,
+      reply_parameters: { message_id: 21, allow_sending_without_reply: true },
+      text: '70% weather',
+    });
+    assert.deepEqual(warnings, ['telegram.entities_rejected']);
+    for (const text of ['**Other 400**', '**Second failure**']) {
+      await assert.rejects(adapter.send({ ...message, text }), (error) => {
+        assert.ok(error instanceof SendFailure);
+        assert.equal(error.deliveryUnknown, false);
+        assert.deepEqual(error.parts, []);
+        return true;
+      });
+    }
+    assert.deepEqual(
+      sent.slice(3).map(({ text, entities }) => [text, Boolean(entities)]),
+      [
+        ['Other 400', true],
+        ['Second failure', true],
+        ['Second failure', false],
+      ],
+    );
+    assert.deepEqual(warnings, [
+      'telegram.entities_rejected',
+      'telegram.entities_rejected',
+    ]);
+  },
+);
+
+test(
   'renders native IDs as current @usernames or UTF-16 text mentions',
   { timeout: 4_000 },
   async (t) => {
