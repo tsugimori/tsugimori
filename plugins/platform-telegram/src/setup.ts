@@ -2,19 +2,41 @@ import type { CheckContext, CheckItem, SetupStep } from '@tsugimori/plugin-sdk';
 
 import { credentialKey, SetupError } from '@tsugimori/plugin-sdk';
 
-import { BotApi, nativeId, record } from './api.ts';
+import { BotApi, BotApiError, nativeId, record } from './api.ts';
 
 export async function telegramIdentity(
   fetch: typeof globalThis.fetch,
   token: string,
   signal: AbortSignal,
+  retries = 2,
 ) {
-  const bot = record(await new BotApi(fetch, token).call('getMe', {}, signal));
+  const bot = record(
+    await new BotApi(fetch, token).call('getMe', {}, signal, retries),
+  );
   const id = nativeId(bot?.id);
   if (!id || typeof bot?.username !== 'string')
     throw new Error('Telegram getMe returned an invalid bot identity');
   return { id, username: bot.username.toLowerCase() };
 }
+
+const identity = {
+  id: 'telegram-token',
+  title: 'Telegram bot token',
+  capabilities: ['platform'],
+};
+
+export const telegramIdentityFailure: CheckItem = {
+  ...identity,
+  status: 'fail',
+  detail:
+    'Telegram getMe failed. Check the bot token and Telegram connectivity.',
+  localized: {
+    'zh-TW': {
+      title: 'Telegram 機器人權杖',
+      hint: '請檢查機器人權杖以及與 Telegram 的連線。',
+    },
+  },
+};
 
 export async function telegramChecks(ctx: CheckContext): Promise<CheckItem[]> {
   const key =
@@ -22,14 +44,14 @@ export async function telegramChecks(ctx: CheckContext): Promise<CheckItem[]> {
       ? ctx.entry.tokenEnv
       : undefined;
   const token = key ? ctx.credential(key) : undefined;
-  const identity = {
-    id: 'telegram-token',
-    title: 'Telegram bot token',
-    capabilities: ['platform'],
-  };
   if (token) {
     try {
-      await telegramIdentity(ctx.fetch, token, AbortSignal.timeout(8_000));
+      if (ctx.startup) {
+        // Validate the token format locally. The runtime supervises getMe.
+        new BotApi(ctx.fetch, token);
+        return [];
+      }
+      await telegramIdentity(ctx.fetch, token, AbortSignal.timeout(8_000), 0);
       return [
         {
           ...identity,
@@ -37,17 +59,18 @@ export async function telegramChecks(ctx: CheckContext): Promise<CheckItem[]> {
           detail: 'Telegram accepted the bot token.',
         },
       ];
-    } catch {
+    } catch (error) {
+      if (ctx.startup || (error instanceof BotApiError && error.invalidToken))
+        return [telegramIdentityFailure];
       return [
         {
           ...identity,
           status: 'fail',
-          detail:
-            'Telegram getMe failed. Check the bot token and Telegram connectivity.',
+          detail: 'Telegram is unavailable. The getMe request did not succeed.',
           localized: {
             'zh-TW': {
-              title: 'Telegram 機器人權杖',
-              hint: '請檢查機器人權杖以及與 Telegram 的連線。',
+              title: 'Telegram 連線',
+              hint: 'Telegram 目前無法使用，getMe 請求失敗。',
             },
           },
         },

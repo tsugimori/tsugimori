@@ -46,6 +46,8 @@ export interface CheckContext extends PluginFactoryContext {
   fetch: typeof globalThis.fetch;
   platform: NodeJS.Platform;
   runCommand: CommandRunner;
+  /** Startup checks can leave network probes to the adapter's start method. */
+  startup?: boolean;
 }
 
 export interface CheckItem {

@@ -145,6 +145,18 @@ export interface AdapterContext {
   logWarning?(event: string): void;
   ready?: Promise<void>;
   saveCursor?(stream: string, cursor: AdapterCursor): void;
+  /** Aborted when this startup attempt is cancelled or the adapter detaches. */
+  signal?: AbortSignal;
+}
+
+/** Optional hints for the gateway when a platform cannot start. */
+export class PlatformStartError extends Error {
+  readonly options: { failure: CheckItem } | { retryAfterMs: number };
+
+  constructor(message: string, options: PlatformStartError['options']) {
+    super(message);
+    this.options = options;
+  }
 }
 
 export interface ApprovalFeedback {
@@ -185,6 +197,7 @@ export interface PlatformAdapter {
     commands: readonly PlatformCommand[],
     scope: PlatformCommandScope,
   ): Promise<void>;
+  /** May be retried after cleanup. Honor ctx.signal during startup I/O. */
   start(ctx: AdapterContext): Promise<void>;
   stop(): Promise<void>;
   tools?(): readonly ToolDefinition[];

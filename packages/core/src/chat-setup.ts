@@ -54,13 +54,14 @@ export class ChatSetup {
     adapter: PlatformAdapter,
     chat: ChatRef,
     message: InboundMessage,
-    command?: Command['name'],
+    command?: Command['name'] | 'other-bot',
   ) {
     const { store } = this.#deps;
     const prompt = this.#pending;
     const owner = this.#deps.isOwner(adapter.id, message.userId);
     const eligible =
       prompt &&
+      command !== 'other-bot' &&
       owner &&
       prompt.adapterId === chat.adapterId &&
       prompt.userId === message.userId;

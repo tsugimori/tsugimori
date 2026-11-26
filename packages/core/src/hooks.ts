@@ -7,10 +7,12 @@ import { untilAborted } from './abort.ts';
 
 export type Logger = (entry: {
   adapterId?: string;
+  attempt?: number;
   check?: string;
   error?: string;
   event: string;
   level: 'error' | 'info' | 'warn';
+  nextDelayMs?: number | null;
   reason?: string;
   scheduleId?: string;
   target?: string;

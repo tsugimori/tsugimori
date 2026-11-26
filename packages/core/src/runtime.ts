@@ -7,8 +7,10 @@ import type {
   PluginInstanceConfig,
 } from '@tsugimori/plugin-sdk';
 import type { Store } from '@tsugimori/storage';
+import type { Tracer } from '@tsugimori/trace';
 
 import { parseConfig } from '@tsugimori/config';
+import { PlatformStartError } from '@tsugimori/plugin-sdk';
 import { resolve } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 
@@ -21,14 +23,29 @@ import { describeError } from './errors.ts';
 
 type AgentConfig = Config['agents'][number];
 type AgentEntry = { agent: AgentConnector; config: AgentConfig };
+export type PlatformNotice =
+  | { kind: 'unavailable' | 'recovered' }
+  | { kind: 'environment'; report: CheckReport };
+
 type AdapterEntry = {
   adapter: PlatformAdapter;
-  buffered: PlatformInboundEvent[];
+  alert?: NodeJS.Timeout;
+  announced?: boolean;
+  attempt: number;
+  availableSince?: number;
   config: PlatformInstanceConfig;
-  generation?: symbol;
-  ready?: ReturnType<typeof Promise.withResolvers<void>>;
-  state: 'staged' | 'active' | 'stopped';
+  controller?: AbortController;
+  failedAt?: number;
+  failure?: CheckReport;
+  inFlight?: Promise<void>;
+  notices: PlatformNotice[];
+  retry?: NodeJS.Timeout;
+  retryAt?: number;
+  state: 'starting' | 'active' | 'stopped';
 };
+
+const alertAfterMs = 5 * 60_000;
+const maxTimerMs = 2 ** 31 - 1;
 
 interface RuntimeDeps {
   checks: EnvironmentChecks;
@@ -37,7 +54,7 @@ interface RuntimeDeps {
     agents: ReadonlySet<string>,
   ): Promise<void>;
   log: Logger;
-  measure<T>(target: string, run: () => Promise<T>): Promise<T>;
+  platformChanged(ready: boolean): void;
   receive(adapter: PlatformAdapter, event: PlatformInboundEvent): Promise<void>;
   registry: PluginRegistry;
   store: Pick<
@@ -48,6 +65,7 @@ interface RuntimeDeps {
     | 'getUser'
     | 'saveCursor'
   >;
+  trace: Tracer;
   workspace: string;
 }
 
@@ -57,6 +75,7 @@ export class Runtime {
   #agents = new Map<string, AgentEntry>();
   #snapshot?: WorkspaceConfig;
   #reports: CheckReport[] = [];
+  #stopping = false;
   #transition?: Promise<void>;
 
   constructor(deps: RuntimeDeps) {
@@ -77,11 +96,11 @@ export class Runtime {
   }
 
   get adapterCount() {
-    return this.#adapters.size;
+    return this.adapterIds.length;
   }
 
   get adapterIds() {
-    return [...this.#adapters.keys()];
+    return [...this.#adapters.keys()].filter((id) => this.getAdapter(id));
   }
 
   adapterKind(id: string) {
@@ -89,7 +108,22 @@ export class Runtime {
   }
 
   getAdapter(id: string) {
-    return this.#adapters.get(id)?.adapter;
+    const entry = this.#adapters.get(id);
+    if (entry?.state === 'active') return entry.adapter;
+  }
+
+  availableSince(id: string) {
+    return this.#adapters.get(id)?.availableSince;
+  }
+
+  get pendingPlatformNotices() {
+    return [...this.#adapters.entries()]
+      .filter(([, entry]) => entry.notices.length)
+      .map(([id]) => id);
+  }
+
+  takePlatformNotices(id: string) {
+    return this.#adapters.get(id)?.notices.splice(0) ?? [];
   }
 
   getAgent(id: string) {
@@ -102,6 +136,15 @@ export class Runtime {
   }
 
   get reports() {
+    return [
+      ...this.#reports,
+      ...[...this.#adapters.values()].flatMap(({ adapter, failure, state }) =>
+        state === 'starting' ? [failure ?? unavailableReport(adapter.id)] : [],
+      ),
+    ];
+  }
+
+  get environmentReports() {
     return this.#reports;
   }
 
@@ -149,8 +192,12 @@ export class Runtime {
         names.some((name) => env.get(name) !== this.#snapshot?.env.get(name))
       );
     };
-    const { checks, measure } = this.#deps;
+    const { checks, trace } = this.#deps;
+    const measure = <T>(target: string, run: () => Promise<T>) =>
+      trace.span('environment.check', { target }, run);
     const current = { config, env };
+    const reloaded =
+      this.#snapshot && !isDeepStrictEqual(current, this.#snapshot);
     const reports = [
       ...(await measure('core', () => checks.core(current))),
       ...(await measure('features', () => checks.features(current, registry))),
@@ -163,7 +210,7 @@ export class Runtime {
       const items = await measure(target, () =>
         checks.plugin(
           registry.forInstance(category, entry.kind),
-          checks.context(entry, env),
+          { ...checks.context(entry, env), startup: true },
           target,
           category,
         ),
@@ -191,7 +238,6 @@ export class Runtime {
     const nextAgents = new Map<string, AgentEntry>();
     const nextAdapters = new Map<string, AdapterEntry>();
     const createdAgents: AgentEntry[] = [];
-    const startedAdapters: AdapterEntry[] = [];
     const stoppedAdapters: AdapterEntry[] = [];
     const changedAdapters = new Set<string>();
     const changedAgents = new Set<string>();
@@ -277,8 +323,9 @@ export class Runtime {
             nextAdapters.set(entry.id, {
               config: entry,
               adapter,
-              state: 'staged',
-              buffered: [],
+              state: 'stopped',
+              attempt: 0,
+              notices: [],
             });
           } catch {
             failedStart('platform', entry.id);
@@ -286,7 +333,12 @@ export class Runtime {
         }
       }
       for (const [id, entry] of this.#adapters) {
-        if (nextAdapters.get(id) !== entry) changedAdapters.add(id);
+        // Rebind pending retries to the new snapshot while preserving their cooldown.
+        if (
+          nextAdapters.get(id) !== entry ||
+          (reloaded && entry.retryAt !== undefined)
+        )
+          changedAdapters.add(id);
       }
       for (const [id, entry] of this.#agents) {
         if (nextAgents.get(id) !== entry) changedAgents.add(id);
@@ -306,7 +358,12 @@ export class Runtime {
       for (const id of changedAdapters) {
         const entry = this.#adapters.get(id);
         if (!entry) continue;
-        entry.state = 'stopped';
+        this.#suspend(entry);
+        const replacement = nextAdapters.get(id);
+        if (replacement && replacement !== entry) {
+          replacement.announced = entry.announced;
+          replacement.notices.push(...entry.notices);
+        }
         stoppedAdapters.push(entry);
       }
       await this.#deps.interrupt(
@@ -325,37 +382,22 @@ export class Runtime {
       }
       for (const entry of stoppedAdapters) {
         try {
-          await entry.adapter.stop();
+          await this.#stopAdapter(entry);
         } catch {
-          nextAdapters.delete(entry.adapter.id);
-          failedStart('platform', entry.adapter.id);
-        }
-      }
-      for (const entry of nextAdapters.values()) {
-        if (entry.state === 'active') continue;
-        try {
-          await this.#startAdapter(entry);
-          startedAdapters.push(entry);
-        } catch {
-          entry.state = 'stopped';
-          await this.#stop(() => entry.adapter.stop());
           nextAdapters.delete(entry.adapter.id);
           failedStart('platform', entry.adapter.id);
         }
       }
     } catch (error) {
-      for (const entry of startedAdapters) {
-        entry.state = 'stopped';
-        await this.#stop(() => entry.adapter.stop());
-      }
       for (const entry of createdAgents)
         await this.#stop(() => entry.agent.stop?.());
+      this.#transition = undefined;
+      ready.resolve();
       for (const entry of stoppedAdapters) {
         try {
-          await this.#startAdapter(entry);
-          await this.#activate(entry);
+          await this.#stopAdapter(entry);
+          await this.#resume(entry);
         } catch {
-          entry.state = 'stopped';
           this.#deps.log({
             level: 'error',
             event: 'platform.restore_failed',
@@ -363,8 +405,6 @@ export class Runtime {
           });
         }
       }
-      this.#transition = undefined;
-      ready.resolve();
       throw error;
     }
 
@@ -391,60 +431,198 @@ export class Runtime {
     this.#agents = nextAgents;
     this.#transition = undefined;
     ready.resolve();
-    for (const entry of startedAdapters) await this.#activate(entry);
+    await Promise.all(
+      [...nextAdapters.values()].map((entry) => this.#resume(entry)),
+    );
   }
 
-  async #startAdapter(entry: AdapterEntry) {
-    entry.state = 'staged';
-    entry.buffered = [];
-    const generation = Symbol();
-    const ready = Promise.withResolvers<void>();
-    entry.generation = generation;
-    entry.ready = ready;
-    const { adapter } = entry;
-    const { store, log } = this.#deps;
-    await entry.adapter.start({
-      emit: async (event) => {
-        if (entry.generation !== generation || entry.state === 'stopped')
-          throw new Error('Platform receiver is detached');
-        if (entry.state === 'staged') entry.buffered.push(event);
-        if (entry.state === 'active')
-          await this.#deps.receive(entry.adapter, event);
-      },
-      ready: ready.promise,
-      getUser: (userId) => store.getUser({ adapterId: adapter.id, userId }),
-      loadCursor: (stream) => store.getCursor(adapter.id, stream),
-      saveCursor: (stream, cursor) =>
-        store.saveCursor(adapter.id, stream, cursor),
-      logError: (event, error) =>
-        log({
-          level: 'error',
-          event,
-          adapterId: adapter.id,
-          ...(error === undefined ? {} : { error: describeError(error) }),
-        }),
-      logWarning: (event) =>
-        log({ level: 'warn', event, adapterId: adapter.id }),
+  #resume(entry: AdapterEntry) {
+    if (this.#stopping || entry.state === 'active' || entry.inFlight) return;
+    entry.state = 'starting';
+    if (entry.failure) {
+      this.#schedule(entry);
+      return;
+    }
+    return this.#launch(entry);
+  }
+
+  #launch(entry: AdapterEntry) {
+    const controller = new AbortController();
+    entry.controller = controller;
+    entry.inFlight = this.#attempt(entry, controller.signal).finally(() => {
+      entry.inFlight = undefined;
     });
+    return entry.inFlight;
   }
 
-  async #activate(entry: AdapterEntry) {
-    while (entry.buffered.length) {
-      const events = entry.buffered.splice(0);
-      for (const event of events) {
-        try {
-          await this.#deps.receive(entry.adapter, event);
-        } catch {
-          this.#deps.log({
-            level: 'error',
-            event: 'inbound.failed',
-            adapterId: entry.adapter.id,
-          });
-        }
+  async #attempt(entry: AdapterEntry, signal: AbortSignal) {
+    const { adapter } = entry;
+    const { store, log, trace } = this.#deps;
+    const attempt = ++entry.attempt;
+    const attrs = { adapterId: adapter.id, attempt };
+    const buffered: PlatformInboundEvent[] = [];
+    const ready = Promise.withResolvers<void>();
+    let activated = false;
+    try {
+      await trace.span('platform.start', attrs, async () => {
+        await adapter.start({
+          emit: async (event) => {
+            signal.throwIfAborted();
+            if (activated) await this.#deps.receive(adapter, event);
+            else buffered.push(event);
+          },
+          ready: ready.promise,
+          signal,
+          getUser: (userId) => store.getUser({ adapterId: adapter.id, userId }),
+          loadCursor: (stream) => store.getCursor(adapter.id, stream),
+          saveCursor: (stream, cursor) =>
+            store.saveCursor(adapter.id, stream, cursor),
+          logError: (event, error) =>
+            log({
+              level: 'error',
+              event,
+              adapterId: adapter.id,
+              ...(error === undefined ? {} : { error: describeError(error) }),
+            }),
+          logWarning: (event) =>
+            log({ level: 'warn', event, adapterId: adapter.id }),
+        });
+        signal.throwIfAborted();
+      });
+    } catch (error) {
+      if (signal.aborted) return;
+      const hint =
+        error instanceof PlatformStartError ? error.options : undefined;
+      const terminal = hint && 'failure' in hint ? hint.failure : undefined;
+      const cooldown = hint && 'retryAfterMs' in hint ? hint.retryAfterMs : 0;
+      const base = Math.min(60_000, 1_000 * 2 ** (attempt - 1));
+      const nextDelayMs = terminal
+        ? null
+        : Math.max(
+            Math.ceil(base * (0.75 + Math.random() * 0.25)),
+            Number.isFinite(cooldown) ? cooldown : 0,
+          );
+      const now = Date.now();
+      entry.failure = terminal
+        ? { ...terminal, target: `platform/${adapter.id}` }
+        : unavailableReport(adapter.id);
+      entry.failedAt ??= now;
+      entry.retryAt = nextDelayMs === null ? undefined : now + nextDelayMs;
+      log({
+        level: 'warn',
+        event: 'platform.start_failed',
+        ...attrs,
+        nextDelayMs,
+      });
+      trace.record(
+        'platform.start_failed',
+        { ...attrs, nextDelayMs },
+        0,
+        'error',
+      );
+
+      if (terminal) {
+        clearTimeout(entry.alert);
+        entry.alert = undefined;
+        entry.announced = true;
+        entry.notices.push({ kind: 'environment', report: entry.failure });
+        this.#deps.platformChanged(false);
+      } else {
+        this.#scheduleAlert(entry, entry.failedAt);
+      }
+      const controller = entry.controller;
+      entry.controller = undefined;
+      controller?.abort();
+      await this.#stop(() => adapter.stop());
+      if (entry.state === 'starting' && !this.#stopping) this.#schedule(entry);
+      return;
+    }
+
+    clearTimeout(entry.alert);
+    entry.alert = undefined;
+    entry.retryAt = undefined;
+    entry.failure = undefined;
+    entry.failedAt = undefined;
+    entry.availableSince = Date.now();
+    entry.state = 'active';
+    while (buffered.length && !signal.aborted) {
+      try {
+        await this.#deps.receive(adapter, buffered.shift()!);
+      } catch {
+        log({ level: 'error', event: 'inbound.failed', adapterId: adapter.id });
       }
     }
-    entry.state = 'active';
-    entry.ready?.resolve();
+    if (signal.aborted) return;
+    activated = true;
+    ready.resolve();
+    if (entry.announced) {
+      entry.announced = false;
+      entry.notices.push({ kind: 'recovered' });
+    }
+    entry.attempt = 0;
+    this.#deps.platformChanged(true);
+  }
+
+  #schedule(entry: AdapterEntry) {
+    const { retryAt, failedAt } = entry;
+    if (retryAt === undefined || failedAt === undefined) return;
+    this.#scheduleAlert(entry, failedAt);
+    if (entry.retry) return;
+    entry.retry = setTimeout(
+      () => {
+        entry.retry = undefined;
+        if (retryAt > Date.now()) {
+          this.#schedule(entry);
+          return;
+        }
+        void this.#launch(entry).catch(() =>
+          this.#deps.log({
+            level: 'error',
+            event: 'platform.retry_failed',
+            adapterId: entry.adapter.id,
+          }),
+        );
+      },
+      Math.min(maxTimerMs, Math.max(0, Math.ceil(retryAt - Date.now()))),
+    );
+    entry.retry.unref();
+  }
+
+  #scheduleAlert(entry: AdapterEntry, failedAt: number) {
+    if (entry.alert || entry.announced) return;
+    entry.alert = setTimeout(
+      () => {
+        entry.alert = undefined;
+        entry.announced = true;
+        entry.notices.push({ kind: 'unavailable' });
+        this.#deps.platformChanged(false);
+      },
+      Math.max(0, failedAt + alertAfterMs - Date.now()),
+    );
+    entry.alert.unref();
+  }
+
+  #suspend(entry: AdapterEntry) {
+    entry.state = 'stopped';
+    clearTimeout(entry.alert);
+    clearTimeout(entry.retry);
+    entry.alert = entry.retry = undefined;
+    entry.controller?.abort();
+  }
+
+  async #stopAdapter(entry: AdapterEntry) {
+    await entry.inFlight;
+    if (entry.controller) {
+      entry.controller = undefined;
+      await entry.adapter.stop();
+    }
+  }
+
+  cancelStarts() {
+    this.#stopping = true;
+    for (const entry of this.#adapters.values()) {
+      if (entry.state === 'starting') this.#suspend(entry);
+    }
   }
 
   async #stop(stop: () => void | Promise<void>) {
@@ -456,15 +634,33 @@ export class Runtime {
   }
 
   async stop() {
-    for (const entry of this.#adapters.values()) entry.state = 'stopped';
+    this.cancelStarts();
+    for (const entry of this.#adapters.values()) this.#suspend(entry);
     await this.#deps.interrupt(new Set(this.#adapters.keys()), new Set());
     for (const entry of this.#adapters.values())
-      await this.#stop(() => entry.adapter.stop());
+      await this.#stop(() => this.#stopAdapter(entry));
     for (const entry of this.#agents.values())
       await this.#stop(() => entry.agent.stop?.());
     this.#adapters.clear();
     this.#agents.clear();
   }
+}
+
+function unavailableReport(id: string): CheckReport {
+  return {
+    target: `platform/${id}`,
+    id: 'attach',
+    title: 'Platform startup',
+    status: 'fail',
+    detail:
+      'The platform is unavailable. Startup will be retried automatically.',
+    localized: {
+      'zh-TW': {
+        title: '平台啟動',
+        hint: '平台目前無法使用，系統會自動重試。',
+      },
+    },
+  };
 }
 
 function checkIdentity(

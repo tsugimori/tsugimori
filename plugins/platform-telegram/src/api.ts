@@ -31,6 +31,10 @@ export class BotApiError extends Error {
   get unknownDelivery() {
     return this.code === undefined || this.code >= 500;
   }
+
+  get invalidToken() {
+    return this.code === 401 || this.code === 404;
+  }
 }
 
 export class BotApi {

@@ -260,8 +260,8 @@ test(
     assert.ok(replies.includes('Usage: /compact'));
     assert.equal(replies.length, 4);
     assert.equal(
-      store.getMessage({ adapterId, chatId: `${newGroup.id}_12` }, '6'),
-      undefined,
+      store.getMessage({ adapterId, chatId: `${newGroup.id}_12` }, '6')?.text,
+      '/compact@otherbot',
     );
     assert.equal(requests.length, 0);
 

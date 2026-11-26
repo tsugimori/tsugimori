@@ -1787,10 +1787,29 @@ test(
         20,
       ),
     );
-    const expected = '🔔 月光，喝水！\n**保留原文**';
+    const note = `[Delayed schedule, originally due ${new Date(at).toISOString()}]\n\n`;
+    const expected = note + '🔔 月光，喝水！\n**保留原文**';
     await until(t, () => f.platform.sent.some(({ text }) => text === expected));
     assert.deepEqual(f.platform.sent.at(-1)?.entities, [
-      { type: 'mention', offset: 3, length: 2, userId: '79' },
+      { type: 'mention', offset: note.length + 3, length: 2, userId: '79' },
     ]);
   },
 );
+
+test('commands addressed to another bot are recorded without running an agent', async (t) => {
+  let runs = 0;
+  const f = await fixture(t, async function* () {
+    runs++;
+    yield { type: 'text.final', text: 'Agent reply' };
+  });
+  Object.assign(f.platform.platform, { botIdentity: { username: 'our_bot' } });
+  const event = inbound('foreign', '/status@other_bot args', {
+    mentionsBot: true,
+    repliesToBot: true,
+  });
+  await f.platform.emit(event);
+  await f.gateway.idle();
+  assert.equal(f.store.getMessage(chat, event.messageId)?.text, event.text);
+  assert.equal(runs, 0);
+  assert.deepEqual(f.platform.sent, []);
+});

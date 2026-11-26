@@ -9,14 +9,23 @@ import type {
   TextEntity,
 } from '@tsugimori/plugin-sdk';
 
-import { definePlugin, SendFailure } from '@tsugimori/plugin-sdk';
+import {
+  definePlugin,
+  PlatformStartError,
+  SendFailure,
+} from '@tsugimori/plugin-sdk';
 import { setTimeout as delay } from 'node:timers/promises';
 
 import type { BotIdentity } from './updates.ts';
 
 import { BotApi, BotApiError, nativeId, record } from './api.ts';
 import { maxMessage, splitText, telegramMessageParts } from './message-text.ts';
-import { telegramChecks, telegramIdentity, telegramSetup } from './setup.ts';
+import {
+  telegramChecks,
+  telegramIdentity,
+  telegramIdentityFailure,
+  telegramSetup,
+} from './setup.ts';
 import { mapUpdate } from './updates.ts';
 
 const cursorLifetimeMs = 6 * 24 * 60 * 60 * 1_000;
@@ -97,11 +106,13 @@ export class TelegramAdapter implements PlatformAdapter {
     this.#controller = controller;
     this.#ctx = ctx;
     try {
-      const bot = await telegramIdentity(
-        this.#fetch,
-        this.#token,
-        AbortSignal.any([controller.signal, AbortSignal.timeout(8_000)]),
-      );
+      const signal = AbortSignal.any([
+        controller.signal,
+        AbortSignal.timeout(8_000),
+        ...(ctx.signal ? [ctx.signal] : []),
+      ]);
+      const bot = await telegramIdentity(this.#fetch, this.#token, signal, 0);
+      signal.throwIfAborted();
       this.#botIdentity = bot;
       this.#polling = this.#poll(ctx, bot, controller.signal).catch(
         (error: unknown) => {
@@ -115,6 +126,16 @@ export class TelegramAdapter implements PlatformAdapter {
       this.#controller = undefined;
       this.#ctx = undefined;
       controller.abort();
+      if (error instanceof BotApiError) {
+        if (error.invalidToken)
+          throw new PlatformStartError(error.message, {
+            failure: telegramIdentityFailure,
+          });
+        if (error.code === 429 && error.retryAfter !== undefined)
+          throw new PlatformStartError(error.message, {
+            retryAfterMs: error.retryAfter,
+          });
+      }
       throw error;
     }
   }

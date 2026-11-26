@@ -36,6 +36,8 @@ For manual configuration, use the [example workspace](examples/workspace/tsugimo
 
 Add a `platforms` entry with `kind: "telegram"`, a unique `id`, and a `tokenEnv` naming the bot token variable. Each entry runs a separate bot. Telegram forum topics have separate history, sessions, and workspace directories. Agent replies and scheduled agent output render Markdown as Telegram formatting. Fixed-text reminders preserve their original Markdown characters. Owners can decide an approval with its buttons or by replying directly to the prompt. Telegram's group privacy mode controls which group messages reach the bot.
 
+The gateway retries temporary platform startup failures with exponential backoff. `/status` lists unavailable platforms, and `doctor` probes Telegram connectivity. After five minutes, the gateway sends the owner an outage notice and follows up on recovery. Notices use an available owner chat and wait if none is available. Telegram rate-limit responses can extend the retry delay. An invalid Telegram token stops retries and prompts the owner to check it.
+
 Telegram’s `/` menu shows `/pair` in private chats before the bot has an owner. Once an owner is configured or paired, owner commands appear in the owner’s private chat and for that owner in groups the bot has seen. Menu descriptions follow the workspace locale. In groups, you can use `/cmd@botusername` with optional arguments, for example `/compact@ExampleBot`. The bot matches the command and its username case-insensitively and ignores commands addressed to other bots.
 
 Set the workspace `locale` to `zh-TW` for Traditional Chinese approval prompts and owner notices, including startup environment checks. The default is `en`. Telegram reminders and approval prompts use each recipient’s latest known `@username` when available, falling back to a native mention on the display name.
@@ -66,7 +68,7 @@ The gateway updates rolling summaries in a background queue as older messages fa
 
 ## Schedules
 
-Agents can create fixed messages or agent tasks using `schedule.create` and manage them with `schedule.list`, `schedule.pause`, `schedule.update`, and `schedule.cancel`. Timing supports Unix-millisecond one-time dates, fixed minute intervals, and five-field cron in the workspace or schedule time zone. Cron handles repeated and skipped local times during daylight saving changes. The latest missed occurrence is delivered with a delay note by default. Set the schedule's `missed` option to `skip` to discard missed deliveries.
+Agents can create fixed messages or agent tasks using `schedule.create` and manage them with `schedule.list`, `schedule.pause`, `schedule.update`, and `schedule.cancel`. Timing supports Unix-millisecond one-time dates, fixed minute intervals, and five-field cron in the workspace or schedule time zone. Cron handles repeated and skipped local times during daylight saving changes. Schedules stay due while their platform is unavailable. Once it starts, the latest missed occurrence is delivered with a delay note by default. Set the schedule's `missed` option to `skip` to discard missed deliveries.
 
 Schedules are scoped to the conversation they were created in. Self-delivery and untargeted one-time group delivery can proceed immediately. Other delivery and resource-intensive jobs require linked approval. Configure `scheduler.minIntervalMinutes` (default 15), `scheduler.maxActivePerUser` (default 20), and `scheduler.highCostModels` in the workspace.
 

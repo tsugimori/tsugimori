@@ -39,6 +39,7 @@ import { Tracer } from '@tsugimori/trace';
 import type { Command } from './chat-commands.ts';
 import type { Logger } from './hooks.ts';
 import type { PreviewProviders } from './previews.ts';
+import type { PlatformNotice } from './runtime.ts';
 
 import { approvalDecisionText, approvalMessages } from './approval-messages.ts';
 import { parseCommand } from './chat-commands.ts';
@@ -97,11 +98,13 @@ export class Gateway {
   readonly #execution: Executions;
   readonly #chatSetup: ChatSetup;
   readonly #commandMenus: CommandMenus;
-  #reportedFailures = false;
+  readonly #platformNotifications = new Map<string, Promise<void>>();
   readonly #inbound = new Set<Promise<void>>();
   #applyingConfig = false;
   #closeWatch?: ReturnType<typeof watch>;
+  #environmentNotification?: Promise<void>;
   #expiry?: Promise<void>;
+  #initialApply?: Promise<void>;
   #stopping?: Promise<void>;
   readonly admin: AdminReader;
   #state: 'new' | 'starting' | 'running' | 'stopping' = 'new';
@@ -162,10 +165,18 @@ export class Gateway {
       workspace,
       registry,
       checks: new EnvironmentChecks(setup, workspace),
-      measure: (target, run) =>
-        this.#trace.span('environment.check', { target }, run),
+      trace: this.#trace,
       store,
       log,
+      platformChanged: (ready) => {
+        if (this.#state !== 'running' || this.#applyingConfig) return;
+        if (ready) {
+          this.#commandMenus.refresh();
+          this.#scheduler.tick();
+          void this.#reportFailures();
+        }
+        this.#reportPlatformNotices();
+      },
       receive: (adapter, event) => this.#receive(adapter, event),
       interrupt: async (adapters, agents) => {
         await this.#tasks.interrupt(adapters, agents);
@@ -257,6 +268,7 @@ export class Gateway {
         this.#isStopping() || this.#runtime.transition
           ? []
           : this.#runtime.adapterIds,
+      adapterAvailableSince: (id) => this.#runtime.availableSince(id),
       logError: (event, scheduleId) =>
         log({ level: 'error', event, scheduleId }),
       model: (chat) => {
@@ -326,8 +338,15 @@ export class Gateway {
     this.#state = 'starting';
     const { store, workspace, log } = this.#deps;
     const snapshot = initial ?? (await loadConfig(workspace, this.#registry));
+    if (this.#isStopping()) return;
     store.interruptTasks(Date.now());
-    await this.#apply(snapshot);
+    this.#initialApply = this.#apply(snapshot);
+    try {
+      await this.#initialApply;
+    } finally {
+      this.#initialApply = undefined;
+    }
+    if (this.#isStopping()) return;
     this.#closeWatch = watch(workspace, this.#registry, {
       onConfig: async (next) => {
         if (this.#state !== 'running') return;
@@ -347,6 +366,7 @@ export class Gateway {
     if (this.#previews) this.#previews.start();
     else store.closePreviewsOnRestart(Date.now());
     log({ level: 'info', event: 'gateway.started' });
+    this.#reportPlatformNotices();
     await this.#reportFailures();
   }
 
@@ -365,31 +385,92 @@ export class Gateway {
     } finally {
       this.#applyingConfig = false;
     }
+    if (this.#state === 'running') {
+      this.#scheduler.tick();
+      this.#reportPlatformNotices();
+    }
   }
 
-  async #reportFailures() {
-    if (this.#reportedFailures) return;
+  #reportFailures() {
+    if (this.#environmentNotification || this.#isStopping())
+      return this.#environmentNotification;
     const { locale } = this.#runtime.config;
-    const failures = failureText(this.#runtime.reports, locale);
+    const failures = failureText(this.#runtime.environmentReports, locale);
     if (!failures) return;
     for (const id of this.#runtime.adapterIds) {
       const owner = this.#auth.owner(id);
       const adapter = this.#runtime.getAdapter(id);
       if (!owner || !adapter) continue;
-      this.#reportedFailures = true;
-      try {
-        await this.#outbound.send(adapter, {
-          chatId: owner,
-          text: `${systemMessages(locale).environment}\n${failures}`,
+      this.#environmentNotification = this.#notifyOwner(
+        adapter,
+        owner,
+        `${systemMessages(locale).environment}\n${failures}`,
+      );
+      return this.#environmentNotification;
+    }
+  }
+
+  #reportPlatformNotices() {
+    if (this.#isStopping() || this.#applyingConfig) return;
+    const active = this.#runtime.adapterIds;
+    for (const id of this.#runtime.pendingPlatformNotices) {
+      if (this.#platformNotifications.has(id)) continue;
+      for (const route of [id, ...active.filter((item) => item !== id)]) {
+        const adapter = this.#runtime.getAdapter(route);
+        if (!adapter) continue;
+        const owner = this.#auth.owner(route);
+        if (!owner) continue;
+        const batch = this.#runtime.takePlatformNotices(id);
+        const job = this.#sendPlatformNotices(
+          adapter,
+          owner,
+          id,
+          batch,
+        ).finally(() => {
+          this.#platformNotifications.delete(id);
+          this.#reportPlatformNotices();
         });
-      } catch {
-        this.#deps.log({
-          level: 'warn',
-          event: 'environment.owner_notification_failed',
-          adapterId: id,
-        });
+        this.#platformNotifications.set(id, job);
+        break;
       }
-      return;
+    }
+  }
+
+  #sendPlatformNotices(
+    adapter: PlatformAdapter,
+    owner: string,
+    id: string,
+    notices: PlatformNotice[],
+  ) {
+    const { locale } = this.#runtime.config;
+    const m = systemMessages(locale);
+    const text = notices
+      .map((notice) => {
+        if (notice.kind === 'environment')
+          return `${m.environment}\n${failureText([notice.report], locale)}`;
+        return notice.kind === 'unavailable'
+          ? m.platformUnavailable(id)
+          : m.platformRecovered(id);
+      })
+      .join('\n');
+    return this.#notifyOwner(adapter, owner, text, `platform/${id}`);
+  }
+
+  async #notifyOwner(
+    adapter: PlatformAdapter,
+    owner: string,
+    text: string,
+    target?: string,
+  ) {
+    try {
+      await this.#outbound.send(adapter, { chatId: owner, text });
+    } catch {
+      this.#deps.log({
+        level: 'warn',
+        event: 'environment.owner_notification_failed',
+        adapterId: adapter.id,
+        target,
+      });
     }
   }
 
@@ -397,6 +478,9 @@ export class Gateway {
     while (this.#inbound.size) await Promise.allSettled(this.#inbound);
     await this.#tasks.idle();
     await this.#commandMenus.idle();
+    await this.#environmentNotification;
+    while (this.#platformNotifications.size)
+      await Promise.allSettled(this.#platformNotifications.values());
   }
 
   stop() {
@@ -406,10 +490,12 @@ export class Gateway {
 
   async #stop() {
     this.#state = 'stopping';
+    this.#runtime.cancelStarts();
     this.#commandMenus.stop();
     this.#scheduler.stop();
     try {
       await this.#closeWatch?.();
+      await this.#initialApply;
     } finally {
       try {
         await this.#chatSetup.stop();
@@ -500,9 +586,16 @@ export class Gateway {
       display: event.userDisplay ?? null,
       username: event.userUsername,
     };
-    const command = parseCommand(event.text, adapter.botIdentity?.username);
-    if (command === 'other-bot') return;
-    if (await this.#chatSetup.receive(adapter, chat, event, command?.name)) {
+    const parsed = parseCommand(event.text, adapter.botIdentity?.username);
+    const command = parsed === 'other-bot' ? undefined : parsed;
+    if (
+      await this.#chatSetup.receive(
+        adapter,
+        chat,
+        event,
+        parsed === 'other-bot' ? parsed : parsed?.name,
+      )
+    ) {
       store.recordUser(user);
       return;
     }
@@ -541,7 +634,7 @@ export class Gateway {
       ? { ...event, raw: undefined, text: stored.text }
       : event;
     await this.#hooks.emit('inbound.received', { chat, message });
-    if (this.#isStopping()) return;
+    if (this.#isStopping() || parsed === 'other-bot') return;
 
     if (event.replyTo) {
       const result = this.#resolveApproval({
@@ -600,6 +693,11 @@ export class Gateway {
     const origin = store.getChat(chat);
     if (!adapter || !origin) return 'skipped';
     const attrs = { ...chat, scheduleId: id, dueAt: run.dueAt };
+    const delayNote = delayed
+      ? systemMessages(this.#runtime.config.locale).delayed(
+          new Date(run.dueAt).toISOString(),
+        ) + '\n\n'
+      : '';
     return this.#trace.span('schedule.fire', attrs, async () => {
       await this.#hooks.emit('schedule.fired', { scheduleId: id });
       if (action.kind === 'message') {
@@ -612,8 +710,11 @@ export class Gateway {
         try {
           await this.#outbound.send(adapter, {
             ...schedule.target,
-            text: reminder.text,
-            entities: reminderEntities(reminder.mentions),
+            text: delayNote + reminder.text,
+            entities: reminderEntities(reminder.mentions).map((entity) => ({
+              ...entity,
+              offset: entity.offset + delayNote.length,
+            })),
             parseTextMentions: false,
           });
           return 'sent';
@@ -628,11 +729,6 @@ export class Gateway {
             : 'delivery-unknown';
         }
       }
-      const delayNote = delayed
-        ? systemMessages(this.#runtime.config.locale).delayed(
-            new Date(run.dueAt).toISOString(),
-          ) + '\n\n'
-        : '';
       const target: Omit<OutboundMessage, 'text'> = {
         ...schedule.target,
         mentions: schedule.mentions,
@@ -869,7 +965,10 @@ export class Gateway {
       const paired = this.#auth.claimPairing(adapter.id, message.userId, args);
       if (paired) this.#commandMenus.sync(adapter);
       await send(paired ? m.pairing.success : m.pairing.invalid);
-      if (paired) await this.#reportFailures();
+      if (paired) {
+        this.#reportPlatformNotices();
+        await this.#reportFailures();
+      }
       return;
     }
     if (!owner) return;

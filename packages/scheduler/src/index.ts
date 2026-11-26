@@ -55,6 +55,7 @@ type ScheduleInput = {
 };
 
 interface SchedulerDependencies {
+  adapterAvailableSince?(id: string): number | undefined;
   approve(
     task: ToolContext,
     request: ScheduleApprovalRequest,
@@ -635,8 +636,11 @@ export class Scheduler {
       schedule.trigger.kind === 'once'
         ? null
         : (occurrence(schedule, now) ?? null);
+    const availableSince =
+      this.#deps.adapterAvailableSince?.(schedule.adapterId) ?? this.#startedAt;
     const delayed =
       latest < this.#startedAt ||
+      latest < availableSince ||
       latest > schedule.nextDueAt ||
       now - latest >= 2_000;
     const record: ScheduleRun = {
