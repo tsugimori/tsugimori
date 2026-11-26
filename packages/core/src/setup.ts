@@ -12,6 +12,7 @@ import type {
 import type { SetupRun, Store } from '@tsugimori/storage';
 
 import {
+  configuredOwner,
   loadConfig,
   loadSettings,
   updateSettings,
@@ -563,6 +564,7 @@ export class GuidedSetup {
       }
       signal.throwIfAborted();
       await requireWebhook();
+      let ownedPlatform = false;
       await updateSettings(workspace, registry, (config) => {
         signal.throwIfAborted();
         const list = entries(config, category);
@@ -582,7 +584,11 @@ export class GuidedSetup {
             configurable: true,
             writable: true,
           });
+        ownedPlatform =
+          category === 'platform' &&
+          configuredOwner(config, id, kind) !== undefined;
       });
+      if (ownedPlatform) store.deletePairingCode(id);
       run.status = 'complete';
       checkpoint = structuredClone(run);
       save();

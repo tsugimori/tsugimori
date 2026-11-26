@@ -28,7 +28,12 @@ import { debuglog, promisify } from 'node:util';
 
 import type { ServerFrame, SpawnServer } from './app-server.ts';
 
-import { AppServer, asRecord, RpcError } from './app-server.ts';
+import {
+  AppServer,
+  asRecord,
+  reasoningEffortError,
+  RpcError,
+} from './app-server.ts';
 import {
   bundledContextWindows,
   codexCompactionConfig,
@@ -86,6 +91,16 @@ const defaultImageLimits: ImageLimits = {
   maxPixels: 2500 * 32 ** 2,
 };
 const implementation = 'Codex App Server';
+const effortOrder = [
+  'none',
+  'minimal',
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+  'max',
+  'ultra',
+];
 
 export class CodexAgent implements AgentConnector {
   readonly id: string;
@@ -156,6 +171,22 @@ export class CodexAgent implements AgentConnector {
       const value = typeof model === 'string' ? model : id;
       return !hidden && typeof value === 'string' && value ? [value] : [];
     });
+  }
+
+  async thinkingLevels(model?: string) {
+    if (!this.#server) return;
+    const entry = await this.#catalogModel(this.#server, model);
+    const efforts = entry?.supportedReasoningEfforts;
+    if (!Array.isArray(efforts)) return;
+    const levels = efforts
+      .map((option: unknown) => asRecord(option).reasoningEffort)
+      .filter((level): level is string => typeof level === 'string' && !!level);
+    if (efforts.length && !levels.length) return;
+    const rank = (level: string) => {
+      const index = effortOrder.indexOf(level);
+      return index === -1 ? effortOrder.length : index;
+    };
+    return [...new Set(levels)].sort((a, b) => rank(a) - rank(b));
   }
 
   describeSession(
@@ -386,9 +417,7 @@ export class CodexAgent implements AgentConnector {
       if (configured !== undefined) return configured;
       if (typeof config.model === 'string') return windows.get(config.model);
     }
-    const entry = (await this.#models(server)).find(
-      ({ isDefault }) => isDefault === true,
-    );
+    const entry = await this.#catalogModel(server);
     const name = entry?.model ?? entry?.id;
     if (typeof name === 'string') return windows.get(name);
   }
@@ -417,6 +446,14 @@ export class CodexAgent implements AgentConnector {
       this.#modelCatalogs.set(server, catalog);
     }
     return catalog;
+  }
+
+  async #catalogModel(server: AppServer, model?: string) {
+    return (await this.#models(server)).find((entry) =>
+      model === undefined || model === 'default'
+        ? entry.isDefault === true
+        : entry.model === model || entry.id === model,
+    );
   }
 
   async #loadModels(server: AppServer) {
@@ -484,11 +521,7 @@ export class CodexAgent implements AgentConnector {
       ) {
         const lookupModel =
           model ?? (modelChanged ? undefined : previous?.model);
-        const entry = (await this.#models(server)).find((entry) =>
-          lookupModel === undefined
-            ? entry.isDefault === true
-            : (entry.model ?? entry.id) === lookupModel,
-        );
+        const entry = await this.#catalogModel(server, lookupModel);
         const name = entry?.model ?? entry?.id;
         if (restoreModel && typeof name === 'string') model ??= name;
         if (restoreEffort && typeof entry?.defaultReasoningEffort === 'string')
@@ -821,11 +854,17 @@ export class CodexAgent implements AgentConnector {
           if (turn.id !== turnId) continue;
           complete = true;
           if (turn.status !== 'completed') {
-            const info = asRecord(turn.error).codexErrorInfo;
+            const {
+              additionalDetails,
+              codexErrorInfo: info,
+              message,
+            } = asRecord(turn.error);
             const tag =
               typeof info === 'string' ? info : Object.keys(asRecord(info))[0];
             throw new Error(
-              `Codex turn ${turn.status === 'interrupted' ? 'interrupted' : 'failed'}${tag && /^[a-zA-Z]+$/.test(tag) ? ` (${tag})` : ''}`,
+              reasoningEffortError(message) ??
+                reasoningEffortError(additionalDetails) ??
+                `Codex turn ${turn.status === 'interrupted' ? 'interrupted' : 'failed'}${tag && /^[a-zA-Z]+$/.test(tag) ? ` (${tag})` : ''}`,
             );
           }
           const final = output.final(turn);

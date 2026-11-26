@@ -227,7 +227,7 @@ const messages = {
     declined: '保留了原有的 Webhook 網址。',
     saveFailed: 'LINE 無法儲存 Webhook 網址。',
     testFailed: 'LINE Webhook 測試未通過。',
-    passed: (url: string) => `已接上。Webhook 網址：${url}（LINE 測試通過）`,
+    passed: (url: string) => `已接上。Webhook 網址：${url} （LINE 測試通過）`,
     reminder: '請在 LINE Developers Console 啟用「Use webhook」。',
     saved: (reason: string) =>
       `已儲存，但 webhook 還沒接通，現在收不到 LINE 訊息：${reason}修好後執行 /webhook check，或在 LINE Developers Console 驗證網址。`,

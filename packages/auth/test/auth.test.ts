@@ -13,9 +13,10 @@ test('pairing binds a fresh one-time code to its adapter and native user', (t) =
   let now = 0;
   const auth = new Auth({ store, now: () => now });
   const expired = auth.createPairingCode('a');
-  now = 10 * 60_000;
+  now = 25 * 60 * 60_000;
   assert.equal(auth.claimPairing('a', 'owner', expired), false);
   const code = auth.createPairingCode('a');
+  now += 23 * 60 * 60_000;
   assert.equal(auth.claimPairing('another', 'owner', code), false);
   assert.equal(auth.claimPairing('a', 'owner', code), true);
   assert.equal(auth.isOwner({ adapterId: 'a', userId: 'owner' }), true);

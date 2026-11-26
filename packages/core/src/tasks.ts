@@ -49,7 +49,11 @@ import type { ToolDetail, ToolDetails } from './tool-details.ts';
 
 import { untilAborted } from './abort.ts';
 import { protectTools, runAgent, sessionScope } from './agent-run.ts';
-import { acceptsServiceTier, resolveAgentSetting } from './agent-settings.ts';
+import {
+  acceptsServiceTier,
+  modelThinkingLevels,
+  resolveAgentSetting,
+} from './agent-settings.ts';
 import { approvalMessages, approvalPrompt } from './approval-messages.ts';
 import { attachmentTool, turnAttachments } from './attachments.ts';
 import { describeError } from './errors.ts';
@@ -247,18 +251,28 @@ export class Tasks {
       tier != null && (!selected || acceptsServiceTier(selected.agent, tier))
         ? tier
         : undefined;
+    const resolveThinking = (levels?: readonly string[]) => {
+      const accepts = (value: string | null | undefined) =>
+        value != null && (!levels || levels.includes(value))
+          ? value
+          : undefined;
+      return resolveAgentSetting(
+        current?.thinking &&
+          (!selected ||
+            (levels ?? selected.agent.settings?.thinking)?.includes(
+              current.thinking,
+            ))
+          ? current.thinking
+          : undefined,
+        accepts(settings?.thinking),
+        accepts(bound?.thinking),
+      );
+    };
     return {
       agentId: selected?.agent.id ?? agentId ?? bound?.id,
       model: resolveAgentSetting(current?.model, settings?.model, bound?.model),
-      thinking: resolveAgentSetting(
-        current?.thinking &&
-          (!selected ||
-            selected.agent.settings?.thinking?.includes(current.thinking))
-          ? current.thinking
-          : undefined,
-        settings?.thinking,
-        bound?.thinking,
-      ),
+      thinking: resolveThinking(),
+      resolveThinking,
       serviceTier: resolveAgentSetting(
         serviceTier(current?.serviceTier),
         undefined,
@@ -267,6 +281,21 @@ export class Tasks {
       selected,
       unavailable,
     };
+  }
+
+  thinkingLevels(
+    route: ReturnType<Tasks['route']>,
+    model = route.model.value,
+    signal?: AbortSignal,
+  ) {
+    return modelThinkingLevels(
+      route.selected?.agent,
+      model === undefined || model === 'default'
+        ? route.selected?.defaults?.model
+        : model,
+      this.#deps.log,
+      signal,
+    );
   }
 
   dispatch(
@@ -550,10 +579,15 @@ export class Tasks {
         } else finish('completed');
         return;
       }
+      const levels =
+        current?.thinking || route.thinking.value !== undefined
+          ? await this.thinkingLevels(route, model, abort.signal)
+          : undefined;
+      abort.signal.throwIfAborted();
       const settings = {
         model,
         serviceTier: route.serviceTier.value,
-        thinking: route.thinking.value,
+        thinking: route.resolveThinking(levels).value,
       };
 
       recorder.agent({

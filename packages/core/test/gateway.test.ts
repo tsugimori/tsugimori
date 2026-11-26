@@ -145,6 +145,7 @@ async function fixture(
     previews?: { named?: TunnelProvider; quick: TunnelProvider };
     reactions?: true | PlatformAdapter['setApprovalReaction'];
     stickers?: Config['stickers'];
+    thinkingLevels?: AgentConnector['thinkingLevels'];
     web?: Config['web'];
   } = {},
 ) {
@@ -178,6 +179,7 @@ async function fixture(
           describeSession: options.describeSession,
           run,
           settings: options.agentSettings?.(id),
+          thinkingLevels: options.thinkingLevels,
           start() {
             agentStarts++;
             return Promise.resolve();
@@ -303,6 +305,41 @@ async function fixture(
     },
   };
 }
+
+test('chat turns apply model-specific reasoning and fall back from unsupported saved preferences', async (t) => {
+  const requests: AgentRequest[] = [];
+  const f = await fixture(
+    t,
+    async function* (request) {
+      requests.push(request);
+      yield { type: 'text.final', text: 'Done' };
+    },
+    true,
+    {
+      agentSettings: () => ({ thinking: ['minimal', 'low'] }),
+      thinkingLevels: async (model) =>
+        model === 'first' ? ['low', 'max'] : undefined,
+    },
+  );
+  await f.platform.emit(inbound('enable-max', '/thinking max'));
+  assert.equal(f.store.getChat(chat)?.thinking, 'max');
+  await f.platform.emit(inbound('run-max', 'Use the saved preference'));
+  await f.gateway.idle();
+  assert.equal(requests.at(-1)?.thinking, 'max');
+
+  f.store.setChatRoute(chat, { thinking: 'minimal' });
+  await f.platform.emit(inbound('run-invalid', 'Use the model default'));
+  await f.gateway.idle();
+  assert.equal(requests.at(-1)?.thinking, undefined);
+  assert.equal(f.store.getChat(chat)?.thinking, 'minimal');
+
+  await f.platform.emit(inbound('choose-unknown', '/model unknown'));
+  await f.platform.emit(inbound('run-static', 'Use the static fallback'));
+  await f.gateway.idle();
+  assert.equal(requests.at(-1)?.model, 'unknown');
+  assert.equal(requests.at(-1)?.thinking, 'minimal');
+  assert.equal(requests.length, 3);
+});
 
 test(
   'queues owner /compact, preserves the session and records compaction after the task ends',
@@ -4825,6 +4862,7 @@ test(
         if (request.purpose === 'sticker-index') {
           modelCalls++;
           assert.equal(request.model, 'test-cheap');
+          assert.equal(request.thinking, 'low');
           assert.equal(request.tools.length, 0);
           assert.equal(request.images?.length, 1);
           assert.equal(request.images[0]?.mime, 'image/jpeg');
@@ -4856,6 +4894,11 @@ test(
       true,
       {
         stickers: { model: 'test-cheap' },
+        agentSettings: () => ({ thinking: ['minimal', 'low'] }),
+        thinkingLevels: async (model) => {
+          assert.equal(model, 'test-cheap');
+          return ['low', 'medium', 'high', 'xhigh', 'max'];
+        },
         imageLimits: { maxBytes: 100_000, maxEdge: 512 },
         downloadAttachment: async () => ({ bytes, mime: 'image/png' }),
       },
@@ -4959,5 +5002,102 @@ test(
     );
     await f.platform.emit(inbound('unblock', '/sticker unblock SURPRISE_SET'));
     assert.equal(f.store.searchStickers(adapterId, 'happy', 1).length, 1);
+  },
+);
+
+test(
+  'sticker failures record a sanitized error and retry only after ten minutes',
+  { timeout: 10_000 },
+  async (t) => {
+    if (spawnSync('ffmpeg', ['-version']).status !== 0) {
+      t.skip('ffmpeg is unavailable');
+      return;
+    }
+    t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+    const bytes = Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jL1sAAAAASUVORK5CYII=',
+      'base64',
+    );
+    const errorMessage = 'Sticker model rejected the request';
+    let modelCalls = 0;
+    const f = await fixture(
+      t,
+      async function* (request) {
+        assert.equal(request.purpose, 'sticker-index');
+        assert.equal(request.model, 'default');
+        assert.equal(Object.hasOwn(request, 'thinking'), false);
+        if (++modelCalls === 1) {
+          const { data, mime } = request.images![0]!;
+          const windowsFile = String.raw`C:\workspace\internal sticker.png`;
+          throw new Error(
+            `${errorMessage} token=fake-token '${workspaceFile}' '${windowsFile}' data:${mime};base64,${data} ${request.context[0]!.content}\nprivate continuation`,
+          );
+        }
+        yield { type: 'text.final', text: '["A happy sticker"]' };
+      },
+      true,
+      {
+        stickers: { model: 'default' },
+        agentSettings: () => ({ thinking: ['minimal', 'low'] }),
+        thinkingLevels: async (model) => {
+          assert.equal(model, 'default');
+          return undefined;
+        },
+        imageLimits: { maxBytes: 100_000, maxEdge: 512 },
+        downloadAttachment: async () => ({ bytes, mime: 'image/png' }),
+      },
+    );
+    const workspaceFile = join(dirname(f.path), 'internal image.png');
+    const sticker = {
+      kind: 'sticker',
+      index: 0,
+      fileId: 'retry-file',
+      uniqueId: 'retry-unique',
+      set: 'Retry_Set',
+      stickerFormat: 'static',
+    } as const;
+    let fetches = 0;
+    f.platform.platform.getStickerSet = async () => {
+      fetches++;
+      return [sticker];
+    };
+    const observe = (id: string) =>
+      f.platform.emit(
+        inbound(id, '', {
+          chatKind: 'group',
+          userId: 'member',
+          attachments: [sticker],
+        }),
+      );
+    const failed = () =>
+      f.logs.find(({ event }) => event === 'sticker.index_failed');
+    await observe('first');
+    await until(t, () => !!failed());
+    const message = failed()?.error;
+    assert.ok(message);
+    assert.ok(message.includes(errorMessage));
+    assert.ok(message.length <= 300);
+    assert.doesNotMatch(
+      message,
+      /fake-token|internal image|internal sticker|data:image|base64|Describe the first|private continuation|\r|\n/,
+    );
+    const span = f.trace.recent.find(({ name }) => name === 'sticker.index');
+    assert.equal(span?.status, 'error');
+    assert.equal(span?.attrs.error, message);
+    assert.equal(f.store.hasStickerSet('retry_set', adapterId), false);
+
+    t.mock.timers.tick(10 * 60_000 - 1);
+    await observe('too-early');
+    await setImmediate();
+    assert.equal(fetches, 1);
+    assert.equal(modelCalls, 1);
+
+    t.mock.timers.tick(1);
+    await setImmediate();
+    assert.equal(fetches, 1);
+    await observe('after-backoff');
+    await until(t, () => f.store.hasStickerSet('retry_set', adapterId));
+    assert.equal(fetches, 2);
+    assert.equal(modelCalls, 2);
   },
 );

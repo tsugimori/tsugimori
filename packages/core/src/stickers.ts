@@ -1,5 +1,6 @@
 import type {
   AgentConnector,
+  AgentRequest,
   ChatRef,
   ExecScope,
   ImageLimits,
@@ -19,9 +20,13 @@ import { setImmediate } from 'node:timers/promises';
 
 import type { Logger } from './hooks.ts';
 import type { Runtime } from './runtime.ts';
+import type { ToolDetails } from './tool-details.ts';
 
 import { untilAborted } from './abort.ts';
 import { runAgent } from './agent-run.ts';
+import { modelThinkingLevels } from './agent-settings.ts';
+import { describeError } from './errors.ts';
+import { redactPairingCodes } from './inbound-message.ts';
 import { findFfmpeg, prepareImage, prepareStickerGrid } from './media.ts';
 
 interface Dependencies {
@@ -29,6 +34,7 @@ interface Dependencies {
   runtime: Runtime;
   scope(workdir: string): ExecScope;
   store: Store;
+  toolDetails: ToolDetails;
   trace: Tracer;
 }
 
@@ -43,14 +49,35 @@ interface Job {
 const stickersPerGrid = 16;
 const sourceLimit = 2 * 1024 * 1024;
 const namePattern = /^[a-z][a-z\d_]{0,63}$/i;
+const retryDelayMs = 10 * 60_000;
 
 function botId(adapter: PlatformAdapter) {
   return adapter.botIdentity?.id ?? adapter.id;
 }
 
+function stickerError(error: unknown, redact: (text: string) => string) {
+  return describeError(error, (text) =>
+    redactPairingCodes(redact(text))
+      .split(/[\r\n\u2028\u2029]/u, 1)[0]!
+      .replace(
+        /\bDescribe the first \d+ cells of this sticker sheet.*$/u,
+        '[redacted prompt]',
+      )
+      .replace(
+        /\bdata:image\/[^\s"',)]+,[A-Za-z0-9+/_=%-]+|[A-Za-z0-9+/]{64,}={0,2}/gu,
+        '[redacted image]',
+      )
+      .replace(
+        /'(?:file:\/\/|\/|[a-z]:[\\/]|\\\\)[^']*'|"(?:file:\/\/|\/|[a-z]:[\\/]|\\\\)[^"]*"|(?:file:\/\/|\/|[a-z]:[\\/]|\\\\)[^\s"'`<>),;]+/giu,
+        '[redacted path]',
+      ),
+  ).slice(0, 300);
+}
+
 export class StickerIndex {
   readonly #deps: Dependencies;
   readonly #pending = new Map<string, Job>();
+  readonly #retryAfter = new Map<string, number>();
   readonly #stop = new AbortController();
   #active?: {
     abort: AbortController;
@@ -78,6 +105,9 @@ export class StickerIndex {
       !adapter.downloadAttachment
     )
       return;
+    const now = Date.now();
+    for (const [name, retryAt] of this.#retryAfter)
+      if (retryAt <= now) this.#retryAfter.delete(name);
     const id = botId(adapter);
     for (const attachment of attachments) {
       if (
@@ -88,13 +118,18 @@ export class StickerIndex {
         continue;
       const name = attachment.set.toLowerCase();
       const key = JSON.stringify([id, name]);
-      if (this.#active?.key === key || this.#pending.has(key)) continue;
+      if (
+        this.#active?.key === key ||
+        this.#pending.has(key) ||
+        this.#retryAfter.has(name)
+      )
+        continue;
       this.#pending.set(key, {
         adapter,
         botId: id,
         chat,
         name,
-        queuedAt: Date.now(),
+        queuedAt: now,
       });
       this.#drain ??= this.#run();
     }
@@ -213,6 +248,7 @@ export class StickerIndex {
         if (!next) return;
         const [key, job] = next;
         this.#pending.delete(key);
+        if ((this.#retryAfter.get(job.name) ?? 0) > Date.now()) continue;
         const abort = new AbortController();
         const active = {
           abort,
@@ -227,30 +263,44 @@ export class StickerIndex {
           abort.signal,
           AbortSignal.timeout(600_000),
         ]);
-        const { log, trace, store } = this.#deps;
+        const { log, trace, store, toolDetails } = this.#deps;
+        const attrs: {
+          adapterId: string;
+          error?: string;
+          jobId: string;
+          set: string;
+        } = {
+          set: job.name,
+          adapterId: job.adapter.id,
+          jobId: randomUUID(),
+        };
+        let end: ReturnType<Tracer['begin']> | undefined;
         try {
           if (
             store.isStickerSetBlocked(job.name) ||
             store.hasStickerSet(job.name, job.botId)
           )
             continue;
-          const attrs = {
-            set: job.name,
-            adapterId: job.adapter.id,
-            jobId: randomUUID(),
-          };
-          trace.record('sticker.index.queue', attrs, Date.now() - job.queuedAt);
-          active.done = trace.span('sticker.index', attrs, () =>
-            this.#index(job, attrs.jobId, signal),
+          trace.record(
+            'sticker.index.queue',
+            { ...attrs },
+            Date.now() - job.queuedAt,
           );
+          end = trace.begin('sticker.index', attrs);
+          active.done = this.#index(job, attrs.jobId, signal);
           await active.done;
-        } catch {
-          if (!this.#stop.signal.aborted && !abort.signal.aborted)
+          end();
+        } catch (error) {
+          if (!this.#stop.signal.aborted && !abort.signal.aborted) {
+            this.#retryAfter.set(job.name, Date.now() + retryDelayMs);
+            attrs.error = stickerError(error, toolDetails.redactor());
             log({
               level: 'warn',
               event: 'sticker.index_failed',
-              adapterId: job.adapter.id,
+              ...attrs,
             });
+          }
+          end?.('error');
         } finally {
           this.#active = undefined;
         }
@@ -265,7 +315,7 @@ export class StickerIndex {
     jobId: string,
     signal: AbortSignal,
   ) {
-    const { runtime, store, trace } = this.#deps;
+    const { log, runtime, store, trace } = this.#deps;
     signal.throwIfAborted();
     const attrs = { set: name, adapterId: adapter.id, jobId };
     const stickers = await trace.span('sticker.index.fetch', attrs, () =>
@@ -298,6 +348,13 @@ export class StickerIndex {
         selected.config.model ??
         selected.defaults?.model ??
         'default';
+      const levels = await modelThinkingLevels(
+        selected.agent,
+        model === 'default' ? (selected.defaults?.model ?? model) : model,
+        log,
+        signal,
+      );
+      const thinking = levels?.[0];
       const ffmpeg = await findFfmpeg();
       if (!ffmpeg) throw new Error('Sticker indexing requires ffmpeg');
       const workdir = await mkdtemp(join(tmpdir(), 'tsugimori-stickers-'));
@@ -312,7 +369,7 @@ export class StickerIndex {
               this.#describe(
                 adapter,
                 selected.agent,
-                model,
+                { model, ...(thinking !== undefined && { thinking }) },
                 limits,
                 ffmpeg,
                 workdir,
@@ -348,7 +405,7 @@ export class StickerIndex {
   async #describe(
     adapter: PlatformAdapter,
     agent: AgentConnector,
-    model: string,
+    settings: Pick<AgentRequest, 'model' | 'thinking'>,
     limits: ImageLimits,
     ffmpeg: string,
     workdir: string,
@@ -395,8 +452,7 @@ export class StickerIndex {
       {
         purpose: 'sticker-index',
         sandbox: this.#deps.scope(workdir),
-        model,
-        thinking: agent.settings?.thinking?.[0],
+        ...settings,
         workdir,
         signal: call,
         tools: [],
@@ -415,9 +471,12 @@ export class StickerIndex {
         supplements: { async *[Symbol.asyncIterator]() {} },
       },
     );
-    const values: unknown = JSON.parse(
-      text.trim().replace(/^```(?:json)?\s*|\s*```$/g, ''),
-    );
+    let values: unknown;
+    try {
+      values = JSON.parse(text.trim().replace(/^```(?:json)?\s*|\s*```$/g, ''));
+    } catch {
+      throw new Error('Sticker model returned invalid JSON');
+    }
     if (!Array.isArray(values) || values.length !== stickers.length)
       throw new Error('Sticker model returned an invalid description count');
     return values.map((value: unknown) => {

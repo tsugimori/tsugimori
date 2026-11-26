@@ -83,6 +83,8 @@ async function fixture(
     settings: { serviceTiers: true, thinking: ['low', 'high'] },
     ...(id === 'first' && {
       listModels: () => models,
+      thinkingLevels: async (selected) =>
+        selected === model ? ['low', 'medium', 'max'] : undefined,
     }),
     async *run() {
       assert.fail('These messages should be handled by commands and setup.');
@@ -365,6 +367,18 @@ test(
     await f.press(models.id, selected);
     assert.equal(f.store.getChat(chat)?.model, model);
     assert.equal((await f.edit(models.id)).text, `Model set to ${model}.`);
+
+    const afterModel = f.sent.length;
+    await f.say('/thinking');
+    buttons(await f.prompt('Effort: default (default)', afterModel), [
+      'low',
+      'medium',
+      'max',
+      'default',
+    ]);
+    await f.say('/thinking high');
+    await f.prompt('Usage: /thinking <low|medium|max|default>', afterModel);
+    assert.equal(f.store.getChat(chat)?.thinking, 'high');
 
     await f.say('/agent');
     const agents = await f.prompt('Agent: first (default)');

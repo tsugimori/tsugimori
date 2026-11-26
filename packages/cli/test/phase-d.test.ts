@@ -2,6 +2,7 @@ import type { SetupDependencies } from '@tsugimori/core';
 
 import claude from '@tsugimori/agent-claude-sdk';
 import codex from '@tsugimori/agent-codex';
+import { Auth } from '@tsugimori/auth';
 import { loadSettings, writeCredential } from '@tsugimori/config';
 import { GuidedSetup, PluginRegistry } from '@tsugimori/core';
 import line from '@tsugimori/platform-line';
@@ -34,6 +35,26 @@ async function fixture(t: TestContext, config = {}) {
   await writeFile(join(directory, 'tsugimori.json'), JSON.stringify(config));
   return directory;
 }
+
+test('CLI pair issues a 24-hour code and replaces the previous one', async (t) => {
+  const workspace = await fixture(t, { storage: { path: 'state.db' } });
+  const logs = t.mock.method(console, 'log', () => {});
+  const args = ['pair', workspace, '--adapter', 'trial'];
+  const codes = [];
+  for (let i = 0; i < 2; i++) {
+    await main(args);
+    const output = String(logs.mock.calls.at(-1)?.arguments[0]);
+    assert.match(output, /expires in 24 hours/);
+    const code = /\/pair ([\w-]{16})/.exec(output)?.[1];
+    assert.ok(code);
+    codes.push(code);
+  }
+  const store = new SqliteStore(join(workspace, 'state.db'));
+  t.after(() => store.close());
+  const auth = new Auth({ store, now: () => Date.now() + 23 * 60 * 60_000 });
+  assert.equal(auth.claimPairing('trial', 'owner', codes[0]!), false);
+  assert.equal(auth.claimPairing('trial', 'owner', codes[1]!), true);
+});
 
 test('guided setup sends localized plans before any prompts', async (t) => {
   const workspace = await fixture(t, { locale: 'zh-TW' });

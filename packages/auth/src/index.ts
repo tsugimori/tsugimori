@@ -15,7 +15,7 @@ import type {
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 
-const pairingTtlMs = 10 * 60_000;
+export const pairingCodeHours = 24;
 const approvalTtlMs = 24 * 60 * 60_000;
 const scheduleGrantAction = 'schedule.delivery';
 
@@ -137,7 +137,7 @@ export class Auth {
     this.#store.savePairingCode(
       adapterId,
       digest(code),
-      this.#now() + pairingTtlMs,
+      this.#now() + pairingCodeHours * 60 * 60_000,
     );
     return code;
   }

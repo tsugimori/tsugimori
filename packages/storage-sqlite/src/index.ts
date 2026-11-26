@@ -65,6 +65,7 @@ import {
 } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/node-sqlite';
 import { migrate } from 'drizzle-orm/node-sqlite/migrator';
+import { timingSafeEqual } from 'node:crypto';
 import { closeSync, lstatSync, openSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
@@ -3228,13 +3229,28 @@ export class SqliteStore implements Store {
   }
 
   savePairingCode(adapterId: string, digest: string, expiresAt: number) {
+    this.#db.transaction(
+      (tx) => {
+        if (
+          tx.select().from(owners).where(eq(owners.adapterId, adapterId)).get()
+        )
+          throw new Error('This adapter already has an owner');
+        tx.insert(pairingCodes)
+          .values({ adapterId, digest, expiresAt })
+          .onConflictDoUpdate({
+            target: pairingCodes.adapterId,
+            set: { digest, expiresAt },
+          })
+          .run();
+      },
+      { behavior: 'immediate' },
+    );
+  }
+
+  deletePairingCode(adapterId: string) {
     this.#db
-      .insert(pairingCodes)
-      .values({ adapterId, digest, expiresAt })
-      .onConflictDoUpdate({
-        target: pairingCodes.adapterId,
-        set: { digest, expiresAt },
-      })
+      .delete(pairingCodes)
+      .where(eq(pairingCodes.adapterId, adapterId))
       .run();
   }
 
@@ -3246,7 +3262,13 @@ export class SqliteStore implements Store {
           .from(pairingCodes)
           .where(eq(pairingCodes.adapterId, principal.adapterId))
           .get();
-        if (!code || code.digest !== digest || code.expiresAt <= now)
+        if (!code || code.expiresAt <= now) return false;
+        const stored = Buffer.from(code.digest);
+        const supplied = Buffer.from(digest);
+        if (
+          stored.length !== supplied.length ||
+          !timingSafeEqual(stored, supplied)
+        )
           return false;
         const row = tx
           .insert(owners)

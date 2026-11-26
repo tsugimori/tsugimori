@@ -661,6 +661,8 @@ export interface AgentConnector {
   settings?: AgentSettings;
   start?(): Promise<void>;
   stop?(): Promise<void>;
+  /** Supported efforts in ascending order, or undefined when the catalog has no data. */
+  thinkingLevels?(model?: string): Promise<readonly string[] | undefined>;
 }
 
 export interface PluginInstanceConfig {

@@ -151,7 +151,7 @@ async function until<T>(find: () => T | undefined) {
   }
 }
 
-const codeLine = /^\/pair ([\w-]{16})$/m;
+const codeLine = /^`\/pair ([\w-]{16})`$/m;
 const contactLink = 'https://example.com/new-bot';
 const configureTrial = {
   id: 'configure',
@@ -176,10 +176,8 @@ test('owner DM setup includes a usable code and contact link without saving the 
     origin.sent.find(({ text }) => text.startsWith('target is attached.')),
   );
   assert.equal(finish.chatId, ownerId);
-  assert.match(
-    finish.text,
-    /direct message to the new bot .*within 10 minutes/,
-  );
+  assert.equal(finish.format, 'markdown');
+  assert.match(finish.text, /direct message to the new bot .*within 24 hours/);
   assert.ok(finish.text.includes(contactLink));
   const code = codeLine.exec(finish.text)?.[1];
   assert.ok(code);
@@ -200,7 +198,7 @@ test('owner DM setup includes a usable code and contact link without saving the 
     { adapterId, chatId: '-100_7' },
     'forward',
   );
-  assert.match(forwarded?.text ?? '', /\/pair \[redacted\]/);
+  assert.match(forwarded?.text ?? '', /^`\/pair \[redacted\]`$/m);
   assert.equal(forwarded?.raw, null);
 
   const db = new DatabaseSync(join(workspace, 'state.db'), { readOnly: true });
@@ -354,7 +352,7 @@ test('/pair new is an owner DM command and replaces the previous code', async (t
   const origin = fixturePlatform();
   const target = fixturePlatform({ kind: 'trial' });
   const owned = fixturePlatform({ kind: 'owned-kind' });
-  const { store } = await fixture(
+  const { store, workspace } = await fixture(
     t,
     new PluginRegistry([
       origin.plugin,
@@ -403,6 +401,7 @@ test('/pair new is an owner DM command and replaces the previous code', async (t
   const latest = origin.sent.at(-1)!;
   const second = codeLine.exec(latest.text)?.[1];
   assert.ok(second);
+  assert.equal(latest.format, 'markdown');
   assert.notEqual(second, first);
   assert.doesNotMatch(latest.text, /https?:/);
   assert.equal(
@@ -413,10 +412,78 @@ test('/pair new is an owner DM command and replaces the previous code', async (t
   assert.equal(target.sent.at(-1)?.text, 'Pairing code is invalid or expired.');
   await target.receive('new', `/pair ${second}`);
   assert.equal(target.sent.at(-1)?.text, 'Owner paired.');
+  const db = new DatabaseSync(join(workspace, 'state.db'), { readOnly: true });
+  t.after(() => db.close());
+  assert.deepEqual(
+    db.prepare('SELECT adapter_id FROM pairing_codes').all(),
+    [],
+  );
   await origin.receive('paired', command);
   assert.match(origin.sent.at(-1)?.text ?? '', /target already has an owner/);
   await origin.receive('help', '/help');
   assert.match(origin.sent.at(-1)?.text ?? '', /\/pair new <adapterId>/);
+});
+
+test('reloading a configured platform owner removes the pending pairing code', async (t) => {
+  const origin = fixturePlatform();
+  const target = fixturePlatform({ kind: 'trial' });
+  const platforms = [
+    { id: adapterId, kind: 'chat' },
+    { id: 'target', kind: 'trial' },
+  ];
+  const { logs, workspace } = await fixture(
+    t,
+    new PluginRegistry([origin.plugin, target.plugin]),
+    { platforms },
+  );
+  await origin.receive('issue', '/pair new target');
+  assert.match(origin.sent.at(-1)?.text ?? '', codeLine);
+  const db = new DatabaseSync(join(workspace, 'state.db'), { readOnly: true });
+  t.after(() => db.close());
+  const pending = db.prepare('SELECT adapter_id FROM pairing_codes');
+  assert.equal(pending.get()?.adapter_id, 'target');
+
+  await writeFile(
+    join(workspace, 'tsugimori.json'),
+    JSON.stringify({ owner: { [adapterId]: ownerId, trial: '43' }, platforms }),
+  );
+  await until(() => logs.find(({ event }) => event === 'config.reloaded'));
+  assert.equal(pending.get(), undefined);
+});
+
+test('guided setup removes a pending code when it assigns an owner before the gateway starts', async (t) => {
+  const workspace = await mkdtemp(join(tmpdir(), 'tsugimori-guided-owner-'));
+  t.after(() => rm(workspace, { recursive: true, force: true }));
+  await writeFile(join(workspace, 'tsugimori.json'), '{}');
+  const store = new SqliteStore(':memory:');
+  t.after(() => store.close());
+  const auth = new Auth({ store });
+  const code = auth.createPairingCode('target');
+  const target = fixturePlatform({
+    kind: 'trial',
+    setupSteps: [
+      {
+        ...configureTrial,
+        run(ctx) {
+          ctx.writeConfig({ ownerId });
+        },
+      },
+    ],
+  });
+  const registry = new PluginRegistry([target.plugin]);
+  const setup = new GuidedSetup({ store, workspace, registry });
+  await setup.run(
+    { mode: 'add', category: 'platform', kind: 'trial', id: 'target' },
+    {
+      signal: AbortSignal.timeout(2_000),
+      async prompt() {
+        assert.fail('This setup needs no prompts');
+      },
+      async show() {},
+    },
+  );
+  assert.equal((await loadSettings(workspace, registry)).owner.target, ownerId);
+  assert.equal(auth.claimPairing('target', '43', code), false);
 });
 
 test('guided add suggests available platform names, retries once, and honors explicit IDs', async (t) => {

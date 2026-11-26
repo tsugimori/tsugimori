@@ -1,8 +1,36 @@
 import type { AgentConnector } from '@tsugimori/plugin-sdk';
 
+import type { Logger } from './hooks.ts';
+
+import { untilAborted } from './abort.ts';
+
 export function acceptsServiceTier(agent: AgentConnector, tier: string) {
   const supported = agent.settings?.serviceTiers;
   return supported === true || supported?.includes(tier) === true;
+}
+
+export async function modelThinkingLevels(
+  agent: AgentConnector | undefined,
+  model: string | undefined,
+  log: Logger,
+  signal?: AbortSignal,
+) {
+  if (!agent?.thinkingLevels) return;
+  const timeout = AbortSignal.timeout(2_000);
+  try {
+    return await untilAborted(
+      signal ? AbortSignal.any([signal, timeout]) : timeout,
+      () => agent.thinkingLevels!(model),
+    );
+  } catch {
+    signal?.throwIfAborted();
+    log({
+      level: 'warn',
+      event: 'agent.thinking_levels_unavailable',
+      target: agent.id,
+    });
+    return undefined;
+  }
 }
 
 export function resolveAgentSetting(

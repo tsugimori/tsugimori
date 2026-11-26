@@ -522,6 +522,15 @@ test('splits into UTF-16-safe batches, returns every part, and uses plain text f
     formatted.parts?.[0]?.text,
     'Heading\nbold and x * y\n\nconst x = "*";\nDocs (https://example.org)',
   );
+  const pairing = await f.adapter.send({
+    chatId: userId,
+    format: 'markdown',
+    text: '請在 24 小時內傳送這一行：\n`/pair demo_pairing1234`\nhttps://example.test/new-bot',
+  });
+  assert.equal(
+    pairing.parts?.[0]?.text.split('\n')[1],
+    '/pair demo_pairing1234',
+  );
 });
 
 test('exposes rate limits and records already sent parts on ambiguous network failure', async (t) => {
@@ -938,6 +947,8 @@ test('LINE completion confirms an endpoint change before setting and testing it'
     });
     assert.equal(asked, scenario.answer === undefined ? 0 : 1);
     assert.match(summary, scenario.summary);
+    if (scenario.testSuccess)
+      assert.ok(summary.includes(endpoint + ' （LINE 測試通過）'));
     assert.equal(summary.includes('Use webhook'), scenario.reminder);
     if (!scenario.testSuccess) {
       assert.doesNotMatch(summary, /已接上/);

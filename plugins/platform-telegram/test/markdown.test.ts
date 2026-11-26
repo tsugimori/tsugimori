@@ -8,6 +8,20 @@ function parts(text: string) {
   return telegramMessageParts({ chatId: '1', format: 'markdown', text });
 }
 
+test('renders a pairing command as one copyable code entity', () => {
+  const heading = '請在 24 小時內傳送這一行：\n';
+  const command = '/pair demo_pairing1234';
+  const link = '\nhttps://example.test/new-bot';
+  assert.deepEqual(parts(heading + '`' + command + '`' + link), [
+    {
+      text: heading + command + link,
+      entities: [
+        { type: 'code', offset: heading.length, length: command.length },
+      ],
+    },
+  ]);
+});
+
 const examples = [
   [
     '**bold** __strong__ *italic* _emphasis_ ~~strike~~',

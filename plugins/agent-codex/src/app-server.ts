@@ -20,10 +20,21 @@ export interface ServerFrame {
 export class RpcError extends Error {
   readonly code: number | undefined;
 
-  constructor(code: unknown) {
-    super(`Codex RPC rejected${typeof code === 'number' ? ` (${code})` : ''}`);
+  constructor(code: unknown, message?: unknown) {
+    super(
+      reasoningEffortError(message) ??
+        `Codex RPC rejected${typeof code === 'number' ? ` (${code})` : ''}`,
+    );
     this.code = typeof code === 'number' ? code : undefined;
   }
+}
+
+// Provider errors may echo the request. Extract only the known reasoning error.
+export function reasoningEffortError(message: unknown) {
+  if (typeof message !== 'string') return;
+  return /Unsupported value: '[a-z]{1,16}' is not supported with the '[\w.-]{1,80}' model\.(?: Supported values are: '[a-z]{1,16}'(?:(?:, and | and |, )'[a-z]{1,16}')*\.)?/u.exec(
+    message,
+  )?.[0];
 }
 
 export function asRecord(value: unknown): Record<string, unknown> {
@@ -173,7 +184,8 @@ export class AppServer extends EventEmitter<{ frame: [ServerFrame] }> {
     if (typeof id !== 'number') return;
     const pending = this.#requests.get(id);
     if (payload.error) {
-      pending?.reject(new RpcError(asRecord(payload.error).code));
+      const { code, message } = asRecord(payload.error);
+      pending?.reject(new RpcError(code, message));
     } else pending?.resolve(payload.result);
   }
 }

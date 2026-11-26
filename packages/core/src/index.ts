@@ -357,6 +357,7 @@ export class Gateway {
       log,
       runtime: this.#runtime,
       store,
+      toolDetails,
       trace: this.#trace,
     });
     this.#summaries = new BackgroundSummaries({
@@ -572,6 +573,11 @@ export class Gateway {
       await this.#runtime.apply(snapshot, removal, () =>
         this.#webhooks.configure(snapshot, this.#state === 'running'),
       );
+      const { config } = this.#runtime;
+      const owned = new Set(Object.keys(config.owner));
+      for (const { id, kind } of config.platforms)
+        if (configuredOwner(config, id, kind)) owned.add(id);
+      for (const id of owned) this.#deps.store.deletePairingCode(id);
       const warnings = snapshot.warnings ?? [];
       if (!isDeepStrictEqual(warnings, this.#configWarnings)) {
         for (const reason of warnings)
@@ -1686,15 +1692,17 @@ export class Gateway {
     }
   }
 
-  #chatAgentSetting(
+  async #chatAgentSetting(
     chat: ChatRef,
     name: 'fast' | 'model' | 'thinking',
     args: string,
-  ) {
+    send: (text: string, choices?: readonly PromptChoice[]) => Promise<void>,
+    isCurrentOwner: () => boolean,
+  ): Promise<void> {
     const { store } = this.#deps;
     const m = systemMessages(this.#runtime.config.locale);
-    const current = store.getChat(chat);
-    const route = this.#tasks.route(chat, current);
+    let current = store.getChat(chat);
+    let route = this.#tasks.route(chat, current);
     const agent = route.selected?.agent;
     const field = name === 'fast' ? 'serviceTier' : name;
     const label = m.settingLabels[field];
@@ -1705,10 +1713,27 @@ export class Gateway {
         (!acceptsServiceTier(agent, fastTier) &&
           (args || !acceptsServiceTier(agent, 'fast'))))
     )
-      return m.fastUnsupported;
+      return send(m.fastUnsupported);
+
+    let catalogLevels: readonly string[] | undefined;
+    if (name === 'thinking') {
+      catalogLevels = await this.#tasks.thinkingLevels(route);
+      if (!isCurrentOwner()) return;
+      current = store.getChat(chat);
+      const latest = this.#tasks.route(chat, current);
+      if (
+        latest.selected !== route.selected ||
+        latest.model.value !== route.model.value
+      )
+        return this.#chatAgentSetting(chat, name, args, send, isCurrentOwner);
+      route = latest;
+    }
+    const levels = catalogLevels ?? agent?.settings?.thinking;
+    const setting =
+      name === 'thinking' ? route.resolveThinking(catalogLevels) : route[field];
 
     if (!args) {
-      const { value, source } = route[field];
+      const { value, source } = setting;
       const status = this.#tasks.status(chat);
       const effective =
         field === 'serviceTier'
@@ -1723,39 +1748,46 @@ export class Gateway {
             : ((value === 'default' ? undefined : value) ??
               status.defaults?.model ??
               m.unset);
-      return m.settingCurrent(label, effective, m.settingSources[source]);
+      return send(
+        m.settingCurrent(label, effective, m.settingSources[source]),
+        name === 'thinking'
+          ? commandChoices([...(levels ?? []), 'default'])
+          : await this.#settingChoices(chat, name),
+      );
     }
 
     if (name === 'thinking' && args !== 'default') {
-      const levels = agent?.settings?.thinking;
-      if (!levels?.length) return m.thinkingUnsupported;
-      if (!levels.includes(args)) return m.thinkingUsage(levels.join('|'));
+      if (!levels?.length) return send(m.thinkingUnsupported);
+      if (!levels.includes(args))
+        return send(m.thinkingUsage(levels.join('|')));
     }
     if (name === 'fast' && !['on', 'off', 'default'].includes(args))
-      return m.fastUsage;
+      return send(m.fastUsage);
 
     const value = args === 'default' ? null : name === 'fast' ? fastTier : args;
     if (current && current[field] !== value) {
       const update: ChatRoute = { [field]: value };
       const next = this.#tasks.route(chat, { ...current, ...update });
+      const nextSetting =
+        name === 'thinking' ? next.resolveThinking(catalogLevels) : next[field];
       const invalidate =
-        route[field].value !== next[field].value &&
+        setting.value !== nextSetting.value &&
         !agent?.settings?.perTurn?.includes(field);
       if (invalidate) this.#tasks.invalidateSession(chat);
       store.setChatRoute(chat, update, invalidate);
     }
-    return value === null
-      ? m.settingCleared(label)
-      : m.settingSet(
-          label,
-          field === 'serviceTier' ? formatServiceTier(value, m) : value,
-        );
+    return send(
+      value === null
+        ? m.settingCleared(label)
+        : m.settingSet(
+            label,
+            field === 'serviceTier' ? formatServiceTier(value, m) : value,
+          ),
+    );
   }
 
-  async #settingChoices(chat: ChatRef, name: 'fast' | 'model' | 'thinking') {
+  async #settingChoices(chat: ChatRef, name: 'fast' | 'model') {
     const agent = this.#tasks.route(chat).selected?.agent;
-    if (name === 'thinking')
-      return commandChoices([...(agent?.settings?.thinking ?? []), 'default']);
     if (name === 'fast')
       return commandChoices([
         ...(agent && acceptsServiceTier(agent, 'fast') ? ['on'] : []),
@@ -1825,7 +1857,12 @@ export class Gateway {
       code,
       this.#runtime.getAdapter(id) === target ? link : undefined,
     );
-    if (!(await this.#outbound.sendSecret(adapter, reply(message, text))))
+    if (
+      !(await this.#outbound.sendSecret(adapter, {
+        ...reply(message, text),
+        format: 'markdown',
+      }))
+    )
       await send(pairing.sendFailed(id));
   }
 
@@ -1944,6 +1981,10 @@ export class Gateway {
       return;
     }
     if (!owner) return;
+    const isCurrentOwner = () =>
+      !this.#isStopping() &&
+      this.#runtime.getAdapter(adapter.id) === adapter &&
+      this.#auth.isOwner({ adapterId: adapter.id, userId: message.userId });
     switch (name) {
       case 'sticker':
         await send(
@@ -2187,12 +2228,23 @@ export class Gateway {
         const update: ChatRoute = { agentId: args };
         const cleared: string[] = [];
         if (switching) {
-          if (
-            current?.thinking &&
-            !next.agent.settings?.thinking?.includes(current.thinking)
-          ) {
-            update.thinking = null;
-            cleared.push(m.settingLabels.thinking);
+          if (current?.thinking) {
+            const nextRoute = this.#tasks.route(chat, {
+              ...current,
+              ...update,
+            });
+            const levels =
+              (await this.#tasks.thinkingLevels(nextRoute)) ??
+              next.agent.settings?.thinking;
+            if (!isCurrentOwner() || this.#runtime.getAgent(args) !== next)
+              break;
+            if (
+              !levels?.includes(current.thinking) &&
+              store.getChat(chat)?.thinking === current.thinking
+            ) {
+              update.thinking = null;
+              cleared.push(m.settingLabels.thinking);
+            }
           }
           if (
             current?.serviceTier &&
@@ -2219,10 +2271,7 @@ export class Gateway {
       case 'model':
       case 'thinking':
       case 'fast':
-        await send(
-          this.#chatAgentSetting(chat, name, args),
-          args ? [] : await this.#settingChoices(chat, name),
-        );
+        await this.#chatAgentSetting(chat, name, args, send, isCurrentOwner);
         break;
       case 'compact':
         if (

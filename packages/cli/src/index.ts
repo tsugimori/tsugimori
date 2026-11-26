@@ -3,7 +3,7 @@ import type { SetupDependencies, SetupRequest } from '@tsugimori/core';
 
 import claude from '@tsugimori/agent-claude-sdk';
 import codex from '@tsugimori/agent-codex';
-import { Auth } from '@tsugimori/auth';
+import { Auth, pairingCodeHours } from '@tsugimori/auth';
 import {
   ConfigError,
   configFilename,
@@ -247,11 +247,13 @@ export async function main(
           store,
           configuredOwner: (id) => configuredOwner(config, id, kind),
         });
-        if (auth.owner(adapterId))
+        if (auth.owner(adapterId)) {
+          store.deletePairingCode(adapterId);
           throw new UsageError('This adapter already has an owner.');
+        }
         const code = auth.createPairingCode(adapterId);
         console.log(
-          `Send /pair ${code} to the bot in a direct message. The code expires in 10 minutes.`,
+          `Send /pair ${code} to the bot in a direct message. The code expires in ${pairingCodeHours} hours.`,
         );
       } finally {
         store.close();

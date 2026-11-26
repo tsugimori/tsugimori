@@ -420,12 +420,12 @@ export interface Store {
   clearSession(ref: ChatRef): void;
   clearUnavailableCommandScopes(ref: CommandScopeChat): void;
   close(): void;
-
   closePreview(
     id: string,
     closedAt: number,
     closedReason: PreviewCloseReason,
   ): void;
+
   closePreviewsOnRestart(now: number): StoredPreview[];
   consumeGrant(
     query: GrantQuery,
@@ -459,6 +459,7 @@ export interface Store {
     fileRoutes: readonly ChatRef[],
     now: number,
   ): Record<string, number>;
+  deletePairingCode(adapterId: string): void;
   deliveryAddress(
     ref: ChatRef,
   ):

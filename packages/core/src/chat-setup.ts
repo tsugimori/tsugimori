@@ -497,12 +497,12 @@ export class ChatSetup {
           current === target ? link : undefined,
         );
         const direct = message.chatKind === 'dm';
-        const delivered = await outbound.sendSecret(
-          originAdapter,
-          direct
+        const delivered = await outbound.sendSecret(originAdapter, {
+          ...(direct
             ? reply(message, finishText(heading, instructions))
-            : { chatId: message.userId, text: instructions },
-        );
+            : { chatId: message.userId, text: instructions }),
+          format: 'markdown',
+        });
         if (!direct || !delivered)
           await show(
             finishText(

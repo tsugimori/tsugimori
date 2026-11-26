@@ -1,5 +1,7 @@
 import type { Config } from '@tsugimori/config';
 
+import { pairingCodeHours } from '@tsugimori/auth';
+
 const messages = {
   en: {
     environment: 'Environment checks failed:',
@@ -13,7 +15,7 @@ const messages = {
         `${id} is an agent. Pairing requires a platform adapter.`,
       owned: (id: string) => `${id} already has an owner.`,
       code: (id: string, code: string, link?: string) =>
-        `Send this exact line in a direct message to the new bot (${id}) within 10 minutes:\n/pair ${code}${link ? `\n${link}` : ''}`,
+        `Send this exact line in a direct message to the new bot (${id}) within ${pairingCodeHours} hours:\n\`/pair ${code}\`${link ? `\n${link}` : ''}`,
       sentPrivately: 'I sent the pairing code in a direct message.',
       sendFailed: (id: string) =>
         `I couldn’t deliver the pairing code privately. Use /pair new ${id} in a direct message to try again.`,
@@ -212,7 +214,7 @@ const messages = {
         `${id} 是代理程式。只有平台轉接器可以配對。`,
       owned: (id: string) => `${id} 已有主人。`,
       code: (id: string, code: string, link?: string) =>
-        `請在 10 分鐘內私訊新的機器人（${id}），傳送以下這一行：\n/pair ${code}${link ? `\n${link}` : ''}`,
+        `請在 ${pairingCodeHours} 小時內私訊新的機器人（${id}），傳送以下這一行：\n\`/pair ${code}\`${link ? `\n${link}` : ''}`,
       sentPrivately: '配對碼已透過私訊傳送。',
       sendFailed: (id: string) =>
         `配對碼無法透過私訊送達。請在私訊中使用 /pair new ${id} 重試。`,

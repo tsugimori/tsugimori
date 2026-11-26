@@ -101,9 +101,18 @@ for await (const line of createInterface({ input: process.stdin })) {
     answer({ config: settings ? { model: null, model_reasoning_effort: null, service_tier: null } : {} });
   } else if (method === 'model/list') {
     answer(params.cursor === 'page-2'
-      ? { data: [{ id: 'alternate' }, { model: 'hidden-model', hidden: true }] }
+      ? { data: [
+          { id: 'alternate', supportedReasoningEfforts: [{ reasoningEffort: 'minimal' }] },
+          { model: 'hidden-model', hidden: true, supportedReasoningEfforts: [] },
+          { model: 'uncataloged-efforts', hidden: true },
+        ] }
       : {
-          data: [{ model: 'fake-model', isDefault: true, defaultReasoningEffort: 'medium' }],
+          data: [{
+            id: 'fake-model-id', model: 'fake-model', isDefault: true, defaultReasoningEffort: 'medium',
+            supportedReasoningEfforts: ['max', 'high', 'low', 'xhigh', 'medium'].map(
+              (reasoningEffort) => ({ reasoningEffort, description: '' }),
+            ),
+          }],
           nextCursor: 'page-2',
         });
   } else if (method === 'thread/start' || method === 'thread/resume') {
@@ -199,6 +208,17 @@ for await (const line of createInterface({ input: process.stdin })) {
       method, params: { threadId, turnId, ...parameters },
     });
     const item = { type: 'agentMessage', id: 'reply-' + turnId, text: 'pong', phase: 'final_answer' };
+    if (input === 'rejected effort') {
+      const message = "Unsupported value: 'minimal' is not supported with the 'fake-model' model. Supported values are: 'low', 'medium', and 'max'.";
+      answer({ turn: { id: turnId, status: 'inProgress' } });
+      notify('turn/completed', {
+        turn: { id: turnId, status: 'failed', error: {
+          message: 'request failed',
+          additionalDetails: 'private request\n' + message,
+        } },
+      });
+      continue;
+    }
     const compact = (totalTokens) => {
       const item = { type: 'contextCompaction', id: 'compact-' + turnId };
       notify('thread/tokenUsage/updated', { tokenUsage: { last: { totalTokens, inputTokens: totalTokens - 100, outputTokens: 100 } } });
@@ -639,8 +659,16 @@ test(
     );
     t.after(() => agent.stop());
     assert.deepEqual(await agent.listModels(), []);
+    assert.equal(await agent.thinkingLevels(), undefined);
     await agent.start();
     assert.deepEqual(await agent.listModels(), ['fake-model', 'alternate']);
+    const levels = ['low', 'medium', 'high', 'xhigh', 'max'];
+    for (const model of [undefined, 'default', 'fake-model', 'fake-model-id'])
+      assert.deepEqual(await agent.thinkingLevels(model), levels);
+    assert.deepEqual(await agent.thinkingLevels('alternate'), ['minimal']);
+    assert.deepEqual(await agent.thinkingLevels('hidden-model'), []);
+    assert.equal(await agent.thinkingLevels('uncataloged-efforts'), undefined);
+    assert.equal(await agent.thinkingLevels('unknown-model'), undefined);
     assert.equal(agent.describeQuota(), undefined);
 
     const seen: string[] = [];
@@ -712,6 +740,10 @@ test(
     await collect(agent.run(request('new turn', undefined, 'thread-null'), io));
     assert.deepEqual(agent.describeSession('thread-null'), {
       serviceTier: null,
+    });
+    await assert.rejects(collect(agent.run(request('rejected effort'), io)), {
+      message:
+        "Unsupported value: 'minimal' is not supported with the 'fake-model' model. Supported values are: 'low', 'medium', and 'max'.",
     });
     assert.equal(spawns, 1);
   },
