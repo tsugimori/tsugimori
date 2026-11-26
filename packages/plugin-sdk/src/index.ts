@@ -159,7 +159,19 @@ export interface ApprovalFeedback {
   queryId?: string;
 }
 
+export interface PlatformCommand {
+  description: string;
+  name: string;
+}
+
+export type PlatformCommandScope =
+  | { type: 'default' | 'group-chats' | 'private-chats' }
+  | { type: 'private-chat'; userId: string }
+  | { chatId: string; type: 'chat-member'; userId: string };
+
 export interface PlatformAdapter {
+  /** The bot's native identity. The username excludes the @ prefix. */
+  readonly botIdentity?: { id?: string; username: string };
   capabilities: PlatformCapabilities;
   deleteMessage?(
     message: Pick<InboundMessage, 'chatId' | 'messageId'>,
@@ -168,6 +180,11 @@ export interface PlatformAdapter {
   kind: string;
   respondToApproval?(feedback: ApprovalFeedback): Promise<void>;
   send(message: OutboundMessage): Promise<SendReceipt>;
+  /** Replace commands for this scope, or clear the scope with an empty list. */
+  setCommands?(
+    commands: readonly PlatformCommand[],
+    scope: PlatformCommandScope,
+  ): Promise<void>;
   start(ctx: AdapterContext): Promise<void>;
   stop(): Promise<void>;
   tools?(): readonly ToolDefinition[];

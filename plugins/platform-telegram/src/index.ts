@@ -3,6 +3,8 @@ import type {
   ApprovalFeedback,
   OutboundMessage,
   PlatformAdapter,
+  PlatformCommand,
+  PlatformCommandScope,
   SendPart,
   TextEntity,
 } from '@tsugimori/plugin-sdk';
@@ -21,6 +23,30 @@ const cursorLifetimeMs = 6 * 24 * 60 * 60 * 1_000;
 
 export { splitText };
 
+function commandScope(scope: PlatformCommandScope) {
+  if ('userId' in scope) {
+    const id = Number(scope.userId);
+    if (!Number.isSafeInteger(id) || id <= 0 || String(id) !== scope.userId)
+      return;
+  }
+  switch (scope.type) {
+    case 'default':
+      return { type: 'default' };
+    case 'group-chats':
+      return { type: 'all_group_chats' };
+    case 'private-chats':
+      return { type: 'all_private_chats' };
+    case 'private-chat':
+      return { type: 'chat', chat_id: scope.userId };
+    case 'chat-member':
+      return {
+        type: 'chat_member',
+        chat_id: scope.chatId,
+        user_id: Number(scope.userId),
+      };
+  }
+}
+
 export class TelegramAdapter implements PlatformAdapter {
   readonly id: string;
   readonly kind = 'telegram';
@@ -35,6 +61,7 @@ export class TelegramAdapter implements PlatformAdapter {
   readonly #now: () => number;
   readonly #typingIntervalMs: number;
   #ctx?: AdapterContext;
+  #botIdentity?: BotIdentity;
   #controller?: AbortController;
   #polling?: Promise<void>;
 
@@ -59,6 +86,10 @@ export class TelegramAdapter implements PlatformAdapter {
     this.#typingIntervalMs = typingIntervalMs;
   }
 
+  get botIdentity() {
+    return this.#botIdentity;
+  }
+
   async start(ctx: AdapterContext) {
     if (this.#controller)
       throw new Error('Telegram adapter is already started');
@@ -71,6 +102,7 @@ export class TelegramAdapter implements PlatformAdapter {
         this.#token,
         AbortSignal.any([controller.signal, AbortSignal.timeout(8_000)]),
       );
+      this.#botIdentity = bot;
       this.#polling = this.#poll(ctx, bot, controller.signal).catch(
         (error: unknown) => {
           if (controller.signal.aborted) return;
@@ -95,6 +127,7 @@ export class TelegramAdapter implements PlatformAdapter {
       this.#polling = undefined;
       this.#controller = undefined;
       this.#ctx = undefined;
+      this.#botIdentity = undefined;
     }
   }
 
@@ -167,6 +200,31 @@ export class TelegramAdapter implements PlatformAdapter {
         backoff = Math.min(backoff * 2, 30_000);
       }
     }
+  }
+
+  async setCommands(
+    commands: readonly PlatformCommand[],
+    scope: PlatformCommandScope,
+  ) {
+    const target = commandScope(scope);
+    if (!target) {
+      if (commands.length) throw new Error('Invalid Telegram command user ID');
+      return;
+    }
+    const result = await this.#api.call(
+      commands.length ? 'setMyCommands' : 'deleteMyCommands',
+      commands.length
+        ? {
+            scope: target,
+            commands: commands.map(({ name, description }) => ({
+              command: name,
+              description,
+            })),
+          }
+        : { scope: target },
+      AbortSignal.any([this.#signal(), AbortSignal.timeout(5_000)]),
+    );
+    if (result !== true) throw new Error('Telegram did not update commands');
   }
 
   async deleteMessage(

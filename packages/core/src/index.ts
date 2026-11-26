@@ -36,12 +36,15 @@ import {
 } from '@tsugimori/scheduler';
 import { Tracer } from '@tsugimori/trace';
 
+import type { Command } from './chat-commands.ts';
 import type { Logger } from './hooks.ts';
 import type { PreviewProviders } from './previews.ts';
 
 import { approvalDecisionText, approvalMessages } from './approval-messages.ts';
+import { parseCommand } from './chat-commands.ts';
 import { ChatSetup } from './chat-setup.ts';
 import { EnvironmentChecks, failureText } from './checks.ts';
+import { CommandMenus } from './command-menus.ts';
 import { Executions, sandboxScope } from './executions.ts';
 import { HookRunner, logToStderr } from './hooks.ts';
 import { conversationId, Outbound } from './outbound.ts';
@@ -93,6 +96,7 @@ export class Gateway {
   readonly #previews?: Previews;
   readonly #execution: Executions;
   readonly #chatSetup: ChatSetup;
+  readonly #commandMenus: CommandMenus;
   #reportedFailures = false;
   readonly #inbound = new Set<Promise<void>>();
   #applyingConfig = false;
@@ -183,6 +187,13 @@ export class Gateway {
           id,
           this.#runtime.adapterKind(id),
         ),
+    });
+    this.#commandMenus = new CommandMenus({
+      log,
+      owner: (id) => this.#auth.owner(id),
+      runtime: this.#runtime,
+      store,
+      trace: this.#trace,
     });
     this.#chatSetup = new ChatSetup({
       setup: new GuidedSetup({ ...setup, store, workspace, registry }),
@@ -344,6 +355,7 @@ export class Gateway {
     try {
       await this.#expiry;
       await this.#runtime.apply(snapshot);
+      this.#commandMenus.refresh();
       if (this.#deps.namedPreview) {
         const provider = this.#deps.namedPreview(
           this.#runtime.disabled('preview.named') ? undefined : snapshot,
@@ -384,6 +396,7 @@ export class Gateway {
   async idle() {
     while (this.#inbound.size) await Promise.allSettled(this.#inbound);
     await this.#tasks.idle();
+    await this.#commandMenus.idle();
   }
 
   stop() {
@@ -393,6 +406,7 @@ export class Gateway {
 
   async #stop() {
     this.#state = 'stopping';
+    this.#commandMenus.stop();
     this.#scheduler.stop();
     try {
       await this.#closeWatch?.();
@@ -486,11 +500,12 @@ export class Gateway {
       display: event.userDisplay ?? null,
       username: event.userUsername,
     };
-    if (await this.#chatSetup.receive(adapter, chat, event)) {
+    const command = parseCommand(event.text, adapter.botIdentity?.username);
+    if (command === 'other-bot') return;
+    if (await this.#chatSetup.receive(adapter, chat, event, command?.name)) {
       store.recordUser(user);
       return;
     }
-    const command = parseCommand(event.text);
     const privateCommand =
       command?.name === 'pair' ||
       command?.name === 'login' ||
@@ -519,6 +534,8 @@ export class Gateway {
         event.edited,
       ),
     );
+    if (stored && event.chatKind !== 'dm')
+      this.#commandMenus.observeGroup(adapter, event.chatId);
     if (!stored || event.edited) return;
     const message = privateCommand
       ? { ...event, raw: undefined, text: stored.text }
@@ -850,6 +867,7 @@ export class Gateway {
     if (name === 'pair') {
       if (message.chatKind !== 'dm' || this.#auth.owner(adapter.id)) return;
       const paired = this.#auth.claimPairing(adapter.id, message.userId, args);
+      if (paired) this.#commandMenus.sync(adapter);
       await send(paired ? m.pairing.success : m.pairing.invalid);
       if (paired) await this.#reportFailures();
       return;
@@ -957,31 +975,6 @@ export class Gateway {
         break;
     }
   }
-}
-
-type Command = {
-  args: string;
-  name:
-    | 'add'
-    | 'login'
-    | 'pair'
-    | 'allow'
-    | 'deny'
-    | 'agent'
-    | 'model'
-    | 'compact'
-    | 'status'
-    | 'preview'
-    | 'previews';
-};
-
-function parseCommand(text: string): Command | undefined {
-  const match =
-    /^\/(add|login|pair|allow|deny|agent|model|compact|status|preview|previews)(?:\s+([\s\S]*))?$/.exec(
-      text.trim(),
-    );
-  if (!match) return;
-  return { name: match[1] as Command['name'], args: match[2]?.trim() ?? '' };
 }
 
 export { GuidedSetup } from './setup.ts';

@@ -10,6 +10,7 @@ import type { Tracer } from '@tsugimori/trace';
 import { SetupError } from '@tsugimori/plugin-sdk';
 import { setTimeout as delay } from 'node:timers/promises';
 
+import type { Command } from './chat-commands.ts';
 import type { Logger } from './hooks.ts';
 import type { Runtime } from './runtime.ts';
 import type { GuidedSetup, SetupRequest } from './setup.ts';
@@ -53,6 +54,7 @@ export class ChatSetup {
     adapter: PlatformAdapter,
     chat: ChatRef,
     message: InboundMessage,
+    command?: Command['name'],
   ) {
     const { store } = this.#deps;
     const prompt = this.#pending;
@@ -75,7 +77,9 @@ export class ChatSetup {
         eligible &&
         prompt.secret &&
         (prompt.chatId === chat.chatId || prompt.origin === chat.chatId) &&
-        !/^\/(?:add|login|status)(?:\s|$)/.test(message.text),
+        command !== 'add' &&
+        command !== 'login' &&
+        command !== 'status',
       ) ||
       /\b(?:\d{5,}:[A-Za-z0-9_-]{25,}|sk-ant-oat[A-Za-z0-9_-]{20,})\b/.test(
         message.text,
