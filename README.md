@@ -1,156 +1,132 @@
 # Tsugimori
 
-Tsugimori is a self-hosted, speed-first chat agent framework. It keeps conversation history in SQLite, enforces approvals in the gateway, and records timings for each processing stage.
+Tsugimori is a self-hosted chat agent framework. The gateway routes messages, enforces permissions, and records processing times. SQLite stores chat history, sessions, approvals, schedules, and traces. Platform, agent, execution, tunnel, and web plugins connect the gateway to external services and provide optional capabilities.
 
 ## Quick start
 
-Use Node.js 24 or later with Corepack.
+From this repository, use Node.js 24 or later and Corepack. Obtain a Telegram bot token and your numeric Telegram user ID, then follow the two terminal wizards. The Codex wizard downloads a managed release and opens a device sign-in flow. [Telegram setup](plugins/platform-telegram/README.md) · [Codex setup](plugins/agent-codex/README.md)
 
 ```sh
 corepack pnpm install
 corepack pnpm exec tsugimori init ./ws
-```
-
-A new workspace can run with no platforms or agents. Add the first Telegram bot in a terminal. The wizard hides the token and asks for the owner's numeric Telegram user ID.
-
-```sh
 corepack pnpm exec tsugimori add platform telegram --dir ./ws
 corepack pnpm exec tsugimori add agent codex --dir ./ws
 corepack pnpm exec tsugimori doctor ./ws
 corepack pnpm exec tsugimori start ./ws
 ```
 
-The gateway reloads validated configuration and credentials while running. Press Ctrl+C or send SIGTERM to stop the gateway and flush traces.
+Send `/status` to the bot in a direct message, then send a message to start a conversation. A workspace can also start with zero platforms or zero agents. With a platform and zero agents, the gateway still records ordinary incoming messages and tells the owner when a triggered message has no agent.
 
-For manual configuration, use the [example workspace](examples/workspace/tsugimori.json) and [JSON Schema](schema/tsugimori.schema.json). Set a native user ID by adapter ID or platform kind in `owner`, or run `tsugimori pair [dir] --adapter <id>` and send the printed command to the bot in a direct message within ten minutes. Owners can use `/allow`, `/deny`, and `/status`.
+## Workspace and conversations
 
-## Environment checks and setup
+| Path                                     | Purpose                                                                                                                                      |
+| ---------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `tsugimori.json`, `.env`                 | Validated JSON configuration and plugin credentials. Process environment values take precedence over workspace credentials of the same name. |
+| `data/tsugimori.db`                      | Default SQLite database. `init` creates the directory and applies migrations.                                                                |
+| `rules/global.md`, `platforms/<kind>.md` | Optional global and platform rules.                                                                                                          |
+| `chats/<adapter-id>/<chat-id>/`          | Per-chat working directory. It can contain `rules/*.md`, `skills/`, and `agents.json`. Directory names are encoded when needed.              |
+| `agents/<id>/home`, `runtime/`           | Default per-agent login homes and managed runtime files.                                                                                     |
 
-- `tsugimori doctor [dir] [--json]` reports core and enabled-plugin checks and exits with status 1 on failure.
-- `tsugimori setup [dir] [--yes] [--upgrade]` prints the package-manager command for missing system packages. `--yes` runs that command. Setup installs the full Codex release package for each enabled Codex instance, verifies published SHA-256 checksums, and saves each version in `agents[].version`. Use `--upgrade` to update those pins to the latest release.
-- `tsugimori start [dir]` logs failed checks and disables the affected capabilities. The owner gets a direct message with failures when an owner channel with free push is available. Use `/status` for the current state.
+Keep the deployment workspace separate from the framework checkout. Chat rules take precedence over platform and global rules. Permissions come from the gateway. With Git available, the gateway records chat rule and skill changes under the initiating user's native ID. The `workspace.configure` agent tool can request owner approval for chat defaults for agent, model, and thinking. The gateway records approved settings in `agents.json` and SQLite.
 
-### Guided setup
+Owners are identified by native platform user ID. Set `owner` by adapter ID or platform kind, with the adapter ID taking precedence. To pair an adapter that has no owner, run `corepack pnpm exec tsugimori pair ./ws --adapter <id>` and send the printed `/pair` command to its bot in a DM within ten minutes. Owners trigger the agent in a DM or by mentioning the bot. In an allowlisted chat, members can trigger it by mentioning or replying to the bot. Ordinary messages can enter chat history even when they do not trigger a turn.
 
-Owners run `/add <agent|platform> <kind> [--id <id>]` or `/login <agentId>` in chat. In a terminal, use `tsugimori setup <agent|platform> <kind> [--id <id>] [--dir <dir>]` or `tsugimori setup login <agentId> [--dir <dir>]`. `tsugimori add` also opens the add wizard.
+The gateway resumes an existing agent session when possible, using new chat content since its previous turn. Chat overrides take precedence over approved chat workspace settings, then the agent entry, then provider defaults. Codex and Claude support changing model, thinking, and fast settings on the next turn of an existing session. Switching agents or changing an option that requires a fresh session rebuilds context from that chat's stored history.
 
-The first message lists the steps, what each asks for, and when setup saves credentials and configuration. The originating thread shows numbered progress. Reply directly to each numbered prompt. Secret prompts go to the owner's DM and identify the originating chat. The terminal hides secret input.
+### Context and summaries
 
-Send `/cancel` in the originating chat or in the DM that has a pending secret prompt. In a terminal, enter `/cancel` or press Ctrl+C. Cancellation reports which credentials and configuration this attempt already saved. The next attempt starts at step 1. Rerun the same command and ID to resume an interrupted setup. `/help` lists owner commands, including `/cancel` for guided setup.
+A fresh session receives rules, any usable rolling summary, and recent raw messages. `context.recentMessages` defaults to 30. With summaries enabled and an applicable summary cursor, a fresh session can receive up to `recentMessages + 40` raw messages after that cursor, including when the summary text is still empty. Without an applicable cursor, the base limit applies. Older messages remain in storage.
 
-## Plugin configuration
+| `context.summary` key | Default      | Behavior                                                                                                                                                      |
+| --------------------- | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `enabled`             | `true`       | Set to `false` to disable summary generation and use.                                                                                                         |
+| `minMessages`         | `20`         | Minimum unsummarized messages outside the recent window before a background update.                                                                           |
+| `minIntervalMinutes`  | `15`         | Minimum time since the last saved update. If only the interval blocks a run, it is rechecked when the interval ends. Set to `0` to remove the delay.          |
+| `maxMessages`         | `200`        | Maximum messages per batch. A full batch with another full batch waiting queues an immediate catch-up that skips the interval and still checks `minMessages`. |
+| `model`               | Chat's model | Optional model override for summary turns.                                                                                                                    |
+| `thinking`            | `low`        | Reasoning effort for summary turns.                                                                                                                           |
+| `timeoutMs`           | `120000`     | Time limit in milliseconds for each summary turn.                                                                                                             |
 
-Platform adapters declare `outboundPush`. `free` is the default and allows proactive sends without quota. `metered` uses quota for sends outside a current inbound reply. `none` only supports replies to a current inbound. Supported platforms are Telegram (`free`) and LINE (`metered`).
+The first summary can run as soon as the backlog reaches the threshold. The saved summary is capped at 4,000 characters. Summary settings reload while the gateway runs. Agent session compaction is separate and preserves space in the provider's session. [Codex compaction](plugins/agent-codex/README.md#compaction) · [Claude compaction](plugins/agent-claude-sdk/README.md#compaction)
 
-### Telegram
+## Chat commands
 
-Add a `platforms` entry with `kind: "telegram"`, a unique `id`, and a `tokenEnv` naming the bot token variable. Each entry runs a separate bot. Telegram forum topics have separate history, sessions, and workspace directories. Agent replies and scheduled agent output render Markdown as Telegram formatting. Fixed-text reminders preserve their original Markdown characters. Owners can decide an approval with its buttons or by replying directly to the prompt. Telegram's group privacy mode controls which group messages reach the bot.
+| Command                                     | Who                                             | What it does                                                                                                |
+| ------------------------------------------- | ----------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `/help`                                     | Owner                                           | Lists owner commands.                                                                                       |
+| `/status`                                   | Owner                                           | Shows gateway health, chat activity, and system state.                                                      |
+| `/agent <id>`                               | Owner                                           | Switches this chat to an available agent and reports any incompatible thinking or fast overrides it clears. |
+| `/model [name]`                             | Owner                                           | Shows the current model and its source, or sets a chat override. Use `default` to clear it.                 |
+| `/thinking [level]`                         | Owner                                           | Shows or sets reasoning effort for this chat. Use `default` to clear the override.                          |
+| `/fast [on\|off\|default]`                  | Owner                                           | Shows or sets speed on a supported agent. `off` selects standard speed and `default` clears the override.   |
+| `/compact`                                  | Owner                                           | Requests compaction of this chat's current agent session.                                                   |
+| `/allow`                                    | Owner                                           | Lets members trigger the bot in this chat.                                                                  |
+| `/deny`                                     | Owner                                           | Removes this chat from the allowlist and cancels active approval waits here.                                |
+| `/pair <code>`                              | Pairing code holder, in a DM to an unowned bot  | Claims ownership using an unexpired code.                                                                   |
+| `/add <agent\|platform> <kind> [--id <id>]` | Owner                                           | Runs guided setup for a plugin instance.                                                                    |
+| `/login <agentId>`                          | Owner                                           | Signs an existing agent in again.                                                                           |
+| `/cancel`                                   | Owner in the setup chat or its secret-prompt DM | Cancels guided setup.                                                                                       |
+| `/previews`                                 | Owner                                           | Lists open previews on this adapter.                                                                        |
+| `/preview close <id>`                       | Owner                                           | Closes a preview on this adapter.                                                                           |
 
-When Telegram upgrades a group to a supergroup, Tsugimori carries over its routing, schedules, pending approvals, history, summary, and agent session. Pending approval prompts from the old group are posted again in the supergroup. If the requester's original message can no longer be addressed, approval outcomes appear as standalone notices. A send that receives Telegram's migration response is retried once at the new chat ID.
+`/status` uses the workspace locale and time zone. The header shows health, build information when available, and uptime. **This chat** shows the agent implementation and effective model, effort, and speed. When available, it adds context usage, session age, cached quota, last compaction and count, summary coverage, running or queued work, approvals, and schedules. **System** lists platform and agent states, sandbox availability, and the count of failed environment checks. The card uses cached provider information and local state, and shows today's timestamps without a date.
 
-The gateway retries temporary platform startup failures with exponential backoff. `doctor` probes Telegram connectivity. After five minutes, the gateway sends the owner an outage notice and follows up on recovery. Notices use an available owner chat and wait if none is available. Telegram rate-limit responses can extend the retry delay. An invalid Telegram token stops retries and prompts the owner to check it.
+### Approvals and schedules
 
-The owner-only `/status` card follows the workspace locale (`en` or `zh-TW`) and time zone (`Asia/Taipei` by default). Its header shows gateway health, build information, and uptime. **This chat** shows the agent implementation, model, reasoning effort, and fast mode. Codex reports the effective speed for the current session. Codex defaults come from `model`, `model_reasoning_effort`, and `service_tier` in the agent's `config.toml` and refresh on workspace hot reload. Known model and effort defaults are marked `(default)`.
+The designated approver or platform owner can use **Approve** or **Deny** buttons where supported, or reply directly to the approval prompt with its displayed decision word. English replies also accept `allow once` and `always`. The requesting agent waits up to two minutes, and pending requests survive restart. Schedule approvals expire at the first eligible run or after 24 hours, whichever comes sooner. Other approvals expire after 24 hours. Where supported, expiry edits the prompt and removes its buttons. The gateway sends standalone follow-up notices only on free-push platforms. On metered platforms the owner can see the latest decision in `/status` when available, or check the [admin UI](plugins/web/README.md).
 
-**This chat** also shows compact context and session figures, cached quota, compaction and summary details, current work, approvals, and the next schedule when available. **System** shows platform and agent states, sandbox availability, and environment checks. Times omit the date for events on the current day. `/status` reads local state without contacting providers.
+Ask the agent to create or manage a schedule in the conversation where it belongs. It uses `schedule.create`, `schedule.list`, `schedule.update`, `schedule.pause`, and `schedule.cancel`. The creator and platform owner can manage it from that conversation. Fixed messages send directly. Agent tasks run the supplied instructions when due.
 
-Telegram’s `/` menu shows `/pair` in private chats before the bot has an owner. Once an owner is configured or paired, owner commands appear in the owner’s private chat and for that owner in groups the bot has seen. Menu descriptions follow the workspace locale. In groups, you can use `/cmd@botusername` with optional arguments, for example `/compact@ExampleBot`. The bot matches the command and its username case-insensitively and ignores commands addressed to other bots.
+- Use a `once` trigger with `at`, an `interval` trigger with `at` and `minutes`, or five-field `cron` with `expr` and optional `from`. Use Unix milliseconds for `at`, `from`, and an optional recurring `until`, which is inclusive. For cron, `from` must precede `until` when both are set. Cron uses the schedule's time zone (the workspace time zone by default), including daylight saving transitions.
+- Self-delivery and untargeted one-time group delivery ordinarily proceed without approval. Other delivery scopes, frequent or high-cost jobs, cross-chat agent tasks, and jobs flagged by the agent can require approval. Recurring approval covers future runs and edits with the same approved delivery scope, subject to resource checks. Use native platform user IDs in `mentions`.
+- Schedules persist in SQLite and stay due while their platform is unavailable. The default `missed: "latest"` delivers the latest missed occurrence with a delay note. Use `"skip"` to skip missed deliveries. Metered deliveries use quota and carry `push.metered=true` in traces. A reply-only platform cannot schedule delivery. Existing schedules fail on their next due run if the platform becomes reply-only.
 
-When Telegram reports a group upgrade, tsugimori carries the group's allowlist and agent settings to the supergroup and registers its menu there. If Telegram reports that a chat or member is unavailable, menu registration for that scope resumes when the bot receives a new message from that chat.
+## Guided setup
 
-Set the workspace `locale` to `zh-TW` for Traditional Chinese approval prompts and owner notices, including startup environment checks. The default is `en`. Telegram reminders and approval prompts use each recipient’s latest known `@username` when available, falling back to a native mention on the display name.
+Run `/add <agent|platform> <kind> [--id <id>]` or `/login <agentId>` as an owner. In a terminal, use `corepack pnpm exec tsugimori add <agent|platform> <kind> [--id <id>] [--dir <dir>]` (also available as `tsugimori setup <agent|platform> <kind> ...`) or `corepack pnpm exec tsugimori setup login <agentId> [--dir <dir>]`. An omitted instance ID defaults to its kind.
 
-### LINE
+The wizard begins with a plan showing the steps, what each asks for, and when it saves credentials and configuration. Follow numbered progress in the originating conversation and reply directly to each prompt. Secret prompts go to the owner's DM and identify the origin. The gateway excludes secret replies from message history and attempts deletion where supported. Enter secrets in an interactive terminal to hide input there.
 
-Create a Messaging API channel, then run `corepack pnpm exec tsugimori add platform line --id main --dir ./ws` or use `/add platform line --id main` from an existing owner chat. Enter the channel secret and long-lived channel access token at the secret prompts, then confirm the bot name. Set the LINE owner ID in `owner` or use the pairing command after the webhook is live.
+Rerun the same command and ID to resume an interrupted attempt from its saved checkpoint. To cancel, send `/cancel` in the originating chat or in the DM with the pending secret prompt. In a terminal, enter `/cancel` or press Ctrl+C. Cancellation reports credentials saved and any agent it left disabled. An explicitly cancelled attempt starts again at step 1. Re-login temporarily disables an enabled agent. If cancelled, that agent stays disabled until sign-in succeeds again. Successful setup saves configuration for the running gateway to reload.
 
-For manual setup, add a `platforms` entry with `kind: "line"`, a unique `id`, and credentials in `LINE_CHANNEL_SECRET` and `LINE_CHANNEL_ACCESS_TOKEN`. Use `secretEnv` and `tokenEnv` to change the credential names. The `listen` address defaults to `127.0.0.1:8789`. Startup and `tsugimori doctor` report duplicate addresses among enabled LINE instances, admin web, and named previews.
+## Configuration
 
-Use a reverse proxy or a named Cloudflare Tunnel to route a public HTTPS URL at `/line/<id>/` to that same path on the loopback listener. For instance `main`, use `https://webhooks.example.com/line/main/` and leave it accessible to LINE without an interactive login. The listener accepts POST requests at `/line/<id>`, `/line/<id>/`, and `/line/<id>/webhook` and ignores query strings. In the LINE Developers Console, set the Webhook URL, verify it, and turn on **Use webhook**. To receive group and room messages, also enable **Allow bot to join group chats**.
+See the [JSON Schema](schema/tsugimori.schema.json) and an [example workspace](examples/workspace/tsugimori.json).
 
-A fresh reply token can send the first batch of a response. `replyTokenTtlMs` defaults to 50,000 milliseconds and accepts up to 60,000. Other batches and messages without a usable token use metered push and count toward the LINE account's messaging quota. To decide an approval, quote the prompt and reply with the displayed approval or denial word.
+| Key                   | Purpose and defaults                                                                                                                                                                                       |
+| --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `$schema`             | Optional schema reference for editors.                                                                                                                                                                     |
+| `owner`               | Native owner IDs keyed by adapter ID or kind. Defaults to an empty map.                                                                                                                                    |
+| `timezone`, `locale`  | Time zone for display and new schedules, default `Asia/Taipei`. Locale is `en` (default) or `zh-TW`.                                                                                                       |
+| `storage`             | SQLite storage. Relative paths resolve from the workspace. The default is `data/tsugimori.db`.                                                                                                             |
+| `platforms`, `agents` | Plugin instances, both empty by default. Entries have an `id`, `kind`, and optional `enabled` (default `true`). See the plugin guides for additional fields.                                               |
+| `defaultAgent`        | Default agent ID for chats with no selection. When omitted, the gateway normally uses the first available agent.                                                                                           |
+| `context`             | Recent message window and background summary settings. [Context and summaries](#context-and-summaries)                                                                                                     |
+| `scheduler`           | Approval thresholds and limits. `minIntervalMinutes` defaults to 15 (1–1,440), `maxActivePerUser` to 20 (1–1,000), and `highCostModels` to an empty list.                                                  |
+| `exec`                | Omit to disable, or use `{}` to enable Linux local execution with the default read restrictions. [Local sandbox configuration](plugins/exec-local-sandbox/README.md#configuration)                         |
+| `web`                 | Omit to disable, or add a section to enable the loopback admin UI by default at `127.0.0.1:8787`. Direct local access requires explicit opt-in. [Web configuration](plugins/web/README.md#configuration)   |
+| `preview`             | Omit to disable, or use `{}` to enable Quick previews with a 60-minute TTL cap. A named router defaults to `127.0.0.1:8788`. [Cloudflare configuration](plugins/tunnel-cloudflare/README.md#configuration) |
 
-### Codex
+The gateway watches `tsugimori.json` and `.env` and can attach or detach platforms and agents without restart. The database path and admin web server configuration take effect at startup. Assign distinct loopback addresses to enabled LINE listeners, the admin web listener, and the named preview router. `doctor` reports duplicate configured addresses, and the gateway rejects a configuration with such a conflict.
 
-Add an `agents` entry with `kind: "codex"`. Set `model`, `thinking`, or `serviceTier` to override the Codex defaults. Supported `/thinking` levels are `minimal`, `low`, `medium`, `high`, and `xhigh`. `serviceTier` accepts Codex provider tiers, including `fast` and `default` for standard speed. A pinned version uses the entrypoint in `runtime/codex/<version>/codex-package.json`, with `bin/codex` (`bin/codex.exe` on Windows) as the fallback within that release directory. Setup retains the package's helper executables and sandbox resources. If `doctor` reports a missing `codex-code-mode-host` in a managed install, run `tsugimori setup --upgrade` in the workspace.
+## Plugins
 
-An unpinned entry uses `options.command` or `codex` on PATH. The login home defaults to `agents/<id>/home`. Set `options.codexHome` to override it. Paths resolve from the workspace. Guided setup uses Codex device sign-in, asks the owner to confirm the reported ChatGPT account, then runs a test turn.
+| Plugin                                                   | Purpose                                                              |
+| -------------------------------------------------------- | -------------------------------------------------------------------- |
+| [Telegram](plugins/platform-telegram/README.md)          | Telegram bots via long polling.                                      |
+| [LINE](plugins/platform-line/README.md)                  | LINE Messaging API via signed webhooks and metered push.             |
+| [Codex](plugins/agent-codex/README.md)                   | Agent connector for Codex App Server.                                |
+| [Claude Agent SDK](plugins/agent-claude-sdk/README.md)   | Agent connector for Claude through its bundled CLI.                  |
+| [Local sandbox](plugins/exec-local-sandbox/README.md)    | Linux command and file tools isolated per chat.                      |
+| [Cloudflare Tunnel](plugins/tunnel-cloudflare/README.md) | Time-limited Quick and named previews of chat services.              |
+| [Admin web UI](plugins/web/README.md)                    | Read-only inspection of chat history, traces, approvals, and grants. |
 
-### Claude Agent SDK
+## Operations
 
-Add an `agents` entry with `kind: "claude-sdk"` and optionally set `model`, `thinking`, or `serviceTier`. Supported `/thinking` levels are `low`, `medium`, `high`, `xhigh`, and `max`. `serviceTier` maps `fast` and `default` to the SDK's fast-mode setting. Claude ignores other tier names. Availability depends on the Claude model and account. The Agent SDK ships its own Claude Code CLI. Guided setup uses Claude sign-in or a token generated by `claude setup-token`, then runs a test turn. Each agent uses `agents/<id>/home` by default. Set `options.claudeHome` to override it, or configure API-key authentication with `ANTHROPIC_API_KEY` or `options.apiKeyEnv`. The SDK starts with local skills and settings disabled.
+- **Service**. Run `corepack pnpm exec tsugimori start /absolute/path/to/workspace` in the foreground from the repository, for example under systemd with the repository as `WorkingDirectory`. Use a service user with access to the workspace and Node.js on its PATH. SIGINT or SIGTERM stops the gateway and flushes traces.
+- **Health checks**. `corepack pnpm exec tsugimori doctor [dir] [--json]` checks Node.js, the database path, Git, configured listener conflicts, and enabled plugin capabilities. It exits with status 1 on failure. Stop the gateway before probing its LINE bind addresses with `doctor`. Startup logs failed checks and disables affected capabilities where it can. Startup failure notices go to an owner DM when a free-push channel is available.
+- **Logs**. Capture stderr for structured gateway events, and use `/status` or the admin UI for persisted task traces and chat state.
+- **Backups**. For a file copy, stop the service first and back up the workspace, including `data/tsugimori.db` (or your configured path) and any SQLite sidecar files still present. Protect the backup as it can contain chat history, `.env`, and agent login homes.
+- **Upgrades**. Stop the service and back up the workspace, update the checkout, run `corepack pnpm install`, then run `doctor` and restart. The gateway applies SQLite migrations when it opens the database. `corepack pnpm exec tsugimori setup [dir] [--yes] [--upgrade]` prints commands for missing system packages and runs them with `--yes`. Setup also installs managed Codex releases and records their pins. Use `--upgrade` to update those pins.
 
-For Claude, `/status` shows context usage against the reported model window and the session's compaction count. It shows cached five-hour and seven-day subscription quota when Claude reports it.
-
-Set `defaultAgent` to an agent ID to route new conversations by default. With a platform and zero agents, the gateway records incoming messages and tells the owner when a triggered message has no agent attached.
-
-### Chat agent settings
-
-Owners can use these commands in a chat.
-
-- `/agent <id>` switches the chat's agent and clears any chat thinking and fast overrides the new agent cannot use. The bot reports which overrides it clears.
-- `/model <name|default>` selects a model.
-- `/thinking <level|default>` selects a reasoning effort supported by the active connector.
-- `/fast <on|off|default>` selects fast or standard speed on a supported connector.
-
-Use `/model`, `/thinking`, or `/fast` alone to see the effective value and where it comes from. In those commands, `default` clears the chat override. Chat overrides take precedence over approved workspace defaults for the chat, then `agents[]` settings, then the agent's native defaults. `/status` shows the effective values and displays `default` when a value is unknown.
-
-Codex applies model, effort, and tier changes on the next turn in the existing thread. Claude applies them when the next SDK query resumes the session. Switching agents or changing a setting on a connector that requires a new session rebuilds context from stored chat history.
-
-### Session compaction
-
-Set `agents[].compactAt` to a positive token count. The default is 250,000. Tsugimori normally compacts between turns and keeps native auto-compaction as a safety net for long turns. The native limit is the larger of `compactAt × 1.6` (rounded up) and `compactAt + 150,000`, capped at the model's context window when known. This limit is passed as `model_auto_compact_token_limit` for Codex and `CLAUDE_CODE_AUTO_COMPACT_WINDOW` for Claude Code. The CLIs can impose their own limits.
-
-Codex uses its post-turn threshold on supported CLIs. Setting `agents[].options.asyncCompaction` to `true` opts into async compaction when the installed CLI exposes it. The option defaults to `false`. Codex derives its percentage threshold from the model context window and uses the native safety net alone while that size is unavailable. `tsugimori doctor` reports the supported timing mode for the configured CLI and options.
-
-Claude starts `/compact` in the background when a completed turn's reported context exceeds `compactAt`. New messages for the same session wait for compaction and run in order. Owners can also run `/compact` to compact the current chat's existing agent session. Task traces report the trigger (`post-turn`, `async`, `manual`, or `native`) and include before and after token counts when available. The gateway's rolling conversation summaries are configured separately.
-
-## Conversation summaries
-
-The gateway updates rolling summaries in the background when at least `context.summary.minMessages` unsummarized messages (20 by default) fall outside `context.recentMessages`. The first summary can run as soon as the backlog reaches that threshold. Subsequent runs wait at least `context.summary.minIntervalMinutes` (15 by default) after the last saved update. When only the interval blocks a run, the gateway rechecks the chat when the interval ends, even without another bot turn. When a full batch leaves at least another `maxMessages` unsummarized messages behind, the next run starts immediately until the backlog falls below that size. Set the interval to `0` to disable the delay.
-
-Each run processes up to `context.summary.maxMessages` messages (200 by default) and saves up to 4,000 characters. Fresh agent sessions receive any stored summary and up to `context.recentMessages + 40` raw messages. Older unsummarized messages wait for the next summary and remain available in storage.
-
-Summary runs use `context.summary.thinking` (`low` by default) and `context.summary.timeoutMs` (120,000 ms by default). Set `context.summary.model` to a lower-cost model supported by the connector, or set `context.summary.enabled` to `false`. The gateway reloads summary settings while running.
-
-## Schedules
-
-Agents can create fixed messages or agent tasks using `schedule.create` and manage them with `schedule.list`, `schedule.pause`, `schedule.update`, and `schedule.cancel`.
-
-- Use `once` with `at` for a single run.
-- Use `interval` with `at` and `minutes` for a fixed cadence beginning at a particular time. For example, use the timestamp for noon as `at` and set `minutes` to `60` to start at noon and run hourly.
-- Use five-field `cron` for calendar patterns such as weekdays at 09:00. To delay the start, set `from` to the earliest eligible time. The first run is the first matching occurrence at or after `from` that is still in the future when the schedule is saved. Cron uses the schedule's time zone, which defaults to the workspace time zone, and handles repeated and skipped local times during daylight saving changes.
-
-Pass `at`, `from`, and optional recurring `until` as Unix milliseconds. If a cron trigger sets both `from` and `until`, `from` must be earlier. An occurrence at `until` is eligible. Use one trigger to express the schedule. An agent task should perform the scheduled work, and schedule management belongs in the requesting conversation.
-
-Approval cards, confirmations, and the schedule list show recurring times in words, such as “from today 12:00, hourly”. `/status` shows the next due time in the workspace time zone. Schedules stay due while their platform is unavailable. Once it starts, the latest missed occurrence is delivered with a delay note by default. Set the schedule's `missed` option to `skip` to discard missed deliveries.
-
-Schedules are scoped to the conversation they were created in. Self-delivery and untargeted one-time group delivery can proceed immediately. Other delivery and resource-intensive jobs require linked approval. Configure `scheduler.minIntervalMinutes` (default 15), `scheduler.maxActivePerUser` (default 20), and `scheduler.highCostModels` in the workspace.
-
-Scheduled deliveries use quota on `metered` platforms and carry `push.metered=true` in traces. Scheduling is unavailable on `none` platforms. If a platform switches to `none`, existing schedules fail on their next due occurrence and stop. The failure reason appears in `/status`, `schedule.list`, and traces.
-
-Approval prompts offer **Approve** and **Deny**. Reply directly to the prompt with `approve` or `deny` to decide by text. Older replies such as `allow once` and `always` also approve the request. Approving a recurring schedule covers its future fires and edits that preserve the approved delivery scope. Resource checks can still require fresh owner approval.
-
-The requesting agent waits up to two minutes. If approval is still pending, the gateway ends the turn and keeps any answer the agent already produced. Telegram marks the original request with 👀 as soon as the approval prompt is sent, replaces it with 👍 on approval or 👎 on denial, and clears it on expiry. Reactions are best-effort. Adapters without reactions add the line “I'll check whether this can be scheduled; it takes effect once confirmed.”
-
-Pending approvals survive a reload or restart. The gateway sends follow-up notices to requesting conversations on `free` platforms. On `metered` and `none` platforms, the owner can check `/status` and the approval UI, and requesters can ask their agent to look up schedules. Approval prompts still use their designated channel, with `push.metered=true` traced on non-free platforms. Schedule requests expire at the first scheduled trigger or 24 hours after the request was created, whichever comes first. Other requests expire after 24 hours. Where supported, expiry edits the prompt to show **Expired** and removes its buttons.
-
-Pass native platform user IDs in the schedule's `mentions` array to notify specific recipients. Telegram also renders `[name](tg://user?id=123)` as a user mention and preserves `@username` in the message text.
-
-## Chat workspaces and execution
-
-Each chat has a workdir under `chats/<adapter-id>/<chat-id>/`. With Git available, the gateway records edits to `rules/` and `skills/` under the initiating member’s native ID. Use `workspace.configure` to request owner approval for default agent, model, and thinking settings. Approved settings are recorded in `agents.json`.
-
-On Linux, add `"exec": {}` to enable the local sandbox, install bubblewrap (`bwrap`) and enable unprivileged user namespaces to use `exec.run`, `exec.read`, `exec.write`, and `exec.stop`. Commands run with a clean environment, an isolated network, and only the chat workdir available for persistent writes. Add deployment-specific read restrictions with `exec.denyRead`. When bubblewrap or unprivileged namespaces are unavailable, chat continues with shell and file tools disabled. The sandbox denies reads of the workspace environment file and the agents’ login homes.
-
-## Admin web UI
-
-Add a `web` section to enable the loopback-only admin server. It defaults to `127.0.0.1:8787`. The interface shows conversations and message logs, task traces, approvals, and grants. Configure `web.accessTeam`, `web.accessAud`, and `web.ownerEmail` or `web.ownerSub` for an owner-only Cloudflare Access application. Set `web.allowLocalWithoutAccess` to `true` for direct loopback development access.
-
-## Preview tunnels
-
-Add `"preview": {}` to enable Quick Tunnels. Start an HTTP service with `exec.run`, pass its internal loopback port as `backgroundPort`, then call `preview.open({port, ttl})`. TTL is in minutes and capped by `preview.maxTtlMinutes` (default 60). Previews close when their execution service exits, their TTL expires, or an authorized user closes them. Owners can use `/previews` and `/preview close <id>`. The local CLI also lists active previews with `tsugimori previews [dir]`.
-
-Quick previews require `cloudflared` on PATH. The first visit redeems the URL token and receives a host-only session cookie. The gateway records preview origins and lifecycle events.
-
-To enable named previews for owners, configure `preview.named` with `zoneId`, `tunnelId`, `domain`, and `accessAud`. Set the Access team and owner email or subject there or in `web`. Supply the zone-scoped DNS Edit token through `tokenEnv`, which defaults to `CLOUDFLARE_API_TOKEN`. Route Cloudflare Tunnel's preview catch-all to `127.0.0.1:8788` (or `preview.named.listen`), preserve the incoming Host, and protect preview hosts with the configured Access application. The gateway creates and removes per-preview DNS records. The gateway reloads named preview configuration and credentials while running. The admin web listener is configured at startup. [Cloudflare Access JWT validation](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/authorization-cookie/validating-json/)
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development commands, or [LICENSE](LICENSE) for license terms.
