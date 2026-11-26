@@ -33,6 +33,7 @@ import type { HookRunner, Logger } from './hooks.ts';
 import type { Runtime } from './runtime.ts';
 import type { BackgroundSummaries } from './summary.ts';
 import type { TaskInput } from './supplements.ts';
+import type { ToolDetails } from './tool-details.ts';
 
 import { untilAborted } from './abort.ts';
 import { protectTools, runAgent, sessionScope } from './agent-run.ts';
@@ -56,6 +57,7 @@ interface TaskDependencies {
   scope(workdir: string): ExecScope;
   store: Store;
   summarize: BackgroundSummaries['enqueue'];
+  toolDetails: ToolDetails;
   tools: readonly ToolDefinition[];
   trace: Tracer;
 }
@@ -595,6 +597,15 @@ export class Tasks {
       if (!delivered && !(error instanceof DeliveryError))
         finish(abort.signal.aborted ? 'cancelled' : 'failed');
       if (!abort.signal.aborted || error instanceof DeliveryError) {
+        this.#deps.trace.record(
+          'task.failed',
+          {
+            taskId: id,
+            error: this.#deps.toolDetails.error(error),
+          },
+          0,
+          'error',
+        );
         log({
           level: 'error',
           event: 'task.failed',
@@ -797,12 +808,14 @@ export class Tasks {
       const requestApproval = (
         request: ApprovalRequest,
         continuation?: ApprovalContinuation,
+        onPending?: (approvalId: string) => void,
       ) => {
         const approval = this.#requestApproval(
           work,
           request,
           toolSignal,
           continuation,
+          onPending,
         );
         pending.add(approval);
         void approval.then(
@@ -816,6 +829,7 @@ export class Tasks {
         {
           trace,
           hooks,
+          toolDetails: this.#deps.toolDetails,
           onResult(result) {
             if (
               approvalPending.aborted &&
@@ -869,9 +883,16 @@ export class Tasks {
             tools,
           },
           {
-            requestApproval: async (request) => {
-              const result = await requestApproval(request);
-              if (typeof result === 'object') stopForApproval();
+            requestApproval: async (request, _callId, onPending) => {
+              const result = await requestApproval(
+                request,
+                undefined,
+                onPending,
+              );
+              if (typeof result === 'object') {
+                // The connector's approval call can be interrupted before it returns.
+                stopForApproval();
+              }
               return result === true;
             },
             supplements: supplements.stream(passSignal),
@@ -922,12 +943,15 @@ export class Tasks {
     request: ApprovalRequest,
     signal: AbortSignal,
     continuation?: ApprovalContinuation,
+    onPending?: (approvalId: string) => void,
   ) {
     const approval = await this.#openApproval(
       work,
       request,
       signal,
       continuation,
+      undefined,
+      onPending,
     );
     if (!approval) return false;
     if ('approvedBy' in approval) return true;
@@ -960,26 +984,38 @@ export class Tasks {
         deliveryKey: schedule.deliveryKey,
       },
     };
+    const detail = this.#deps.toolDetails.invocation(task);
     const approval = await this.#openApproval(
       work,
       request,
       task.signal,
       { kind: 'schedule', change },
       schedule,
+      detail?.pending,
     );
-    if (!approval || 'approvedBy' in approval) return approval;
+    if (!approval) {
+      detail?.deny();
+      return;
+    }
+    if ('approvedBy' in approval) return approval;
     const result = await approval.decision;
     if (result === 'timeout') {
       this.#markApprovalPending(work);
       return { pending: true };
     }
-    if (result === 'expired') throw new Error('Schedule approval expired');
+    if (result === 'expired') {
+      detail?.deny();
+      throw new Error('Schedule approval expired');
+    }
     await result?.reaction;
-    if (result?.approved)
+    if (result?.approved) {
+      detail?.resume();
       return {
         failureReason: result.failureReason,
         scheduleApplied: result.scheduleApplied === true,
       };
+    }
+    detail?.deny();
   }
 
   #markApprovalPending(work: Work) {
@@ -1004,6 +1040,7 @@ export class Tasks {
     signal: AbortSignal,
     continuation?: ApprovalContinuation,
     schedule?: ScheduleApprovalRequest,
+    onPending?: (approvalId: string) => void,
   ): Promise<
     | { approvedBy: string }
     | { decision: Promise<ApprovalAnswer | undefined> }
@@ -1044,6 +1081,7 @@ export class Tasks {
           continuation,
         },
       );
+      onPending?.(approval.id);
       const answer = Promise.withResolvers<ApprovalAnswer | undefined>();
       const wait = AbortSignal.any([signal, AbortSignal.timeout(120_000)]);
       const cleanup = () => {

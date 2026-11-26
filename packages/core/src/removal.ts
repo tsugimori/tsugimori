@@ -78,7 +78,7 @@ function entries(config: Config, category: RemovalTarget['category']) {
   return category === 'agent' ? config.agents : config.platforms;
 }
 
-function defaultAgent(config: Config) {
+export function defaultAgent(config: Config) {
   return (
     config.agents.find(({ id }) => id === config.defaultAgent)?.id ??
     config.agents.find(({ enabled }) => enabled !== false)?.id

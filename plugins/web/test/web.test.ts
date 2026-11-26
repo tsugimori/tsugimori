@@ -1,4 +1,4 @@
-import type { AdminReader } from '@tsugimori/plugin-sdk';
+import type { AdminChat, AdminReader } from '@tsugimori/plugin-sdk';
 
 import assert from 'node:assert/strict';
 import { generateKeyPairSync, sign } from 'node:crypto';
@@ -83,18 +83,33 @@ test('Access JWTs require a valid key, audience, expiry, and owner identity', as
 });
 
 test('admin requires the assertion header and escapes displayed data', async (t) => {
+  const chat: AdminChat = {
+    adapterId: 'fake',
+    chatId: '1',
+    title: '<script>',
+    allowlisted: false,
+    kind: 'dm',
+    platform: 'fake',
+    threadId: null,
+    lastActivity: null,
+    messageCount: 0,
+    pendingApprovals: 0,
+    activeTask: null,
+    lastTaskStatus: null,
+    latestSeq: 0,
+    route: { isDefault: true },
+    summary: null,
+  };
   const reader: AdminReader = {
+    workspace: () => ({ locale: 'zh-TW', timezone: 'Asia/Taipei' }),
+    overview: () => ({
+      chats: [chat],
+      totals: { chats: 1, tasksToday: 4, failedToday: 2, pendingApprovals: 0 },
+    }),
+    pendingApprovals: () => 0,
     approvals: () => ({ approvals: [], grants: [] }),
     chat: () => undefined,
-    chats: () => [
-      {
-        adapterId: 'fake',
-        chatId: '1',
-        title: '<script>',
-        allowlisted: false,
-        kind: 'dm',
-      },
-    ],
+    chats: () => [chat],
     trace: () => undefined,
   };
   const admin = new AdminServer(
@@ -116,6 +131,18 @@ test('admin requires the assertion header and escapes displayed data', async (t)
     403,
   );
   const headers = { 'Cf-Access-Jwt-Assertion': 'trusted' };
-  assert.match(await (await fetch(url, { headers })).text(), /&lt;script&gt;/);
+  const overview = await fetch(url, { headers });
+  assert.match(
+    overview.headers.get('content-security-policy') ?? '',
+    /default-src 'none'/,
+  );
+  const html = await overview.text();
+  assert.match(html, /&lt;script&gt;/);
+  assert.match(html, /<html lang="zh-TW">/);
+  assert.match(html, /今日任務<\/span><strong>4/);
+  assert.match(
+    await (await fetch(url + 'missing', { headers })).text(),
+    /找不到指定的頁面/,
+  );
   assert.equal((await fetch(url, { headers, method: 'POST' })).status, 405);
 });

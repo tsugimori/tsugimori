@@ -7,6 +7,11 @@
     "$schema": {
       "type": "string"
     },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100
+    },
     "owner": {
       "type": "object",
       "additionalProperties": {
@@ -347,6 +352,14 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 255
+        },
+        "toolDetails": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean", "default": true },
+            "maxChars": { "type": "integer", "default": 4000, "minimum": 200 }
+          }
         },
         "allowLocalWithoutAccess": {
           "type": "boolean",

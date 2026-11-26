@@ -388,7 +388,11 @@ export type AgentTool = Pick<
   ToolDefinition,
   'description' | 'name' | 'schema'
 > & {
-  run(args: unknown, context?: ToolContext): Promise<ToolResult>;
+  run(
+    args: unknown,
+    context?: ToolContext,
+    callId?: string,
+  ): Promise<ToolResult>;
 };
 
 export class ToolFailure extends Error {}
@@ -410,7 +414,12 @@ export interface AgentRequest {
 
 export interface AgentIO {
   reportCompaction?(event: AgentCompactionEvent): void;
-  requestApproval(request: ApprovalRequest): Promise<boolean>;
+  reportToolDenial?(callId: string): void;
+  requestApproval(
+    request: ApprovalRequest,
+    callId?: string,
+    onPending?: (approvalId: string) => void,
+  ): Promise<boolean>;
   supplements: AsyncIterable<InboundMessage>;
 }
 
@@ -453,11 +462,14 @@ export function nativeCompactionLimit(
 export type AgentEvent =
   | { text: string; type: 'text.delta' }
   | { text: string; type: 'text.final' }
-  | { callId: string; name: string; type: 'tool.started' }
+  | { args?: unknown; callId: string; name: string; type: 'tool.started' }
+  | { args: unknown; callId: string; type: 'tool.input' }
   | {
+      args?: unknown;
       callId: string;
       name: string;
-      status: 'ok' | 'error';
+      result?: unknown;
+      status: 'ok' | 'error' | 'denied';
       type: 'tool.finished';
     }
   | { request: ApprovalRequest; type: 'approval.requested' }
@@ -642,8 +654,14 @@ export type {
   AdminApprovals,
   AdminChat,
   AdminConversation,
+  AdminOverview,
   AdminReader,
+  AdminSchedules,
+  AdminTask,
+  AdminToolCall,
   AdminTrace,
+  AdminWorkspace,
+  ToolCallStatus,
   VerifyAccess,
 } from './admin.ts';
 

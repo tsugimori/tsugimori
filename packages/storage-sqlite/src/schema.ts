@@ -10,6 +10,7 @@ import type {
   StoredGrant,
   StoredPreview,
   TaskStatus,
+  ToolCallRecord,
   TraceSpan,
   WorkspaceSettings,
 } from '@tsugimori/storage';
@@ -144,6 +145,25 @@ export const tasks = sqliteTable('tasks', {
   finishedAt: integer('finished_at'),
 });
 
+export const toolCalls = sqliteTable(
+  'tool_calls',
+  {
+    seq: integer('seq').primaryKey({ autoIncrement: true }),
+    taskId: text('task_id')
+      .notNull()
+      .references(() => tasks.id, { onDelete: 'cascade' }),
+    callId: text('call_id'),
+    name: text('name').notNull(),
+    startedAt: integer('started_at').notNull(),
+    endedAt: integer('ended_at'),
+    status: text('status').$type<NonNullable<ToolCallRecord['status']>>(),
+    args: text('args'),
+    result: text('result'),
+    approvalId: text('approval_id'),
+  },
+  (table) => [index('tool_calls_task_seq').on(table.taskId, table.seq)],
+);
+
 export const approvals = sqliteTable(
   'approvals',
   {
@@ -160,6 +180,7 @@ export const approvals = sqliteTable(
       NonNullable<ApprovalRecord['continuation']>
     >(),
     expiresAt: integer('expires_at'),
+    requestedAt: integer('requested_at'),
     failureReason: text('failure_reason'),
     promptMessageId: text('prompt_message_id'),
     migratedPrompt: text('migrated_prompt'),

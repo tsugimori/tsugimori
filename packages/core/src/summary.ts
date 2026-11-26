@@ -21,11 +21,14 @@ interface SummaryJob {
   workdir: string;
 }
 
+import type { ToolDetails } from './tool-details.ts';
+
 interface SummaryDependencies {
   log: Logger;
   runtime: Runtime;
   scope(workdir: string): ExecScope;
   store: Store;
+  toolDetails: ToolDetails;
   trace: Tracer;
 }
 

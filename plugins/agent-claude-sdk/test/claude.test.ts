@@ -291,7 +291,14 @@ test(
               type: 'assistant',
               parent_tool_use_id: null,
               message: {
-                content: [{ type: 'tool_use', id: 'tool-1', name: 'Bash' }],
+                content: [
+                  {
+                    type: 'tool_use',
+                    id: 'tool-1',
+                    name: 'Bash',
+                    input: { command: 'pwd' },
+                  },
+                ],
               },
             }),
           );
@@ -299,7 +306,12 @@ test(
             type: 'user',
             message: {
               content: [
-                { type: 'tool_result', tool_use_id: 'tool-1', is_error: false },
+                {
+                  type: 'tool_result',
+                  tool_use_id: 'tool-1',
+                  is_error: false,
+                  content: 'sample output',
+                },
               ],
             },
           });
@@ -344,8 +356,19 @@ test(
     ]);
     assert.deepEqual(first, [
       { type: 'sessionId', sessionId: 'claude-native' },
-      { type: 'tool.started', callId: 'tool-1', name: 'Bash' },
-      { type: 'tool.finished', callId: 'tool-1', name: 'Bash', status: 'ok' },
+      {
+        type: 'tool.started',
+        callId: 'tool-1',
+        name: 'Bash',
+        args: { command: 'pwd' },
+      },
+      {
+        type: 'tool.finished',
+        callId: 'tool-1',
+        name: 'Bash',
+        status: 'ok',
+        result: 'sample output',
+      },
       { type: 'text.delta', text: 'pong' },
       { type: 'usage', contextTokens: 10, inputTokens: 9, outputTokens: 1 },
       { type: 'text.final', text: 'pong' },

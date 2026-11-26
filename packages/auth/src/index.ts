@@ -161,7 +161,9 @@ export class Auth {
       continuation?: ApprovalRecord['continuation'];
     } = {},
   ) {
+    const now = this.#now();
     const approval: ApprovalRecord = {
+      requestedAt: now,
       adapterId: chat.adapterId,
       chatId: chat.chatId,
       id: randomUUID(),
@@ -171,7 +173,7 @@ export class Auth {
       resource: request.resource,
       continuation: options.continuation ?? null,
       expiresAt: Math.min(
-        this.#now() + approvalTtlMs,
+        now + approvalTtlMs,
         options.continuation?.kind === 'schedule'
           ? (options.continuation.change.schedule.nextDueAt ?? Infinity)
           : Infinity,

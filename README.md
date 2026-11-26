@@ -69,7 +69,7 @@ Agents can use `history.search` to find matching text in the current conversatio
 | `/pair <code>`                              | Pairing code holder, in a DM to an unowned bot            | Claims ownership using an unexpired code.                                                                   |
 | `/add <agent\|platform> <kind> [--id <id>]` | Owner                                                     | Runs guided setup for a plugin instance.                                                                    |
 | `/login <agentId>`                          | Owner                                                     | Signs an existing agent in again.                                                                           |
-| `/remove <platform\|agent> <id>`            | Owner                                                     | Lists the data for an instance and asks for confirmation before removal.                                    |
+| `/remove <platform\|agent> <id>`            | Owner                                                     | Lists categories or IDs when omitted, and asks for confirmation before removal.                             |
 | `/cancel`                                   | Owner in the originating chat or setup's secret-prompt DM | Cancels guided setup or a pending removal.                                                                  |
 | `/previews`                                 | Owner                                                     | Lists open previews on this adapter.                                                                        |
 | `/preview close <id>`                       | Owner                                                     | Closes a preview on this adapter.                                                                           |
@@ -126,15 +126,15 @@ The gateway watches `tsugimori.json` and `.env` and can attach or detach platfor
 
 ## Plugins
 
-| Plugin                                                   | Purpose                                                              |
-| -------------------------------------------------------- | -------------------------------------------------------------------- |
-| [Telegram](plugins/platform-telegram/README.md)          | Telegram bots via long polling.                                      |
-| [LINE](plugins/platform-line/README.md)                  | LINE Messaging API via signed webhooks and metered push.             |
-| [Codex](plugins/agent-codex/README.md)                   | Agent connector for Codex App Server.                                |
-| [Claude Agent SDK](plugins/agent-claude-sdk/README.md)   | Agent connector for Claude through its bundled CLI.                  |
-| [Local sandbox](plugins/exec-local-sandbox/README.md)    | Linux command and file tools isolated per chat.                      |
-| [Cloudflare Tunnel](plugins/tunnel-cloudflare/README.md) | Time-limited Quick and named previews of chat services.              |
-| [Admin web UI](plugins/web/README.md)                    | Read-only inspection of chat history, traces, approvals, and grants. |
+| Plugin                                                   | Purpose                                                                                      |
+| -------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| [Telegram](plugins/platform-telegram/README.md)          | Telegram bots via long polling.                                                              |
+| [LINE](plugins/platform-line/README.md)                  | LINE Messaging API via signed webhooks and metered push.                                     |
+| [Codex](plugins/agent-codex/README.md)                   | Agent connector for Codex App Server.                                                        |
+| [Claude Agent SDK](plugins/agent-claude-sdk/README.md)   | Agent connector for Claude through its bundled CLI.                                          |
+| [Local sandbox](plugins/exec-local-sandbox/README.md)    | Linux command and file tools isolated per chat.                                              |
+| [Cloudflare Tunnel](plugins/tunnel-cloudflare/README.md) | Time-limited Quick and named previews of chat services.                                      |
+| [Admin web UI](plugins/web/README.md)                    | Read-only overview, chat timelines, redacted tool details, traces, approvals, and schedules. |
 
 ## Operations
 

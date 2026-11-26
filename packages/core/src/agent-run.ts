@@ -5,6 +5,7 @@ import type {
   AgentRequest,
   AgentTool,
   ChatRef,
+  ToolCallStatus,
   ToolContext,
   ToolDefinition,
 } from '@tsugimori/plugin-sdk';
@@ -15,6 +16,7 @@ import { Ajv } from 'ajv';
 import { createHash } from 'node:crypto';
 
 import type { HookRunner, Logger } from './hooks.ts';
+import type { ToolDetail, ToolDetails } from './tool-details.ts';
 
 import { untilAborted } from './abort.ts';
 
@@ -25,6 +27,7 @@ interface AgentRunDependencies {
   scopeChatId?: string | null;
   scopeModel?: string;
   task: ToolContext;
+  toolDetails?: ToolDetails;
   trace: Tracer;
 }
 
@@ -48,13 +51,19 @@ export async function runAgent(
     task,
     scopeChatId,
     scopeModel,
+    toolDetails,
   }: AgentRunDependencies,
   agent: AgentConnector,
   request: AgentRequest,
   io: AgentIO,
 ) {
   const { signal, taskId } = task;
-  const attrs = { taskId, agentId: agent.id, model: request.model };
+  const attrs = {
+    taskId,
+    agentId: agent.id,
+    model: request.model,
+    ...(request.purpose && { purpose: request.purpose }),
+  };
   const scope = (id: string) =>
     request.purpose
       ? null
@@ -89,11 +98,69 @@ export async function runAgent(
   };
   return trace.span('agent.run', attrs, async () => {
     signal.throwIfAborted();
-    const events = agent.run(request, { ...io, reportCompaction });
+    const tools = new Map<
+      string,
+      {
+        detail?: ToolDetail;
+        end: ReturnType<Tracer['begin']>;
+      }
+    >();
+    const denying = new Set<string>();
+    const approvals = new Map<string, { id: string; waiting: boolean }>();
+    const events = agent.run(request, {
+      ...io,
+      reportCompaction,
+      reportToolDenial: (callId) => denying.add(callId),
+      requestApproval: async (approval, callId) => {
+        if (callId === undefined) return io.requestApproval(approval);
+        const allowed = await io.requestApproval(approval, callId, (id) => {
+          approvals.set(callId, { id, waiting: true });
+          tools.get(callId)?.detail?.pending(id);
+        });
+        const tracked = approvals.get(callId);
+        if (tracked && !approvalPending?.aborted) {
+          tracked.waiting = false;
+          if (allowed) tools.get(callId)?.detail?.resume();
+        }
+        return allowed;
+      },
+    });
     const iterator = events[Symbol.asyncIterator]();
     const firstText = trace.begin('agent.first_text', attrs);
-    const tools = new Map<string, ReturnType<Tracer['begin']>>();
+    const startTool = (callId: string, name: string, args: unknown) => {
+      const detail = toolDetails?.begin(taskId, name, args, callId);
+      const approval = approvals.get(callId);
+      if (approval) {
+        detail?.pending(approval.id);
+        if (!approval.waiting) detail?.resume();
+      }
+      const tool = {
+        detail,
+        end: trace.begin('agent.tool', {
+          ...attrs,
+          name,
+          ...(detail && { toolCallSeq: detail.seq }),
+        }),
+      };
+      tools.set(callId, tool);
+      return tool;
+    };
+    const finishTool = (
+      callId: string,
+      status: ToolCallStatus,
+      result?: unknown,
+    ) => {
+      const tool = tools.get(callId);
+      tool?.detail?.finish(status, result);
+      tool?.end(
+        status === 'ok' || status === 'pending-approval' ? 'ok' : 'error',
+      );
+      tools.delete(callId);
+      approvals.delete(callId);
+      denying.delete(callId);
+    };
     let complete = false;
+    let failure: unknown;
     let deltas = '';
     let final: string | undefined;
     let sessionId: string | undefined;
@@ -129,16 +196,24 @@ export async function runAgent(
             break;
           }
           case 'tool.started':
-            tools.get(event.callId)?.('error');
-            tools.set(
+            if (tools.has(event.callId)) finishTool(event.callId, 'error');
+            startTool(event.callId, event.name, event.args);
+            break;
+          case 'tool.input':
+            tools.get(event.callId)?.detail?.input(event.args);
+            break;
+          case 'tool.finished': {
+            const existing = tools.get(event.callId);
+            if (!existing) startTool(event.callId, event.name, event.args);
+            else if (event.args !== undefined)
+              existing.detail?.input(event.args);
+            finishTool(
               event.callId,
-              trace.begin('agent.tool', { ...attrs, name: event.name }),
+              denying.has(event.callId) ? 'denied' : event.status,
+              event.result,
             );
             break;
-          case 'tool.finished':
-            tools.get(event.callId)?.(event.status);
-            tools.delete(event.callId);
-            break;
+          }
           case 'approval.requested':
             trace.begin('agent.approval_requested', attrs)();
             break;
@@ -177,9 +252,18 @@ export async function runAgent(
         }
       }
     } catch (error) {
+      failure = error;
       if (signal.aborted || !approvalPending?.aborted) throw error;
     } finally {
-      for (const end of tools.values()) end('error');
+      for (const [id] of tools) {
+        const status =
+          approvalPending?.aborted && approvals.get(id)?.waiting
+            ? 'pending-approval'
+            : denying.has(id)
+              ? 'denied'
+              : 'error';
+        finishTool(id, status, status === 'error' ? failure : undefined);
+      }
       if (!complete) {
         void Promise.resolve()
           .then(() => iterator.return?.())
@@ -203,6 +287,7 @@ export function protectTools(
     trace,
     hooks,
     onResult,
+    toolDetails,
     task,
     requestApproval,
   }: {
@@ -211,8 +296,10 @@ export function protectTools(
     requestApproval(
       request: Parameters<AgentIO['requestApproval']>[0],
       tool: Extract<ApprovalContinuation, { kind: 'tool' }>,
+      onPending?: (approvalId: string) => void,
     ): Promise<boolean | { pending: true; summary: string }>;
     task: ToolContext;
+    toolDetails?: ToolDetails;
     trace: Tracer;
   },
   tools: readonly ToolDefinition[],
@@ -226,35 +313,66 @@ export function protectTools(
       name: tool.name,
       description: tool.description,
       schema: tool.schema,
-      async run(args) {
+      async run(args, _context, callId) {
         const { signal, taskId } = task;
-        signal.throwIfAborted();
-        if (!validate(args)) throw new Error('Invalid tool arguments');
-        const name = tool.name;
-        await hooks.emit('tool.before', { task, name });
-        let status: 'ok' | 'error' = 'error';
+        const { name } = tool;
+        const detail = toolDetails?.begin(taskId, name, args, callId);
+        const end = trace.begin('tool.run', {
+          taskId,
+          name,
+          ...(detail && { toolCallSeq: detail.seq }),
+        });
+        let status: ToolCallStatus = 'error';
         let result: unknown;
+        let before = false;
         try {
-          result = await trace.span('tool.run', { taskId, name }, async () => {
-            const permission = tool.permission;
-            if (permission) {
-              const approval = await requestApproval(
-                {
-                  action: permission.action,
-                  description: permission.describe?.(args, task),
-                  resource: permission.resource(args, task),
-                },
-                { kind: 'tool', name, args },
-              );
-              if (typeof approval === 'object') return approval;
-              if (!approval) throw new Error('Tool permission denied');
+          signal.throwIfAborted();
+          if (!validate(args)) throw new Error('Invalid tool arguments');
+          await hooks.emit('tool.before', { task, name });
+          before = true;
+          const permission = tool.permission;
+          if (permission) {
+            const approval = await requestApproval(
+              {
+                action: permission.action,
+                description: permission.describe?.(args, task),
+                resource: permission.resource(args, task),
+              },
+              { kind: 'tool', name, args },
+              detail?.pending,
+            );
+            if (!approval) {
+              status = 'denied';
+              throw new Error('Tool permission denied');
             }
+            if (typeof approval === 'object') result = approval;
+            else detail?.resume();
+          }
+          if (result === undefined) {
             signal.throwIfAborted();
-            return tool.run(args, task);
-          });
-          status = 'ok';
+            const invocation =
+              detail && toolDetails
+                ? toolDetails.associate(task, detail)
+                : task;
+            result = await tool.run(args, invocation);
+          }
+          status =
+            result &&
+            typeof result === 'object' &&
+            'pending' in result &&
+            result.pending === true
+              ? 'pending-approval'
+              : 'ok';
+        } catch (error) {
+          result = error;
+          throw error;
         } finally {
-          await hooks.emit('tool.after', { task, name, status });
+          detail?.finish(status, result);
+          const traceStatus =
+            status === 'ok' || status === 'pending-approval' ? 'ok' : 'error';
+          end(traceStatus);
+          if (before)
+            await hooks.emit('tool.after', { task, name, status: traceStatus });
         }
         onResult?.(result);
         return result;

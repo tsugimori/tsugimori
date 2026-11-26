@@ -244,7 +244,7 @@ for await (const line of createInterface({ input: process.stdin })) {
             permissions: { network: { enabled: true } }, scope: 'turn',
           });
           if (--remaining === 0) {
-            notify('item/completed', { item: { ...tool, status: 'completed' } });
+            notify('item/completed', { item: { ...tool, status: 'completed', aggregatedOutput: 'pong', exitCode: 0 } });
             finish();
           }
         });
@@ -663,12 +663,18 @@ test(
     assert.deepEqual(events.at(-1), { type: 'text.final', text: 'pong' });
     assert.ok(
       events.some(
-        (event) => event.type === 'tool.started' && event.name === 'command',
+        (event) =>
+          event.type === 'tool.started' &&
+          event.name === 'command' &&
+          (event.args as { command?: string })?.command === 'printf pong',
       ),
     );
     assert.ok(
       events.some(
-        (event) => event.type === 'tool.finished' && event.status === 'ok',
+        (event) =>
+          event.type === 'tool.finished' &&
+          event.status === 'ok' &&
+          event.result === 'pong',
       ),
     );
     assert.ok(

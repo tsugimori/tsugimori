@@ -122,10 +122,41 @@ export class TurnCompactions {
   }
 }
 
+function toolData(item: Record<string, unknown>) {
+  switch (item.type) {
+    case 'commandExecution':
+      return {
+        args:
+          typeof item.command === 'string'
+            ? { command: item.command, cwd: item.cwd }
+            : undefined,
+        result:
+          item.aggregatedOutput ?? item.output ?? item.error ?? item.exitCode,
+      };
+    case 'fileChange':
+      return { args: item.changes, result: item.output ?? item.error };
+    case 'webSearch':
+      return { args: item.action ?? item.query, result: item.result };
+    case 'imageView':
+      return { args: item.path, result: item.result };
+    default:
+      return {
+        args: item.arguments ?? item.prompt,
+        result: item.error ?? item.result ?? item.contentItems,
+      };
+  }
+}
+
 export class TurnOutput {
   readonly #items = new Map<string, Record<string, unknown>>();
   #final: string | undefined;
   #fallback: string | undefined;
+
+  readonly #frameworkTools: ReadonlySet<string>;
+
+  constructor(frameworkTools: ReadonlySet<string> = new Set()) {
+    this.#frameworkTools = frameworkTools;
+  }
 
   get hasFinalMessage() {
     return this.#final !== undefined || this.#fallback !== undefined;
@@ -162,19 +193,41 @@ export class TurnOutput {
     const name =
       toolNames[item.type] ??
       (typeof item.tool === 'string' ? item.tool : undefined);
+    const framework =
+      item.type === 'dynamicToolCall' && name && this.#frameworkTools.has(name);
+    const { args, result } = toolData(item);
     if (method === 'item/started') {
       this.#items.set(callId, item);
-      return name ? [{ type: 'tool.started', callId, name }] : [];
+      return name && !framework
+        ? [
+            {
+              type: 'tool.started',
+              callId,
+              name,
+              ...(args === undefined ? {} : { args }),
+            },
+          ]
+        : [];
     }
     this.#items.delete(callId);
     this.#message(item);
-    if (!name) return [];
+    if (!name || framework) return [];
     const failed =
       item.status === 'failed' ||
-      item.status === 'declined' ||
-      item.success === false;
+      item.status === 'cancelled' ||
+      item.success === false ||
+      (item.type === 'commandExecution' &&
+        typeof item.exitCode === 'number' &&
+        item.exitCode !== 0);
     return [
-      { type: 'tool.finished', callId, name, status: failed ? 'error' : 'ok' },
+      {
+        type: 'tool.finished',
+        callId,
+        name,
+        status: item.status === 'declined' ? 'denied' : failed ? 'error' : 'ok',
+        ...(args === undefined ? {} : { args }),
+        ...(result === undefined ? {} : { result }),
+      },
     ];
   }
 
@@ -268,6 +321,7 @@ export async function approve(
   io: AgentIO,
   request: ApprovalRequest,
   signal: AbortSignal,
+  callId?: string,
 ) {
   if (signal.aborted) return false;
   const interrupted = Promise.withResolvers<boolean>();
@@ -276,7 +330,7 @@ export async function approve(
   try {
     return (
       (await Promise.race([
-        io.requestApproval(request),
+        io.requestApproval(request, callId),
         interrupted.promise,
       ])) && !signal.aborted
     );

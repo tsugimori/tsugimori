@@ -41,6 +41,7 @@ export interface Config {
   defaultAgent?: string;
   exec?: { denyRead?: string[]; kind?: 'local-sandbox' };
   locale: 'en' | 'zh-TW';
+  name?: string;
   owner: Record<string, string>;
   platforms: PlatformInstanceConfig[];
   preview?: {
@@ -72,6 +73,7 @@ export interface Config {
     listen?: string;
     ownerEmail?: string;
     ownerSub?: string;
+    toolDetails?: { enabled?: boolean; maxChars?: number };
   };
   webhooks?: { publicBaseUrl?: string };
 }

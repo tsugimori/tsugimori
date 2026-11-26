@@ -12,6 +12,12 @@ export function removalMessages(locale: Config['locale']) {
     return {
       activeSetup: (id: string) =>
         `${id} 正在進行引導設定。請先在設定對話執行 /cancel。`,
+      categories: '類別：平台（platform）、代理（agent）',
+      choose: (category: RemovalTarget['category']) =>
+        category === 'platform' ? '已設定的平台' : '已設定的代理',
+      noRemovable: '沒有可在此移除的項目。',
+      removeHint: (category: RemovalTarget['category']) =>
+        `傳送 /remove ${category} <id>`,
       backupStage: '建立備份',
       busy: '已有移除作業正在進行。',
       cancelled: '已取消移除。',
@@ -64,6 +70,12 @@ export function removalMessages(locale: Config['locale']) {
   return {
     activeSetup: (id: string) =>
       `Guided setup is active for ${id}. Use /cancel in the setup conversation first.`,
+    categories: 'Categories: Platform (platform), Agent (agent)',
+    choose: (category: RemovalTarget['category']) =>
+      category === 'platform' ? 'Configured platforms' : 'Configured agents',
+    noRemovable: 'There are no instances you can remove here.',
+    removeHint: (category: RemovalTarget['category']) =>
+      `Send /remove ${category} <id>`,
     backupStage: 'Create backup',
     busy: 'A removal is already in progress.',
     cancelled: 'Removal cancelled.',

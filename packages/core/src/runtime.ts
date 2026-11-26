@@ -97,9 +97,13 @@ export class Runtime {
     this.#deps = deps;
   }
 
-  get config() {
+  get snapshot() {
     if (!this.#snapshot) throw new Error('Gateway has not started');
-    return this.#snapshot.config;
+    return this.#snapshot;
+  }
+
+  get config() {
+    return this.snapshot.config;
   }
 
   get transition() {

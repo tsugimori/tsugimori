@@ -24,6 +24,7 @@ import {
   defaultCompactAt,
   definePlugin,
   nativeCompactionLimit,
+  toolWireName,
 } from '@tsugimori/plugin-sdk';
 import { mkdir, realpath } from 'node:fs/promises';
 
@@ -503,6 +504,9 @@ export class ClaudeAgent implements AgentConnector {
     let result:
       Extract<SDKMessage, { subtype: 'success'; type: 'result' }> | undefined;
     const tools = new Map<string, string>();
+    const frameworkTools = new Set(
+      request.tools.map(({ name }) => `mcp__tsugimori__${toolWireName(name)}`),
+    );
     for await (const event of this.#session(request, io)) {
       if (event.session_id && sessionId !== event.session_id) {
         sessionId = event.session_id;
@@ -530,9 +534,16 @@ export class ClaudeAgent implements AgentConnector {
           part.type === 'content_block_start' &&
           part.content_block.type === 'tool_use'
         ) {
-          const { id: callId, name } = part.content_block;
-          tools.set(callId, name);
-          yield { type: 'tool.started', callId, name };
+          const { id: callId, name, input } = part.content_block;
+          if (!frameworkTools.has(name)) {
+            tools.set(callId, name);
+            yield {
+              type: 'tool.started',
+              callId,
+              name,
+              ...(input === undefined ? {} : { args: input }),
+            };
+          }
         }
       } else if (event.type === 'assistant') {
         if (event.error)
@@ -547,12 +558,18 @@ export class ClaudeAgent implements AgentConnector {
         const text: string[] = [];
         for (const block of event.message.content) {
           if (block.type === 'text') text.push(block.text);
-          if (block.type === 'tool_use' && !tools.has(block.id)) {
+          if (block.type !== 'tool_use' || frameworkTools.has(block.name))
+            continue;
+          if (tools.has(block.id)) {
+            if (block.input !== undefined)
+              yield { type: 'tool.input', callId: block.id, args: block.input };
+          } else {
             tools.set(block.id, block.name);
             yield {
               type: 'tool.started',
               callId: block.id,
               name: block.name,
+              ...(block.input === undefined ? {} : { args: block.input }),
             };
           }
         }
@@ -573,6 +590,7 @@ export class ClaudeAgent implements AgentConnector {
             callId,
             name,
             status: block.is_error ? 'error' : 'ok',
+            ...(block.content === undefined ? {} : { result: block.content }),
           };
         }
       } else if (event.type === 'system' && event.subtype === 'init') {

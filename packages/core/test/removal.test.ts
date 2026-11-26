@@ -1,8 +1,10 @@
 import type {
   AdapterContext,
   AgentConnector,
+  ApprovalFeedback,
   ChatRef,
   InboundMessage,
+  OutboundMessage,
   PluginDefinition,
 } from '@tsugimori/plugin-sdk';
 import type { TestContext } from 'node:test';
@@ -31,18 +33,28 @@ async function workspaceFixture(
   t: TestContext,
   locale = 'zh-TW',
   run: (id: string) => AgentConnector['run'] = () => async function* () {},
+  menu: 'telegram' | 'line' | 'none' = 'none',
 ) {
   const workspace = await mkdtemp(join(tmpdir(), 'tsm-remove-'));
   const inbox = new Map<string, AdapterContext>();
-  const sent: { adapterId: string; id: string; text: string }[] = [];
+  const sent: {
+    adapterId: string;
+    buttons?: OutboundMessage['buttons'];
+    id: string;
+    text: string;
+  }[] = [];
+  const feedback: ApprovalFeedback[] = [];
   const stopped: string[] = [];
   const fake = {
     name: 'fake',
     adapters: {
-      fake: ({ id }) => ({
+      [menu === 'line' ? 'line' : 'fake']: ({ id }) => ({
         id,
-        kind: 'fake',
-        capabilities: {},
+        kind: menu === 'line' ? 'line' : 'fake',
+        capabilities: { inlineButtons: menu === 'telegram' },
+        async respondToApproval(result) {
+          feedback.push(result);
+        },
         async start(ctx) {
           inbox.set(id, ctx);
         },
@@ -50,9 +62,9 @@ async function workspaceFixture(
           inbox.delete(id);
           stopped.push(id);
         },
-        async send({ text }) {
+        async send({ text, buttons }) {
           const messageId = 'bot-' + (sent.length + 1);
-          sent.push({ adapterId: id, id: messageId, text });
+          sent.push({ adapterId: id, id: messageId, text, buttons });
           return { messageId };
         },
       }),
@@ -92,10 +104,14 @@ async function workspaceFixture(
       locale,
       storage: { kind: 'sqlite', path: 'state.db' },
       platforms: [
-        { id: 'console', kind: 'fake', tokenEnv: 'SHARED_TEST_TOKEN' },
+        {
+          id: 'console',
+          kind: menu === 'line' ? 'line' : 'fake',
+          tokenEnv: 'SHARED_TEST_TOKEN',
+        },
         {
           id: 'old',
-          kind: 'fake',
+          kind: menu === 'line' ? 'line' : 'fake',
           tokenEnv: 'SHARED_TEST_TOKEN',
           options: { secretEnv: 'ONLY_PROCESS_TEST' },
         },
@@ -147,6 +163,7 @@ async function workspaceFixture(
     });
   return {
     emit,
+    feedback,
     gateway,
     inbox,
     registry,
@@ -173,6 +190,34 @@ function seedChat(store: SqliteStore, ref: ChatRef) {
       threadId: null,
     },
   );
+}
+
+function seedToolCall(store: SqliteStore, ref: ChatRef, agentId: string) {
+  const id = ref.adapterId + ref.chatId;
+  store.createTask({
+    ...ref,
+    id,
+    agentId,
+    model: 'default',
+    sourceMessageId: 'seed',
+    createdAt: 1,
+    startedAt: 1,
+    finishedAt: 5,
+    status: 'completed',
+  });
+  const seq = store.createToolCall({
+    taskId: id,
+    name: 'test.tool',
+    approvalId: null,
+    args: '{"value":42}',
+    callId: 'call',
+    startedAt: 2,
+    endedAt: 4,
+    result: 'done',
+    status: 'ok',
+  });
+  assert.ok(seq);
+  return id;
 }
 
 function seedSession(store: SqliteStore, ref: ChatRef, agentId: string) {
@@ -267,6 +312,8 @@ test('chat platform removal authorizes a linked owner reply and backs up only af
       updatedAt: Date.now(),
     });
   }
+  const removedTask = seedToolCall(store, old, 'main');
+  const keptTask = seedToolCall(store, kept, 'main');
   const run = seedSetup(store, 'platform', 'old');
   assert.ok(
     store.saveSetupRun(
@@ -296,7 +343,7 @@ test('chat platform removal authorizes a linked owner reply and backs up only af
       '移入備份的目錄 (1) · chats/old',
       '刪除對話 (1) · removed-dm',
       '移除擁有者設定 (1) · owner.old',
-      '資料庫筆數 · approvals=0, grants=0, messages=1, chat_summaries=0, agent_sessions=1, tasks=0, schedules=1, previews=0, chat_workspace_settings=0, setup_secrets=1, unavailable_command_scopes=0, users=1, owners=0, adapter_cursors=1, pairing_codes=0, chats=1, schedule_runs=0, setup_runs=1, trace_spans=1',
+      '資料庫筆數 · approvals=0, grants=0, messages=1, chat_summaries=0, agent_sessions=1, tasks=1, schedules=1, previews=0, chat_workspace_settings=0, setup_secrets=1, unavailable_command_scopes=0, users=1, owners=0, adapter_cursors=1, pairing_codes=0, chats=1, schedule_runs=0, setup_runs=1, trace_spans=1, tool_calls=1',
       '取消進行中的任務 (0) · —',
       '取消排程 (1) · old',
       '',
@@ -326,6 +373,8 @@ test('chat platform removal authorizes a linked owner reply and backs up only af
   );
   assert.deepEqual(config.owner, { console: '42' });
   assert.equal(store.getChat(old), undefined);
+  assert.deepEqual(store.taskToolCalls([removedTask]), []);
+  assert.equal(store.taskToolCalls([keptTask]).length, 1);
   assert.equal(store.getMessage(old, 'seed'), undefined);
   assert.equal(store.getSchedule('old'), undefined);
   assert.equal(store.isSetupSecret(old, 'private'), false);
@@ -365,6 +414,12 @@ test('chat platform removal authorizes a linked owner reply and backs up only af
       sqlite
         .prepare('SELECT count(*) AS n FROM messages WHERE adapter_id = ?')
         .get('old')?.n,
+      1,
+    );
+    assert.equal(
+      sqlite
+        .prepare('SELECT count(*) AS n FROM tool_calls WHERE task_id = ?')
+        .get(removedTask)?.n,
       1,
     );
   } finally {
@@ -418,6 +473,8 @@ test('agent removal clears only its routes, sessions and agent schedules', async
     recursive: true,
   });
 
+  const removedTask = seedToolCall(store, bound, 'worker');
+  const keptTask = seedToolCall(store, kept, 'main');
   const plan = await gateway.removal.plan({ category: 'agent', id: 'worker' });
   assert.equal(
     formatRemovalPlan(plan, true),
@@ -432,7 +489,7 @@ test('agent removal clears only its routes, sessions and agent schedules', async
       '清除對話的代理、模型、推理與快速模式覆寫 (1) · console/bound',
       '清除資料庫中的對話代理預設 (1) · console/bound',
       '清除 agents.json 內的代理預設 (1) · chats/console/bound/agents.json',
-      '資料庫筆數 · agent_sessions=1, setup_runs=0, chat_session_pointers=1, pending_approvals=0',
+      '資料庫筆數 · agent_sessions=1, setup_runs=0, chat_session_pointers=1, pending_approvals=0, tool_calls=1',
       '取消進行中的任務 (0) · —',
       '取消排程 (1) · cancel-me',
       '',
@@ -442,6 +499,8 @@ test('agent removal clears only its routes, sessions and agent schedules', async
   assert.match(await gateway.removeInstance(plan), /^已移除 代理 worker。/);
   assert.deepEqual(stopped, ['worker']);
   assert.equal(store.getSession(bound, 'worker'), undefined);
+  assert.deepEqual(store.taskToolCalls([removedTask]), []);
+  assert.equal(store.taskToolCalls([keptTask]).length, 1);
   assert.equal(store.getSession(kept, 'main')?.sessionId, 'main');
   assert.equal(store.getChat(bound)?.agentId, null);
   assert.equal(store.getChat(bound)?.thinking, null);
@@ -455,6 +514,17 @@ test('agent removal clears only its routes, sessions and agent schedules', async
   assert.equal(store.getSchedule('fixed')?.status, 'active');
   assert.equal(store.getSchedule('keep-me')?.status, 'active');
   const backup = await backupPath(workspace);
+  const db = new DatabaseSync(join(backup, 'tsugimori.db'), { readOnly: true });
+  try {
+    assert.equal(
+      db
+        .prepare('SELECT count(*) AS n FROM tool_calls WHERE task_id = ?')
+        .get(removedTask)?.n,
+      1,
+    );
+  } finally {
+    db.close();
+  }
   assert.equal(
     await readFile(
       join(backup, 'directory-1', 'custom-home', 'login.json'),
@@ -550,4 +620,72 @@ test('a failed SQLite purge reports completed work and preserves the backed-up d
   assert.ok(
     (await lstat(join(await backupPath(workspace), 'tsugimori.db'))).isFile(),
   );
+});
+
+test('remove menus hide protected instances and require an owner press to open the plan', async (t) => {
+  const { emit, sent, feedback, inbox } = await workspaceFixture(
+    t,
+    'zh-TW',
+    undefined,
+    'telegram',
+  );
+  await emit('/remove');
+  const menu = sent.at(-1)!;
+  assert.deepEqual(
+    menu.buttons?.map(({ label }) => label),
+    ['平台', '代理'],
+  );
+  const press = (prompt: typeof menu, index: number, userId = '42') =>
+    inbox.get('console')!.emit({
+      type: 'callback',
+      chatId: 'chat',
+      messageId: prompt.id,
+      callbackId: prompt.buttons![index]!.id,
+      queryId: 'query',
+      userId,
+    });
+  await press(menu, 0);
+  const platforms = sent.at(-1)!;
+  assert.match(platforms.text, /console（fake）.*另一個平台或 CLI/);
+  assert.match(platforms.text, /old（fake）/);
+  assert.deepEqual(
+    platforms.buttons?.map(({ label }) => label),
+    ['old'],
+  );
+  await press(platforms, 0, 'member');
+  assert.equal(sent.at(-1), platforms);
+  assert.ok(feedback.at(-1)?.notice);
+  await press(platforms, 0);
+  assert.match(sent.at(-1)!.text, /^移除清單[\s\S]*platforms\[\] old/);
+  assert.deepEqual(
+    sent.at(-1)?.buttons?.map(({ label }) => label),
+    ['刪除', '取消'],
+  );
+  await emit('/cancel');
+  await emit('/remove agent');
+  const agents = sent.at(-1)!;
+  assert.match(agents.text, /main（codex）.*預設代理/);
+  assert.match(agents.text, /worker（codex）/);
+  assert.deepEqual(
+    agents.buttons?.map(({ label }) => label),
+    ['worker'],
+  );
+});
+
+test('LINE shows removal categories and a text command hint', async (t) => {
+  const { emit, sent } = await workspaceFixture(t, 'zh-TW', undefined, 'line');
+  await emit('/remove');
+  assert.match(sent.at(-1)!.text, /平台（platform）、代理（agent）/);
+  assert.equal(sent.at(-1)!.buttons, undefined);
+  await emit('/remove platform');
+  assert.match(
+    sent.at(-1)!.text,
+    /old（line）[\s\S]*傳送 \/remove platform <id>/,
+  );
+  assert.equal(sent.at(-1)!.buttons, undefined);
+  await emit('/remove platform old');
+  await emit('yes', { replyTo: sent.at(-1)!.id });
+  await emit('/remove platform');
+  assert.match(sent.at(-1)!.text, /沒有可在此移除的項目/);
+  assert.equal(sent.at(-1)!.buttons, undefined);
 });

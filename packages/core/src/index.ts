@@ -48,6 +48,7 @@ import type { RemovalPlan } from './removal.ts';
 import type { PlatformNotice } from './runtime.ts';
 
 import { untilAborted } from './abort.ts';
+import { adminReader } from './admin.ts';
 import { acceptsServiceTier, formatServiceTier } from './agent-settings.ts';
 import { approvalDecisionText, approvalMessages } from './approval-messages.ts';
 import { ChatChoices, supportsChoices } from './chat-choices.ts';
@@ -63,13 +64,14 @@ import { conversationId, Outbound } from './outbound.ts';
 import { Previews } from './previews.ts';
 import { PluginRegistry } from './registry.ts';
 import { removalMessages } from './removal-messages.ts';
-import { Removal } from './removal.ts';
+import { defaultAgent, Removal } from './removal.ts';
 import { Runtime } from './runtime.ts';
 import { GuidedSetup } from './setup.ts';
 import { statusCard } from './status.ts';
 import { BackgroundSummaries } from './summary.ts';
 import { systemMessages } from './system-messages.ts';
 import { reply, Tasks } from './tasks.ts';
+import { ToolDetails } from './tool-details.ts';
 import { shouldTrigger } from './trigger.ts';
 
 export { EnvironmentChecks, PluginRegistry, shouldTrigger };
@@ -151,41 +153,11 @@ export class Gateway {
     log = logToStderr,
   }: GatewayDependencies) {
     this.#deps = { store, workspace, log, namedPreview };
-    this.admin = {
-      chats: () => store.listChats(),
-      chat: (chat, before) => {
-        const record = store.getChat(chat);
-        if (record)
-          return {
-            chat: record,
-            messages: store.listChatMessages(chat, before),
-            tasks: store.listChatTasks(chat),
-          };
-      },
-      approvals: () => ({
-        approvals: store.listApprovals().map((approval) => ({
-          action: approval.action,
-          adapterId: approval.adapterId,
-          approverId: approval.approverId,
-          chatId: approval.chatId,
-          decidedAt: approval.decidedAt,
-          decidedBy: approval.decidedBy,
-          expiresAt: approval.expiresAt,
-          failureReason: approval.failureReason,
-          id: approval.id,
-          promptMessageId: approval.promptMessageId,
-          requester: approval.requester,
-          resource: approval.resource,
-          status: approval.status,
-          taskId: approval.taskId,
-        })),
-        grants: store.listGrants(),
-      }),
-      trace: (taskId) => {
-        const task = store.getTask(taskId);
-        if (task) return { task, spans: store.taskTrace(taskId) };
-      },
-    };
+    this.admin = adminReader({
+      store,
+      config: () => this.#runtime.config,
+      route: (chat, current) => this.#tasks.route(chat, current),
+    });
     this.#registry = registry;
     this.#trace =
       trace ??
@@ -306,7 +278,13 @@ export class Gateway {
       recordWorkspace: () => !this.#runtime.disabled('workspace.record'),
       workdir: (chat) => context.workdir(chat),
     });
+    const toolDetails = new ToolDetails({
+      log,
+      snapshot: () => this.#runtime.snapshot,
+      store,
+    });
     this.#summaries = new BackgroundSummaries({
+      toolDetails,
       scope,
       log,
       runtime: this.#runtime,
@@ -383,6 +361,7 @@ export class Gateway {
         maxTtlMinutes: () => this.#runtime.config.preview?.maxTtlMinutes ?? 60,
       });
     this.#tasks = new Tasks({
+      toolDetails,
       store,
       auth: this.#auth,
       trace: this.#trace,
@@ -1470,6 +1449,7 @@ export class Gateway {
     const send = async (
       text: string,
       choices: readonly PromptChoice[] = [],
+      fallback?: string,
     ) => {
       if (!choices.length) {
         if (finish) await finish(text);
@@ -1483,9 +1463,10 @@ export class Gateway {
             message,
             [
               text,
-              m.choices.values(
-                choices.map(({ value }) => `/${name} ${value}`).join(' · '),
-              ),
+              fallback ??
+                m.choices.values(
+                  choices.map(({ value }) => `/${name} ${value}`).join(' · '),
+                ),
             ].join('\n'),
           ),
         );
@@ -1627,10 +1608,61 @@ export class Gateway {
         break;
       case 'remove': {
         if (message.edited) break;
+        const removal = removalMessages(locale);
+        if (!args) {
+          await send(
+            removal.usage,
+            [
+              {
+                value: 'platform',
+                label: 'Platform',
+                localized: { 'zh-TW': '平台' },
+              },
+              {
+                value: 'agent',
+                label: 'Agent',
+                localized: { 'zh-TW': '代理' },
+              },
+            ],
+            removal.categories,
+          );
+          break;
+        }
+        if (args === 'agent' || args === 'platform') {
+          const config = this.#runtime.config;
+          const configured =
+            args === 'agent' ? config.agents : config.platforms;
+          const blocked = args === 'agent' ? defaultAgent(config) : adapter.id;
+          const choices: PromptChoice[] = [];
+          const lines = [removal.choose(args)];
+          for (const { id, kind } of configured) {
+            const label =
+              locale === 'zh-TW' ? `${id}（${kind}）` : `${id} (${kind})`;
+            const reason =
+              id !== blocked
+                ? undefined
+                : args === 'platform'
+                  ? removal.ownPlatform
+                  : removal.defaultAgent(
+                      id,
+                      config.agents
+                        .filter(
+                          (agent) => agent.id !== id && agent.enabled !== false,
+                        )
+                        .map((agent) => agent.id),
+                    );
+            lines.push(reason ? `- ${label} · ${reason}` : `- ${label}`);
+            if (!reason) choices.push({ value: `${args} ${id}`, label: id });
+          }
+          if (!choices.length) lines.push(removal.noRemovable);
+          await send(lines.join('\n'), choices, removal.removeHint(args));
+          break;
+        }
         const match =
           /^(agent|platform)\s+([A-Za-z0-9_][A-Za-z0-9_.:-]*)$/.exec(args);
-        if (!match?.[2]) await send(removalMessages(locale).usage);
-        else
+        if (!match?.[2]) await send(removal.usage);
+        else {
+          if (finish) await finish(selectedCommand);
           await this.#chatRemoval.start(
             adapter,
             chat,
@@ -1641,6 +1673,7 @@ export class Gateway {
             },
             locale,
           );
+        }
         break;
       }
       case 'allow':

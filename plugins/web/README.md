@@ -1,6 +1,6 @@
 # Admin web UI
 
-The web plugin serves read-only pages and JSON for conversations, message history, task traces, approvals, and grants. It listens only on loopback.
+The web plugin serves a read-only admin console and JSON on loopback. The console uses the workspace locale and time zone and displays the optional top-level `name` in the header.
 
 ## Configuration
 
@@ -38,4 +38,16 @@ There is no web-specific `doctor` probe or dedicated `/status` row for the liste
 
 ## Views
 
-The home page lists chats. Follow a chat to view messages and trace links. The **Approvals and grants** page shows queued and decided approvals and recorded grants. These pages and the corresponding JSON endpoints use GET. Decisions are made through [chat approvals](../../README.md#approvals-and-schedules).
+- **Overview** (`/`) shows today's task and failure totals, pending approvals, and chat cards with activity, routing, and summary progress. **Chats** (`/chats`) opens the chat list directly.
+- **Chat** shows the message and task timeline, recorded token usage, tool calls, and links to full traces.
+- **Trace** shows elapsed time by span, expandable attributes, and any recorded tool details.
+- **Approvals** lists pending requests, the 50 latest handled requests, and grants. [Decisions go through the chat platform](../../README.md#approvals-and-schedules).
+- **Schedules** lists scheduled work, its status, and its next run.
+
+## Tool details
+
+The gateway stores each framework or supported agent tool call's name, ID when supplied, timing, status, arguments, and result or error in the workspace database. The console shows these details. They stay out of agent context and summaries.
+
+`web.toolDetails.maxChars` defaults to 4,000 per field and accepts a minimum of 200. Longer fields retain the beginning and end with an omitted-length marker. Before writing tool details, the gateway replaces known workspace secret values, process environment values referenced by configuration, common token patterns, and fields named like tokens, passwords, secrets, API keys, or authorization with `[redacted]`. Setup secret prompts are outside this recording path.
+
+Set `web.toolDetails.enabled` to `false` to stop recording new tool details. Existing trace timing and stored details remain visible. `/remove` includes affected tool detail rows in the removal plan and database backup, and deletes them from the live database.

@@ -44,7 +44,11 @@ export function gatewayTools(
           typeof params?.name === 'string' ? names.get(params.name) : undefined;
         try {
           if (!tool) throw new Error('Tool is unavailable');
-          const result = await tool.run(params?.arguments ?? {});
+          const result = await tool.run(
+            params?.arguments ?? {},
+            undefined,
+            String(message.id),
+          );
           return {
             content: [{ type: 'text', text: JSON.stringify(result) ?? 'null' }],
           };

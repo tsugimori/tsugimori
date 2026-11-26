@@ -694,7 +694,9 @@ export class CodexAgent implements AgentConnector {
       throw new Error('Codex thread already has an active turn');
 
     const frames = new TurnFrames();
-    const output = new TurnOutput();
+    const output = new TurnOutput(
+      new Set(request.tools.map(({ name }) => toolWireName(name))),
+    );
     const compactions = new TurnCompactions(
       this.#threadContexts.get(server)?.get(threadId)?.tokens,
     );
@@ -782,8 +784,15 @@ export class CodexAgent implements AgentConnector {
             try {
               if (!tool) throw new Error('Tool is unavailable');
               result =
-                JSON.stringify(await tool.run(frame.params.arguments)) ??
-                'null';
+                JSON.stringify(
+                  await tool.run(
+                    frame.params.arguments,
+                    undefined,
+                    typeof frame.params.callId === 'string'
+                      ? frame.params.callId
+                      : undefined,
+                  ),
+                ) ?? 'null';
               success = true;
             } catch (error) {
               result =
@@ -806,7 +815,12 @@ export class CodexAgent implements AgentConnector {
           yield { type: 'approval.requested', request: approval };
           let allowed = false;
           try {
-            allowed = !scope && (await approve(io, approval, signal));
+            const callId =
+              typeof frame.params.itemId === 'string'
+                ? frame.params.itemId
+                : undefined;
+            allowed = !scope && (await approve(io, approval, signal, callId));
+            if (!allowed && callId) io.reportToolDenial?.(callId);
           } finally {
             if (!server.signal.aborted)
               await replyToApproval(server, frame, allowed);

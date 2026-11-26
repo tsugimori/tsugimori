@@ -27,6 +27,7 @@ import type {
   StoredGrant,
   StoredPreview,
   TaskRecord,
+  ToolCallRecord,
   TraceSpan,
   UserRecord,
   WorkspaceSettings,
@@ -38,6 +39,7 @@ import {
   count,
   desc,
   eq,
+  getColumns,
   getTableName,
   gt,
   gte,
@@ -46,6 +48,7 @@ import {
   isNull,
   lt,
   lte,
+  max,
   min,
   notInArray,
   or,
@@ -74,6 +77,7 @@ import {
   setupRuns,
   setupSecrets,
   tasks,
+  toolCalls,
   traceSpans,
   unavailableCommandScopes,
   users,
@@ -113,6 +117,13 @@ function chatScope(
   ref: ChatRef,
 ) {
   return and(eq(table.adapterId, ref.adapterId), eq(table.chatId, ref.chatId));
+}
+
+function currentApproval(now: number) {
+  return and(
+    eq(approvals.status, 'pending'),
+    or(isNull(approvals.expiresAt), gt(approvals.expiresAt, now)),
+  );
 }
 
 function summaryRepair(seq: number) {
@@ -177,6 +188,7 @@ function platformDependents(
     .where(eq(schedules.adapterId, id));
   return {
     runs: inArray(scheduleRuns.scheduleId, scheduleIds),
+    calls: inArray(toolCalls.taskId, taskIds),
     spans: or(
       sql`json_extract(${traceSpans.attrs}, '$.adapterId') = ${id}`,
       inArray(sql`json_extract(${traceSpans.attrs}, '$.taskId')`, taskIds),
@@ -475,6 +487,11 @@ export class SqliteStore implements Store {
       sql`json_extract(${schedules.action}, '$.kind') = 'agent'`,
       refsMatch(schedules, routes),
     );
+    const agentTasks = this.#db
+      .select({ id: tasks.id })
+      .from(tasks)
+      .where(eq(tasks.agentId, id));
+    const calls = inArray(toolCalls.taskId, agentTasks);
     const pendingApprovals = and(
       eq(approvals.status, 'pending'),
       inArray(
@@ -486,6 +503,7 @@ export class SqliteStore implements Store {
       ),
     );
     return {
+      calls,
       activeSchedules,
       activeTasks,
       pendingApprovals,
@@ -506,6 +524,7 @@ export class SqliteStore implements Store {
       const {
         activeSchedules,
         activeTasks,
+        calls,
         pendingApprovals,
         routes,
         settings,
@@ -521,6 +540,7 @@ export class SqliteStore implements Store {
             .$count(chats, eq(chats.sessionAgentId, id))
             .sync(),
           pending_approvals: db.$count(approvals, pendingApprovals).sync(),
+          tool_calls: db.$count(toolCalls, calls).sync(),
         },
         routes,
         schedules: db
@@ -540,7 +560,7 @@ export class SqliteStore implements Store {
         workspaceSettings: settings,
       };
     }
-    const { runs, spans } = platformDependents(db, id);
+    const { calls, runs, spans } = platformDependents(db, id);
     return {
       chats: db
         .select({ chatId: chats.chatId })
@@ -559,6 +579,7 @@ export class SqliteStore implements Store {
         schedule_runs: db.$count(scheduleRuns, runs).sync(),
         setup_runs: setupCount,
         trace_spans: db.$count(traceSpans, spans).sync(),
+        tool_calls: db.$count(toolCalls, calls).sync(),
       },
       routes: [],
       schedules: db
@@ -606,12 +627,14 @@ export class SqliteStore implements Store {
           const {
             activeSchedules,
             activeTasks,
+            calls,
             pendingApprovals,
             routes,
             workspaceRoute,
           } = this.#agentRemoval(id, fileRoutes);
           const updates: Record<string, number> = {
             setup_runs: setupCount,
+            tool_calls: changed(tx.delete(toolCalls).where(calls).run()),
             agent_sessions: changed(
               tx
                 .delete(agentSessions)
@@ -673,11 +696,12 @@ export class SqliteStore implements Store {
           };
           return updates;
         }
-        const { runs, spans } = platformDependents(tx, id);
+        const { calls, runs, spans } = platformDependents(tx, id);
         const deleted = {
           schedule_runs: changed(tx.delete(scheduleRuns).where(runs).run()),
           setup_runs: setupCount,
           trace_spans: changed(tx.delete(traceSpans).where(spans).run()),
+          tool_calls: changed(tx.delete(toolCalls).where(calls).run()),
         };
         return {
           ...deleted,
@@ -1058,8 +1082,17 @@ export class SqliteStore implements Store {
         deleted: messages.deleted,
         replyTo: messages.replyTo,
         threadId: messages.threadId,
+        recordedAt: messages.recordedAt,
+        displayName: users.display,
       })
       .from(messages)
+      .leftJoin(
+        users,
+        and(
+          eq(users.adapterId, messages.adapterId),
+          eq(users.userId, messages.userId),
+        ),
+      )
       .where(
         and(
           chatScope(messages, ref),
@@ -1083,12 +1116,172 @@ export class SqliteStore implements Store {
       .all();
   }
 
-  listApprovals() {
-    return this.#db
+  listApprovals(now?: number, recentLimit = 500) {
+    const pending = now === undefined ? undefined : currentApproval(now);
+    const recent = this.#db
       .select()
       .from(approvals)
-      .orderBy(desc(approvals.decidedAt), approvals.id)
-      .limit(500)
+      .where(pending && sql`not (${pending})`)
+      .orderBy(
+        desc(approvals.decidedAt),
+        desc(approvals.requestedAt),
+        approvals.id,
+      )
+      .limit(recentLimit)
+      .all();
+    return pending
+      ? [
+          ...this.#db
+            .select()
+            .from(approvals)
+            .where(pending)
+            .orderBy(desc(approvals.requestedAt), approvals.id)
+            .all(),
+          ...recent,
+        ]
+      : recent;
+  }
+
+  adminChatActivity(ref: ChatRef, now: number) {
+    const { latestSeq, messageCount, messageTime } = this.#db
+      .select({
+        latestSeq: max(messages.seq),
+        messageCount: count(),
+        messageTime: max(messages.recordedAt),
+      })
+      .from(messages)
+      .where(chatScope(messages, ref))
+      .get()!;
+    const thread = this.#db
+      .select({ threadId: messages.threadId })
+      .from(messages)
+      .where(and(chatScope(messages, ref), isNotNull(messages.threadId)))
+      .orderBy(desc(messages.seq))
+      .limit(1)
+      .get();
+    const task = (active: boolean) =>
+      this.#db
+        .select()
+        .from(tasks)
+        .where(
+          and(
+            chatScope(tasks, ref),
+            active
+              ? inArray(tasks.status, ['queued', 'running', 'sending'])
+              : undefined,
+          ),
+        )
+        .orderBy(desc(tasks.createdAt))
+        .limit(1)
+        .get();
+    return {
+      latestSeq: latestSeq ?? 0,
+      messageCount,
+      messageTime,
+      threadId: thread?.threadId ?? null,
+      activeTask: task(true),
+      lastTask: task(false),
+      pendingApprovals: this.#db
+        .$count(approvals, and(chatScope(approvals, ref), currentApproval(now)))
+        .sync(),
+    };
+  }
+
+  countPendingApprovals(now: number) {
+    return this.#db.$count(approvals, currentApproval(now)).sync();
+  }
+
+  adminTaskCounts(since: number, now: number) {
+    const failedAt = sql`coalesce(${tasks.finishedAt}, ${tasks.createdAt})`;
+    return {
+      tasksToday: this.#db
+        .$count(
+          tasks,
+          and(gte(tasks.createdAt, since), lte(tasks.createdAt, now)),
+        )
+        .sync(),
+      failedToday: this.#db
+        .$count(
+          tasks,
+          and(
+            inArray(tasks.status, ['failed', 'delivery-unknown']),
+            gte(failedAt, since),
+            lte(failedAt, now),
+          ),
+        )
+        .sync(),
+      pendingApprovals: this.countPendingApprovals(now),
+    };
+  }
+
+  adminChatTasks(
+    ref: ChatRef,
+    {
+      before,
+      oldestSeq,
+      oldestTime,
+    }: {
+      before?: number;
+      oldestSeq?: number;
+      oldestTime?: number | null;
+    },
+  ) {
+    const cursor =
+      before === undefined
+        ? undefined
+        : this.#db
+            .select({ time: messages.recordedAt })
+            .from(messages)
+            .where(and(chatScope(messages, ref), eq(messages.seq, before)))
+            .get()?.time;
+    return this.#db
+      .select({ ...getColumns(tasks), sourceSeq: messages.seq })
+      .from(tasks)
+      .leftJoin(
+        messages,
+        and(
+          eq(messages.adapterId, tasks.adapterId),
+          eq(messages.chatId, tasks.chatId),
+          eq(messages.direction, 'inbound'),
+          eq(messages.messageId, tasks.sourceMessageId),
+          eq(
+            messages.migratedFromChatId,
+            sql`coalesce(${tasks.sourceChatId}, '')`,
+          ),
+        ),
+      )
+      .where(
+        and(
+          chatScope(tasks, ref),
+          or(
+            and(
+              isNotNull(messages.seq),
+              before === undefined ? undefined : lt(messages.seq, before),
+              oldestSeq === undefined
+                ? undefined
+                : gte(messages.seq, oldestSeq),
+            ),
+            and(
+              isNull(messages.seq),
+              before === undefined
+                ? undefined
+                : cursor == null
+                  ? sql`0`
+                  : lt(tasks.createdAt, cursor),
+              oldestTime == null ? undefined : gte(tasks.createdAt, oldestTime),
+            ),
+          ),
+        ),
+      )
+      .orderBy(desc(tasks.createdAt), tasks.id)
+      .all();
+  }
+
+  listAdminSchedules() {
+    return this.#db
+      .select()
+      .from(schedules)
+      .orderBy(asc(schedules.nextDueAt), schedules.id)
       .all();
   }
 
@@ -1133,6 +1326,55 @@ export class SqliteStore implements Store {
       .from(grants)
       .orderBy(desc(grants.createdAt))
       .limit(500)
+      .all();
+  }
+
+  createToolCall(call: Omit<ToolCallRecord, 'seq'>) {
+    // The task can disappear during removal. Reserve its sequence only if it exists.
+    return this.#db
+      .insert(toolCalls)
+      .select(
+        this.#db
+          .select({
+            seq: sql<number>`null`.as('seq'),
+            taskId: tasks.id,
+            callId: sql<string | null>`${call.callId}`.as('call_id'),
+            name: sql<string>`${call.name}`.as('name'),
+            startedAt: sql<number>`${call.startedAt}`.as('started_at'),
+            endedAt: sql<number | null>`${call.endedAt}`.as('ended_at'),
+            status: sql<ToolCallRecord['status']>`${call.status}`.as('status'),
+            args: sql<string | null>`${call.args}`.as('args'),
+            result: sql<string | null>`${call.result}`.as('result'),
+            approvalId: sql<string | null>`${call.approvalId}`.as(
+              'approval_id',
+            ),
+          })
+          .from(tasks)
+          .where(eq(tasks.id, call.taskId)),
+      )
+      .returning({ seq: toolCalls.seq })
+      .get()?.seq;
+  }
+
+  updateToolCall(
+    seq: number,
+    patch: Partial<
+      Pick<
+        ToolCallRecord,
+        'approvalId' | 'args' | 'endedAt' | 'result' | 'status'
+      >
+    >,
+  ) {
+    this.#db.update(toolCalls).set(patch).where(eq(toolCalls.seq, seq)).run();
+  }
+
+  taskToolCalls(taskIds: readonly string[]) {
+    if (!taskIds.length) return [];
+    return this.#db
+      .select()
+      .from(toolCalls)
+      .where(inArray(toolCalls.taskId, [...taskIds]))
+      .orderBy(toolCalls.seq)
       .all();
   }
 
@@ -1880,6 +2122,19 @@ export class SqliteStore implements Store {
   interruptTasks(now: number) {
     this.#db.transaction(
       (tx) => {
+        tx.update(toolCalls)
+          .set({ status: 'error', endedAt: now })
+          .where(and(isNull(toolCalls.endedAt), isNull(toolCalls.status)))
+          .run();
+        tx.update(toolCalls)
+          .set({ endedAt: now })
+          .where(
+            and(
+              isNull(toolCalls.endedAt),
+              eq(toolCalls.status, 'pending-approval'),
+            ),
+          )
+          .run();
         const interrupted = tx
           .select()
           .from(tasks)

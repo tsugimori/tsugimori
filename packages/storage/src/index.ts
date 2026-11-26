@@ -1,5 +1,6 @@
 import type {
   AdapterCursor,
+  AdminToolCall,
   ApprovalFeedback,
   ChatRef,
   Grant,
@@ -123,6 +124,7 @@ export interface ApprovalRecord extends ChatRef {
   migratedPrompt?: string | null;
   promptFormat: ApprovalPromptFormat | null;
   promptMessageId: string | null;
+  requestedAt?: number | null;
   requester: string;
   resource: ResourceRef;
   status: 'pending' | 'approved' | 'denied' | 'cancelled' | 'expired';
@@ -279,7 +281,40 @@ export interface StoredPreview extends ChatRef {
   url: string;
 }
 
+export interface ToolCallRecord extends AdminToolCall {
+  approvalId: string | null;
+  taskId: string;
+}
+
 export interface Store {
+  adminChatActivity(
+    ref: ChatRef,
+    now: number,
+  ): {
+    activeTask: TaskRecord | undefined;
+    lastTask: TaskRecord | undefined;
+    latestSeq: number;
+    messageCount: number;
+    messageTime: number | null;
+    pendingApprovals: number;
+    threadId: string | null;
+  };
+  adminChatTasks(
+    ref: ChatRef,
+    page: {
+      before?: number;
+      oldestSeq?: number;
+      oldestTime?: number | null;
+    },
+  ): (TaskRecord & { sourceSeq: number | null })[];
+  adminTaskCounts(
+    since: number,
+    now: number,
+  ): {
+    failedToday: number;
+    pendingApprovals: number;
+    tasksToday: number;
+  };
   approvalStatus(
     ref: ChatRef,
     now: number,
@@ -322,9 +357,11 @@ export interface Store {
     now: number,
     matches: (scope: StoredGrant['scope'], resource: ResourceRef) => boolean,
   ): boolean;
+  countPendingApprovals(now: number): number;
   createApproval(approval: ApprovalRecord): void;
   createSchedule(schedule: ScheduleRecord, limit: number): boolean;
   createTask(task: TaskRecord): void;
+  createToolCall(call: Omit<ToolCallRecord, 'seq'>): number | undefined;
   decideApproval(
     id: string,
     decision: {
@@ -397,11 +434,12 @@ export interface Store {
     promptMessageId: string,
     format?: ApprovalPromptFormat,
   ): void;
-  listApprovals(): ApprovalRecord[];
+  listAdminSchedules(): ScheduleRecord[];
+  listApprovals(now?: number, recentLimit?: number): ApprovalRecord[];
   listChatMessages(
     ref: ChatRef,
     before?: number,
-  ): Omit<MessageRecord, 'raw' | 'recordedAt'>[];
+  ): (Omit<MessageRecord, 'raw'> & { displayName: string | null })[];
   listChats(): ChatRecord[];
   listChatTasks(ref: ChatRef): TaskRecord[];
   listGrants(): StoredGrant[];
@@ -474,6 +512,7 @@ export interface Store {
     limit: number,
     offset?: number,
   ): MessageRecord[];
+  taskToolCalls(taskIds: readonly string[]): ToolCallRecord[];
   taskTrace(taskId: string): TraceSpan[];
   updateSchedule(
     schedule: ScheduleRecord,
@@ -483,6 +522,15 @@ export interface Store {
   updateTask(
     id: string,
     patch: Partial<Omit<TaskRecord, keyof ChatRef | 'id' | 'sourceMessageId'>>,
+  ): void;
+  updateToolCall(
+    seq: number,
+    patch: Partial<
+      Pick<
+        ToolCallRecord,
+        'approvalId' | 'args' | 'endedAt' | 'result' | 'status'
+      >
+    >,
   ): void;
   writeTraceSpans(spans: readonly TraceSpan[]): void | Promise<void>;
 }

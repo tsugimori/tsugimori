@@ -402,6 +402,11 @@ test('guided chat setup uses the original topic for progress and consumes secret
       f.logs,
       f.trace.recent,
       f.store.getSetupRun('["add","platform","attached"]'),
+      f.store.taskToolCalls(
+        f.store
+          .listChats()
+          .flatMap((chat) => f.store.listChatTasks(chat).map(({ id }) => id)),
+      ),
     ]).includes(credential),
   );
 });

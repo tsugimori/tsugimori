@@ -77,10 +77,13 @@ export function toolPermission(
   gatewayTools: ReadonlySet<string> = new Set(),
   denyRead?: readonly string[],
 ): CanUseTool {
-  return async (toolName, input, { blockedPath, signal }) => {
+  return async (toolName, input, { blockedPath, signal, toolUseID }) => {
     const active = AbortSignal.any([runSignal, signal]);
-    const deny = { behavior: 'deny', message: 'Permission denied.' } as const;
-    if (active.aborted) return deny;
+    const deny = () => {
+      if (toolUseID) io.reportToolDenial?.(toolUseID);
+      return { behavior: 'deny', message: 'Permission denied.' } as const;
+    };
+    if (active.aborted) return deny();
     if (gatewayTools.has(toolName))
       return { behavior: 'allow', updatedInput: input };
     const path =
@@ -104,7 +107,7 @@ export function toolPermission(
       ) ||
       active.aborted
     )
-      return deny;
+      return deny();
     const pattern = toolName === 'Glob' ? input.pattern : input.glob;
     const localPattern =
       pattern === undefined ||
@@ -121,7 +124,7 @@ export function toolPermission(
       return { behavior: 'allow', updatedInput: input };
     }
 
-    if (denyRead) return deny;
+    if (denyRead) return deny();
 
     const description = stable({
       workdir,
@@ -135,19 +138,22 @@ export function toolPermission(
     active.addEventListener('abort', abort, { once: true });
     try {
       const allowed = await Promise.race([
-        io.requestApproval({
-          action: `claude.${toolName}`,
-          resource: {
-            type: 'project',
-            id: createHash('sha256').update(description).digest('hex'),
+        io.requestApproval(
+          {
+            action: `claude.${toolName}`,
+            resource: {
+              type: 'project',
+              id: createHash('sha256').update(description).digest('hex'),
+            },
+            description: `${description.slice(0, 3_500)}${description.length > 3_500 ? '…' : ''}`,
           },
-          description: `${description.slice(0, 3_500)}${description.length > 3_500 ? '…' : ''}`,
-        }),
+          toolUseID,
+        ),
         interrupted.promise,
       ]);
       return allowed && !active.aborted
         ? { behavior: 'allow', updatedInput: input }
-        : deny;
+        : deny();
     } finally {
       active.removeEventListener('abort', abort);
     }

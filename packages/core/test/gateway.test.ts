@@ -111,6 +111,7 @@ async function fixture(
   run: AgentConnector['run'],
   enableAgent = true,
   options: {
+    agentOptions?: Config['agents'][number]['options'];
     agentSettings?(id: string): AgentConnector['settings'];
     compact?: AgentConnector['compact'];
     context?: Config['context'];
@@ -118,12 +119,14 @@ async function fixture(
     describeQuota?: AgentConnector['describeQuota'];
     describeSession?: AgentConnector['describeSession'];
     durable?: boolean;
+    envFixture?: string;
     locale?: 'en' | 'zh-TW';
     onScopedTool?: (args: unknown, userId: string) => void;
     outboundPush?: PlatformCapabilities['outboundPush'];
     plugins?: PluginDefinition[];
     previews?: { named?: TunnelProvider; quick: TunnelProvider };
     reactions?: true | PlatformAdapter['setApprovalReaction'];
+    web?: Config['web'];
   } = {},
 ) {
   const workspace = await mkdtemp(join(tmpdir(), 'tsugimori-gateway-'));
@@ -204,7 +207,7 @@ async function fixture(
     log: (entry) => logs.push(entry),
   });
   const { context: contextSettings } = options;
-  const locale = options.locale;
+  const { locale, web: fixtureWeb, agentOptions } = options;
   const exec = options.plugins?.some((plugin) => plugin.execBackends?.length)
     ? {}
     : undefined;
@@ -231,6 +234,7 @@ async function fixture(
                 kind: 'fake',
                 model: options.model ?? 'first',
                 compactAt: options.compactAt,
+                options: agentOptions,
               },
             ])
           : [],
@@ -238,6 +242,7 @@ async function fixture(
         context: options.context ?? contextSettings,
         exec,
         locale,
+        web: fixtureWeb,
       }),
     );
   }
@@ -251,6 +256,8 @@ async function fixture(
     }
   });
   await configure(enableAgent);
+  if (options.envFixture)
+    await writeFile(join(workspace, '.env'), options.envFixture);
   await gateway.start();
   return {
     gateway,
@@ -3161,3 +3168,234 @@ test('commands addressed to another bot are recorded without running an agent', 
   assert.equal(runs, 0);
   assert.deepEqual(f.platform.sent, []);
 });
+
+test('records and redacts framework and external tool details without changing agent history', async (t) => {
+  const envValue = 'fixture workspace phrase';
+  const processValue = 'fixture process phrase';
+  const previous = process.env.FIXTURE_TOOL_ENV;
+  process.env.FIXTURE_TOOL_ENV = processValue;
+  t.after(() => {
+    if (previous === undefined) delete process.env.FIXTURE_TOOL_ENV;
+    else process.env.FIXTURE_TOOL_ENV = previous;
+  });
+  const secrets = [
+    envValue,
+    processValue,
+    'exampleBearer123',
+    'sk-fixture-token',
+    'ghp_fixturetoken',
+    'xoxb-fixture',
+    'eyJhbGciOi.eyJzdWIiOi.c2lnbmF0dXJl',
+    'af'.repeat(16),
+    'aB9+'.repeat(8),
+    'named value',
+    'nested value',
+  ];
+  const original = {
+    note: `${envValue}; ${processValue}; Bearer exampleBearer123; sk-fixture-token; ghp_fixturetoken; xoxb-fixture; host console.example.test; eyJhbGciOi.eyJzdWIiOi.c2lnbmF0dXJl; key=${secrets[7]}; secret=${secrets[8]}`,
+    apiKey: 'named value',
+    nested: { PASSWORD: 'nested value' },
+  };
+  const f = await fixture(
+    t,
+    async function* (request) {
+      if (request.purpose === 'summary') {
+        assert.ok(!JSON.stringify(request.context).includes('head-before-cap'));
+        return;
+      }
+      const tool = request.tools.find(({ name }) => name === 'fixture.echo')!;
+      assert.deepEqual(
+        await tool.run(original, undefined, 'framework-1'),
+        original,
+      );
+      await assert.rejects(
+        tool.run(null, undefined, 'framework-invalid'),
+        /Invalid tool arguments/,
+      );
+      yield { type: 'tool.started', callId: 'native-1', name: 'native.read' };
+      yield {
+        type: 'tool.input',
+        callId: 'native-1',
+        args: { authorization: 'named value', data: envValue },
+      };
+      yield {
+        type: 'tool.finished',
+        callId: 'native-1',
+        name: 'native.read',
+        status: 'error',
+        result:
+          'head-before-cap ' +
+          'x'.repeat(400) +
+          ` ${processValue} tail-after-cap`,
+      };
+      yield { type: 'usage', inputTokens: 14, outputTokens: 3 };
+      yield { type: 'text.final', text: 'finished' };
+    },
+    true,
+    {
+      envFixture: `FIXTURE_PASSWORD="${envValue}"
+`,
+      web: { toolDetails: { maxChars: 200 } },
+      agentOptions: { customEnv: 'FIXTURE_TOOL_ENV' },
+      plugins: [
+        {
+          name: 'echo',
+          tools: [
+            {
+              name: 'fixture.echo',
+              description: 'Echo',
+              schema: { type: 'object' },
+              run: async (args) => args,
+            },
+          ],
+        },
+      ],
+    },
+  );
+  await f.platform.emit(
+    inbound('capture', 'Capture this', { userDisplay: 'Owner name' }),
+  );
+  await f.gateway.idle();
+  const [task] = f.store.listChatTasks(chat);
+  assert.ok(task);
+  const calls = f.store.taskToolCalls([task.id]);
+  assert.deepEqual(
+    calls.map(({ callId, status }) => [callId, status]),
+    [
+      ['framework-1', 'ok'],
+      ['framework-invalid', 'error'],
+      ['native-1', 'error'],
+    ],
+  );
+  assert.ok(
+    calls.every(
+      ({ startedAt, endedAt }) => endedAt !== null && endedAt >= startedAt,
+    ),
+  );
+  const [echo, invalid, native] = calls;
+  assert.match(echo!.args!, /\[redacted\]/);
+  assert.match(echo!.args!, /console\.example\.test/);
+  assert.match(invalid!.result!, /Invalid tool arguments/);
+  assert.match(native!.args!, /"authorization": "\[redacted\]"/);
+  assert.match(
+    native!.result!,
+    /^head-before-cap .*…\[omitted \d+ chars\]….*\[redacted\] tail-after-cap$/,
+  );
+  for (const { args, result } of calls) {
+    assert.ok((args?.length ?? 0) <= 200 && (result?.length ?? 0) <= 200);
+    for (const secret of secrets) {
+      assert.ok(!args?.includes(secret));
+      assert.ok(!result?.includes(secret));
+    }
+  }
+  assert.deepEqual(
+    f.store.listChatMessages(chat).map(({ text }) => text),
+    ['finished', 'Capture this'],
+  );
+  const view = f.gateway.admin.chat(chat)!;
+  assert.equal(
+    view.messages.find(({ direction }) => direction === 'inbound')?.displayName,
+    'Owner name',
+  );
+  assert.equal(view.tasks[0]?.sourceSeq, view.messages.at(-1)?.seq);
+  assert.equal(view.tasks[0]?.inputTokens, 14);
+  assert.equal(view.tasks[0]?.tools.length, 3);
+  const { chats, totals } = f.gateway.admin.overview(Date.now());
+  assert.deepEqual(totals, {
+    chats: 1,
+    tasksToday: 1,
+    failedToday: 0,
+    pendingApprovals: 0,
+  });
+  assert.equal(chats[0]?.messageCount, 2);
+});
+
+test('disabled tool details keep names in trace and skip argument and result storage', async (t) => {
+  const f = await fixture(
+    t,
+    async function* (request) {
+      const tool = request.tools.find(({ name }) => name === 'fixture.echo')!;
+      await tool.run('hidden framework data');
+      yield {
+        type: 'tool.started',
+        callId: 'native',
+        name: 'native.read',
+        args: 'hidden native data',
+      };
+      yield {
+        type: 'tool.finished',
+        callId: 'native',
+        name: 'native.read',
+        status: 'ok',
+        result: 'hidden native result',
+      };
+      yield { type: 'text.final', text: 'finished' };
+    },
+    true,
+    {
+      web: { toolDetails: { enabled: false } },
+      plugins: [
+        {
+          name: 'echo',
+          tools: [
+            {
+              name: 'fixture.echo',
+              description: 'Echo',
+              schema: { type: 'string' },
+              run: async (args) => args,
+            },
+          ],
+        },
+      ],
+    },
+  );
+  await f.platform.emit(inbound('capture-disabled', 'Capture this'));
+  await f.gateway.idle();
+  const [task] = f.store.listChatTasks(chat);
+  assert.ok(task);
+  assert.deepEqual(f.store.taskToolCalls([task.id]), []);
+  const view = f.gateway.admin.trace(task.id)!;
+  assert.deepEqual(
+    view.task.tools.map(({ name, args, result }) => [name, args, result]),
+    [
+      ['fixture.echo', null, null],
+      ['native.read', null, null],
+    ],
+  );
+  assert.doesNotMatch(JSON.stringify(view), /hidden/);
+});
+
+test(
+  'framework tool records pending and denied status with a linked approval',
+  { timeout: 5000 },
+  async (t) => {
+    const f = await fixture(t, async function* (request) {
+      const tool = request.tools.find(({ name }) => name === 'scoped_tool')!;
+      await assert.rejects(
+        tool.run({ id: 'requires-approval' }, undefined, 'gated'),
+        /permission denied/,
+      );
+      yield { type: 'text.final', text: 'finished' };
+    });
+    await f.platform.emit(inbound('gated-trigger', 'Use the scoped tool'));
+    await until(t, () =>
+      f.store.listApprovals().some(({ promptMessageId }) => promptMessageId),
+    );
+    const [record] = f.store.listApprovals();
+    assert.ok(record?.promptMessageId);
+    const pending = f.store.taskToolCalls([record.taskId])[0];
+    assert.equal(pending?.status, 'pending-approval');
+    assert.equal(pending?.endedAt, null);
+    assert.equal(pending?.approvalId, record.id);
+    assert.match(
+      f.gateway.admin.approvals().approvals[0]!.args!,
+      /requires-approval/,
+    );
+    await f.platform.emit(
+      inbound('gated-deny', 'deny', { replyTo: record.promptMessageId }),
+    );
+    await f.gateway.idle();
+    assert.equal(f.store.taskToolCalls([record.taskId])[0]?.status, 'denied');
+    assert.equal(f.gateway.admin.approvals().approvals[0]?.status, 'denied');
+  },
+);
