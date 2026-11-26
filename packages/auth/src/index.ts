@@ -11,6 +11,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 
 const pairingTtlMs = 10 * 60_000;
+const scheduleGrantAction = 'schedule.delivery';
 
 interface AuthDependencies {
   configuredOwner?(adapterId: string): string | undefined;
@@ -64,6 +65,12 @@ function matchesResource(scope: StoredGrant['scope'], resource: ResourceRef) {
       return resource.type === 'global';
     case 'project':
       return resource.type === 'project' && resource.id === scope.id;
+    case 'schedule':
+      return (
+        resource.type === 'schedule' &&
+        resource.id === scope.id &&
+        resource.deliveryKey === scope.deliveryKey
+      );
     case 'chat':
       return (
         resource.type === 'chat' &&
@@ -186,7 +193,8 @@ export class Auth {
     )
       return;
 
-    if (approval.onceOnly && decision === 'always') decision = 'once';
+    const alwaysAsOnce = approval.onceOnly && decision === 'always';
+    if (alwaysAsOnce) decision = 'once';
     const now = this.#now();
     const approved = decision !== 'deny';
     const grant: StoredGrant | undefined =
@@ -195,7 +203,10 @@ export class Auth {
             adapterId: approval.adapterId,
             chatId: approval.chatId,
             id: randomUUID(),
-            action: approval.action,
+            action:
+              approval.resource.type === 'schedule'
+                ? scheduleGrantAction
+                : approval.action,
             scope: approval.resource,
             mode: decision,
             grantedTo: approval.requester,
@@ -214,7 +225,13 @@ export class Auth {
       },
       grant,
     );
-    if (changed) return { id: approval.id, approved, decision };
+    if (changed)
+      return {
+        id: approval.id,
+        approved,
+        decision,
+        ...(alwaysAsOnce ? { alwaysAsOnce } : {}),
+      };
   }
 
   hasGrant(
@@ -225,7 +242,16 @@ export class Auth {
   ) {
     if (grantedBy === undefined) return false;
     return this.#store.consumeGrant(
-      { ...chat, grantedBy, requester, ...request },
+      {
+        ...chat,
+        grantedBy,
+        requester,
+        resource: request.resource,
+        action:
+          request.resource.type === 'schedule'
+            ? scheduleGrantAction
+            : request.action,
+      },
       this.#now(),
       matchesResource,
     );

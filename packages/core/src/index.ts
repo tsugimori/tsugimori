@@ -420,6 +420,7 @@ export class Gateway {
         messageId: event.messageId,
         queryId: event.queryId,
         decision: result?.decision,
+        alwaysAsOnce: result?.alwaysAsOnce,
         pre: result?.pre,
         entities: result?.entities,
       });
@@ -483,6 +484,7 @@ export class Gateway {
           chatId: event.chatId,
           messageId: event.replyTo,
           decision: result.decision,
+          alwaysAsOnce: result.alwaysAsOnce,
           pre: result.pre,
           entities: result.entities,
         });
@@ -634,7 +636,12 @@ export class Gateway {
   async #approvalFeedback(
     adapter: PlatformAdapter,
     chat: ChatRef,
-    feedback: Omit<ApprovalFeedback, 'decisionText' | 'notice' | 'prompt'>,
+    {
+      alwaysAsOnce,
+      ...feedback
+    }: Omit<ApprovalFeedback, 'decisionText' | 'notice' | 'prompt'> & {
+      alwaysAsOnce?: boolean;
+    },
   ) {
     if (!adapter.respondToApproval) return;
     const prompt = feedback.decision
@@ -647,6 +654,7 @@ export class Gateway {
           ...approvalDecisionText(
             this.#runtime.config.locale,
             feedback.decision,
+            alwaysAsOnce,
           ),
           prompt,
         }),

@@ -177,6 +177,7 @@ export interface ContextBlock {
 
 export type ResourceRef =
   | { id: string; type: 'project' }
+  | { deliveryKey: string; id: string; type: 'schedule' }
   | { path: string; type: 'path' }
   | ({ type: 'chat' } & ChatRef)
   | { type: 'global' };
@@ -208,6 +209,7 @@ export interface ScheduleApprovalRequest {
   agentReason?: string;
   approverId?: string;
   content: string;
+  deliveryKey: string;
   dueAt: number;
   id: string;
   kind: 'agent' | 'message';
@@ -216,7 +218,7 @@ export interface ScheduleApprovalRequest {
   reasons: readonly ScheduleApprovalReason[];
   recipients: readonly { name?: string; userId?: string }[];
   repeat?: { cron: string } | { minutes: number };
-  scope: string;
+  reuseGrant: boolean;
   target: ChatRef;
   targetUserId?: string;
   timezone: string;

@@ -66,6 +66,8 @@ Agents can create fixed messages or agent tasks using `schedule.create` and mana
 
 Schedules are scoped to the conversation they were created in. Self-delivery and untargeted one-time group delivery can proceed immediately. Other delivery and resource-intensive jobs require linked approval. Configure `scheduler.minIntervalMinutes` (default 15), `scheduler.maxActivePerUser` (default 20), and `scheduler.highCostModels` in the workspace.
 
+One-time requests offer **Allow once** and **Deny**. A direct reply of `always` on one of these requests counts as **Allow once**. Recurring schedules also offer **Always allow (this recurring schedule)**, which covers future deliveries and edits that preserve the approved delivery scope. Resource checks can still require fresh owner approval.
+
 Pass native platform user IDs in the schedule's `mentions` array to notify specific recipients. Telegram also renders `[name](tg://user?id=123)` as a user mention and preserves `@username` in the message text.
 
 ## Chat workspaces and execution

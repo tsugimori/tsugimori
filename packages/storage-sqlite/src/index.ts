@@ -975,6 +975,7 @@ export class SqliteStore implements Store {
     now: number,
     matches: Parameters<Store['consumeGrant']>[2],
   ) {
+    const schedule = query.resource.type === 'schedule';
     return this.#db.transaction(
       (tx) => {
         const candidates = tx
@@ -982,9 +983,12 @@ export class SqliteStore implements Store {
           .from(grants)
           .where(
             and(
-              chatScope(grants, query),
+              eq(grants.adapterId, query.adapterId),
+              schedule
+                ? eq(grants.mode, 'always')
+                : eq(grants.chatId, query.chatId),
               eq(grants.action, query.action),
-              eq(grants.grantedTo, query.requester),
+              schedule ? undefined : eq(grants.grantedTo, query.requester),
               eq(grants.grantedBy, query.grantedBy),
               isNull(grants.revokedAt),
               isNull(grants.consumedAt),

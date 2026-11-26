@@ -132,9 +132,30 @@ const fields = {
 };
 const id = { type: 'string', pattern: '^(#?[a-fA-F0-9]{6}|[a-f0-9-]{36})$' };
 const empty = object({}, []);
+const textMentions =
+  /@[\p{L}\p{N}_]+|(?:tg:\/\/user\?id=|(?:https?:\/\/)?t\.me\/)[^\s<>()]*/giu;
 
 export function containsMention(text: string) {
-  return /@[\p{L}\p{N}_]|tg:\/\/user\?id=|(?:https?:\/\/)?t\.me\//iu.test(text);
+  return text.search(textMentions) !== -1;
+}
+
+function deliveryKey({ action, mentions, target }: ScheduleRecord) {
+  const ordinary =
+    action.kind === 'agent'
+      ? action.prompt
+      : unlinkedText(action.text, action.mentions ?? []);
+  // Agent output can add textual mentions when the owner approves its delivery.
+  return createHash('sha256')
+    .update(
+      JSON.stringify([
+        target.chatId,
+        target.threadId,
+        action.kind,
+        [...mentions].sort(),
+        [...new Set(ordinary.match(textMentions))].sort(),
+      ]),
+    )
+    .digest('hex');
 }
 
 function occurrence(
@@ -238,7 +259,7 @@ export class Scheduler {
       {
         name: 'schedule.update',
         description:
-          'Replace the timing and action of a schedule in this chat using its six-character reference as id. Pass recipients in mentions as native platform user IDs (strings). The new settings are checked again for approval. ' +
+          'Replace the timing and action of a schedule in this chat using its six-character reference as id. Pass recipients in mentions as native platform user IDs (strings). Edits are checked for delivery and resource approval. ' +
           scheduleReplyStyle,
         schema: object({ ...fields, id }, ['id', 'action', 'trigger']),
         run: (args, task) => {
@@ -524,34 +545,14 @@ export class Scheduler {
             : { minutes: trigger.minutes };
       const until = trigger.kind === 'once' ? undefined : trigger.until;
       const agentReason = input.needsApproval ? input.reason : undefined;
-      // An always grant covers the same conversation, destination, content and
-      // cadence. Its scope cannot be widened by supplying a new tool argument.
-      const scope = createHash('sha256')
-        .update(
-          JSON.stringify([
-            chat.chatId,
-            targetScope.chatId,
-            target.kind === 'dm' ? target.userId : null,
-            action.kind,
-            action.kind === 'message' ? action.text : action.prompt,
-            [...mentions].sort(),
-            model,
-            timezone,
-            trigger.kind,
-            repeat,
-            until,
-            schedule.missed,
-            reasons,
-            agentReason,
-          ]),
-        )
-        .digest('hex');
+      const key = deliveryKey(schedule);
       const request: ScheduleApprovalRequest = {
         id,
         address: promptAddress,
         agentReason,
         approverId,
         content,
+        deliveryKey: key,
         dueAt: due,
         kind: action.kind,
         recipients: [
@@ -574,7 +575,8 @@ export class Scheduler {
         operation: previous ? 'update' : 'create',
         reasons,
         repeat,
-        scope,
+        reuseGrant:
+          previous !== undefined && !ownerOnly && deliveryKey(previous) === key,
         target: targetScope,
         targetUserId: target.kind === 'dm' ? target.userId : undefined,
         timezone,

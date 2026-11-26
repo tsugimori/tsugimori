@@ -17,14 +17,21 @@ import {
 
 const catalogs = {
   en: {
-    buttons: { once: 'Allow once', always: 'Always allow', deny: 'Deny' },
+    buttons: {
+      once: 'Allow once',
+      always: 'Always allow (this recurring schedule)',
+      deny: 'Deny',
+    },
     decisions: {
       once: '✅ Allowed once',
       always: '✅ Always allowed',
       deny: '❌ Denied',
     },
+    alwaysAsOnce:
+      '✅ Allowed once (“always” counts as “allow once” for this request)',
     unavailable: 'Approval is unavailable.',
-    reply: 'Reply directly to this message with “yes”, “always”, or “no”.',
+    replyRecurring:
+      'Reply directly with “yes”, “always” (this recurring schedule only), or “no”.',
     replyOnce: 'Reply directly to this message with “yes” or “no”.',
     title: 'Approval requested',
     create: { message: 'Schedule a reminder', agent: 'Schedule an agent task' },
@@ -65,14 +72,20 @@ const catalogs = {
     names: ', ',
   },
   'zh-TW': {
-    buttons: { once: '允許一次', always: '一律允許', deny: '拒絕' },
+    buttons: {
+      once: '允許一次',
+      always: '一律允許（此週期排程）',
+      deny: '拒絕',
+    },
     decisions: {
       once: '✅ 已允許一次',
       always: '✅ 已設為一律允許',
       deny: '❌ 已拒絕',
     },
+    alwaysAsOnce: '✅ 已允許一次（此請求的「一律允許」視為「允許一次」）',
     unavailable: '這項審核已無法處理。',
-    reply: '請直接回覆這則訊息，輸入「允許一次」、「一律允許」或「拒絕」。',
+    replyRecurring:
+      '請直接回覆「允許一次」、「一律允許」（僅限此週期排程）或「拒絕」。',
     replyOnce: '請直接回覆這則訊息，輸入「允許一次」或「拒絕」。',
     title: '需要你同意',
     create: { message: '排程提醒', agent: '排程代理任務' },
@@ -117,11 +130,15 @@ export function approvalMessages(locale: Config['locale']) {
 export function approvalDecisionText(
   locale: Config['locale'],
   decision: ApprovalDecision | undefined,
+  alwaysAsOnce?: boolean,
 ) {
   const messages = approvalMessages(locale);
   if (!decision) return { notice: messages.unavailable };
   const notice = messages.decisions[decision];
-  return { notice, decisionText: notice };
+  return {
+    notice,
+    decisionText: alwaysAsOnce ? messages.alwaysAsOnce : notice,
+  };
 }
 
 function withoutPings(text: string) {
@@ -185,7 +202,7 @@ export function approvalPrompt({
           : []),
         ...(resource.type === 'global' ? [m.globalScope] : []),
         ...(reference ? [field(m.reference, reference)] : []),
-        ...(useButtons ? [] : [m.reply]),
+        ...(useButtons ? [] : [m.replyOnce]),
       ],
       description,
     );
@@ -274,7 +291,6 @@ export function approvalPrompt({
         : m.reasons.agent,
     ),
   );
-  if (!useButtons)
-    lines.push(schedule.operation === 'update' ? m.replyOnce : m.reply);
+  if (!useButtons) lines.push(schedule.repeat ? m.replyRecurring : m.replyOnce);
   return withContent(lines, schedule.content);
 }

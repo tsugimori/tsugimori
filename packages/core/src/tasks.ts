@@ -632,8 +632,9 @@ export class Tasks {
     const request: ApprovalRequest = {
       action: 'schedule.' + schedule.operation,
       resource: {
-        type: 'project',
-        id: schedule.operation === 'create' ? schedule.scope : schedule.id,
+        type: 'schedule',
+        id: schedule.id,
+        deliveryKey: schedule.deliveryKey,
       },
     };
     if (schedule.operation === 'update')
@@ -680,8 +681,11 @@ export class Tasks {
             chatId: conversationId(schedule.address),
           }
         : chat;
-      const onceOnly = schedule?.operation === 'update';
-      if (!onceOnly) {
+      const onceOnly = !schedule?.repeat;
+      const reuseGrant = schedule
+        ? schedule.reuseGrant
+        : request.resource.type !== 'schedule';
+      if (reuseGrant) {
         const requester = input.message.userId;
         for (const approver of new Set([schedule?.approverId, owner])) {
           if (

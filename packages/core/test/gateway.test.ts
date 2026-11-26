@@ -541,7 +541,7 @@ test(
 );
 
 test(
-  'tool execution waits for owner approval and reuses scoped always grants',
+  'tool execution requires a linked decision for each single request',
   { timeout: 5_000 },
   async (t) => {
     let runCount = 0;
@@ -572,7 +572,11 @@ test(
     await until(t, () => f.platform.sent.length === 2);
     const prompt = f.platform.sent.at(-1);
     assert.match(prompt?.text ?? '', /Approval requested/);
-    assert.ok(prompt?.buttons?.[1]);
+    assert.ok(prompt?.buttons?.[0]);
+    assert.deepEqual(
+      prompt.buttons.map(({ label }) => label),
+      ['Allow once', 'Deny'],
+    );
     const content = '🔔 Sample text\n你好😀';
     assert.ok(prompt.text.endsWith('\nContent:\n' + content));
     assert.deepEqual(prompt.entities, [
@@ -595,7 +599,7 @@ test(
       type: 'callback',
       chatId: chat.chatId,
       userId: 'owner',
-      callbackId: prompt.buttons[1].id,
+      callbackId: prompt.buttons[0].id,
       messageId: prompt.messageId,
     });
     await f.gateway.idle();
@@ -608,10 +612,20 @@ test(
         userId: 'member',
       }),
     );
+    await until(t, () => f.platform.sent.length === 4);
+    const second = f.platform.sent.at(-1);
+    assert.ok(second?.buttons?.[0]);
+    await f.platform.emit(
+      inbound('second-approval', 'always', { replyTo: second.messageId }),
+    );
     await f.gateway.idle();
     assert.equal(runCount, 2);
-    assert.equal(f.platform.sent.length, 4);
+    assert.equal(f.platform.sent.length, 5);
     assert.equal(f.platform.sent.at(-1)?.text, 'Tool for member');
+    assert.deepEqual(
+      f.store.listGrants().map(({ mode }) => mode),
+      ['once', 'once'],
+    );
   },
 );
 
@@ -1007,7 +1021,7 @@ test(
     assert.equal(prompt.chatId, 'owner');
     assert.deepEqual(
       prompt.buttons?.map(({ label }) => label),
-      ['允許一次', '一律允許', '拒絕'],
+      ['允許一次', '拒絕'],
     );
     assert.equal(prompt.parseTextMentions, false);
     const lines = prompt.text.split('\n');
@@ -1066,13 +1080,20 @@ test(
     );
     assert.equal(f.store.listSchedules(chat).length, 0);
     await f.platform.emit(
-      inbound('linked-schedule-approval', '允許一次', {
+      inbound('linked-schedule-approval', '一律允許', {
         chatId: 'owner',
         replyTo: prompt.messageId,
       }),
     );
     await f.gateway.idle();
-    assert.equal(f.platform.feedback.at(-1)?.decisionText, '✅ 已允許一次');
+    assert.equal(
+      f.platform.feedback.at(-1)?.decisionText,
+      '✅ 已允許一次（此請求的「一律允許」視為「允許一次」）',
+    );
+    assert.deepEqual(
+      f.store.listGrants().map(({ mode }) => mode),
+      ['once'],
+    );
     assert.deepEqual(f.platform.feedback.at(-1)?.pre, pre);
     const schedule = f.store.listSchedules(chat)[0];
     assert.equal(schedule?.deliveryApprovedBy, 'owner');
@@ -1253,29 +1274,42 @@ test(
 );
 
 test(
-  'always allow reuses only the same reminder scope and denial leaves no schedule',
+  'recurring approval covers the same schedule and delivery within resource limits',
   { timeout: 5_000 },
   async (t) => {
-    const results: { ref: string; status: string }[] = [];
+    type ReminderInput = {
+      id?: string;
+      minutes?: number;
+      recipient?: string;
+      text?: string;
+    };
+    const results = new Map<string, { ref: string; status: string }>();
+    const inputs = new Map<string, ReminderInput>();
+    const at = Date.now() + 60_000;
     const f = await fixture(
       t,
       async function* (request) {
         const command = request.context
           .filter(({ source }) => source === 'message')
           .at(-1)?.content;
-        if (!command?.startsWith('Reminder: ')) return;
-        const create = request.tools.find(
-          ({ name }) => name === 'schedule.create',
+        if (!command) return;
+        const input = inputs.get(command);
+        if (!input) return;
+        const tool = request.tools.find(
+          ({ name }) =>
+            name === (input.id ? 'schedule.update' : 'schedule.create'),
         );
-        assert.ok(create);
-        const result = (await create.run({
+        assert.ok(tool);
+        const result = (await tool.run({
+          ...(input.id ? { id: input.id } : {}),
           action: {
             kind: 'message',
-            text: '[月光](tg://user?id=79)，' + command.slice(10),
+            text: input.text ?? '喝水',
           },
-          trigger: { kind: 'once', at: Date.now() + 60_000 },
-        })) as (typeof results)[number];
-        results.push(result);
+          mentions: [input.recipient ?? '79'],
+          trigger: { kind: 'interval', at, minutes: input.minutes ?? 30 },
+        })) as { ref: string; status: string };
+        results.set(command, result);
         yield { type: 'text.final', text: result.status };
       },
       true,
@@ -1286,50 +1320,100 @@ test(
       chatTitle: 'Development',
       mentionsBot: true,
     };
+    async function submit(
+      message: string,
+      input: ReminderInput,
+      userId = 'member',
+    ) {
+      inputs.set(message, input);
+      await f.platform.emit(inbound(message, message, { ...group, userId }));
+    }
+    const prompts = () =>
+      f.platform.sent.filter(({ buttons }) => buttons?.length);
+    async function decide(
+      prompt: ReturnType<typeof prompts>[number],
+      choice: number,
+    ) {
+      const button = prompt.buttons?.[choice];
+      assert.ok(button);
+      await f.platform.emit({
+        type: 'callback',
+        chatId: chat.chatId,
+        callbackId: button.id,
+        messageId: prompt.messageId,
+        userId: 'owner',
+      });
+    }
     await f.platform.emit(inbound('allow-reminders', '/allow', group));
-    await f.platform.emit(inbound('first-reminder', 'Reminder: 喝水', group));
+    await submit('Create reminder', {});
     await f.gateway.idle();
-    const first = f.platform.sent.find(({ buttons }) => buttons?.length);
-    assert.ok(first?.buttons?.[1]);
-    assert.equal(results[0]?.status, 'pending_approval');
+    const [first] = prompts();
+    assert.ok(first);
+    assert.deepEqual(
+      first.buttons?.map(({ label }) => label),
+      ['允許一次', '一律允許（此週期排程）', '拒絕'],
+    );
+    assert.equal(results.get('Create reminder')?.status, 'pending_approval');
     assert.equal(f.store.listSchedules(chat).length, 0);
-    await f.platform.emit({
-      type: 'callback',
-      chatId: chat.chatId,
-      callbackId: first.buttons[1].id,
-      messageId: first.messageId,
-      userId: '79',
-    });
+    await decide(first, 1);
     await until(t, () => f.store.listSchedules(chat).length === 1);
     assert.equal(f.platform.feedback[0]?.decisionText, '✅ 已設為一律允許');
+    const [schedule] = f.store.listSchedules(chat);
+    assert.ok(schedule);
+    const [grant] = f.store.listGrants();
+    assert.equal(grant?.mode, 'always');
+    assert.equal(grant.scope.type, 'schedule');
+    assert.equal(grant.scope.id, schedule.id);
 
-    await f.platform.emit(inbound('same-reminder', 'Reminder: 喝水', group));
+    await submit('Create identical reminder', {});
     await f.gateway.idle();
-    assert.equal(results[1]?.status, 'scheduled');
     assert.equal(
-      f.platform.sent.filter(({ buttons }) => buttons?.length).length,
-      1,
+      results.get('Create identical reminder')?.status,
+      'pending_approval',
     );
-    assert.equal(f.store.listSchedules(chat).length, 2);
-
-    await f.platform.emit(
-      inbound('different-reminder', 'Reminder: 開會', group),
-    );
-    await f.gateway.idle();
-    assert.equal(results[2]?.status, 'pending_approval');
-    const last = f.platform.sent
-      .filter(({ buttons }) => buttons?.length)
-      .at(-1);
-    assert.ok(last?.buttons?.[2]);
-    await f.platform.emit({
-      type: 'callback',
-      chatId: chat.chatId,
-      callbackId: last.buttons[2].id,
-      messageId: last.messageId,
-      userId: '79',
-    });
+    const duplicate = prompts()[1];
+    assert.ok(duplicate);
+    await decide(duplicate, 2);
     assert.equal(f.platform.feedback.at(-1)?.decisionText, '❌ 已拒絕');
-    assert.equal(f.store.listSchedules(chat).length, 2);
+    assert.equal(f.store.listSchedules(chat).length, 1);
+
+    await submit(
+      'Edit text and cadence',
+      { id: schedule.id, minutes: 45, text: '休息一下' },
+      'owner',
+    );
+    await until(
+      t,
+      () => prompts().length > 2 || results.has('Edit text and cadence'),
+    );
+    assert.equal(prompts().length, 2);
+    await f.gateway.idle();
+    assert.equal(results.get('Edit text and cadence')?.status, 'scheduled');
+
+    await submit('Edit recipient', { id: schedule.id, recipient: '80' });
+    await until(t, () => prompts().length === 3);
+    const changedRecipient = prompts()[2];
+    assert.ok(changedRecipient);
+    await decide(changedRecipient, 2);
+    await f.gateway.idle();
+    assert.deepEqual(f.store.getSchedule(schedule.id)?.mentions, ['79']);
+
+    await submit('Edit below the minimum interval', {
+      id: schedule.id,
+      minutes: 1,
+    });
+    await until(t, () => prompts().length === 4);
+    const highFrequency = prompts()[3];
+    assert.ok(highFrequency);
+    assert.match(highFrequency.text, /執行間隔可能短於設定的下限/);
+    await decide(highFrequency, 2);
+    await f.gateway.idle();
+    assert.deepEqual(f.store.getSchedule(schedule.id)?.trigger, {
+      kind: 'interval',
+      at,
+      minutes: 45,
+    });
+    assert.equal(f.store.listSchedules(chat).length, 1);
   },
 );
 
