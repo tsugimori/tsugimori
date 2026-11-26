@@ -488,7 +488,11 @@ summary::-webkit-details-marker {
   content: '›';
 }
 .tool[open] > summary::before {
+  content: '›';
   transform: rotate(90deg);
+}
+.tool > summary .elapsed {
+  grid-column: 5;
 }
 .tool-offset {
   font: 12px var(--mono);
@@ -827,11 +831,10 @@ body:has(.chat-shell) {
 }
 body:has(.chat-shell),
 .chat-shell {
-  height: 100dvh;
-}
-.chat-shell {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   grid-template-rows: 48px minmax(0, 1fr);
+  height: 100dvh;
 }
 .chat-shell .top .wrap {
   max-width: none;
@@ -1112,9 +1115,13 @@ body:has(.chat-shell),
     display: none;
   }
   .chat-shell nav {
+    flex: 0 1 auto;
+    min-width: 0;
     margin-left: auto;
     gap: 12px;
     font-size: 13px;
+    overflow-x: auto;
+    scrollbar-width: none;
   }
   .chat-shell .connection {
     flex: none;
