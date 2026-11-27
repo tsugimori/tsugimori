@@ -1790,7 +1790,8 @@ test('/help lists commands for the sender and validates each tap', async (t) => 
   const ownerMenu = platform.sent.at(-1)!;
   assert.match(ownerMenu.text, /^可用指令\n/);
   assert.match(ownerMenu.text, /^\/deny · 將這個對話移出允許清單$/m);
-  assert.doesNotMatch(ownerMenu.text, /^\/(pair|sticker) ·/m);
+  assert.doesNotMatch(ownerMenu.text, /^\/pair ·/m);
+  assert.match(ownerMenu.text, /^\/sticker · /m);
   await platform.emit(inbound('dm-help', '/help'));
   const dmMenu = platform.sent.at(-1)!;
   assert.match(dmMenu.text, /^\/pair · /m);
@@ -7996,7 +7997,10 @@ test(
     await f.platform.emit(
       inbound('list-group', '/sticker', { chatKind: 'group' }),
     );
-    assert.doesNotMatch(f.platform.sent.at(-1)!.text, /surprise_set/);
+    assert.match(
+      f.platform.sent.at(-1)!.text,
+      /surprise_set · 2 stickers · blocked/,
+    );
     await f.platform.emit(inbound('list-dm', '/sticker'));
     assert.match(
       f.platform.sent.at(-1)!.text,

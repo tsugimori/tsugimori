@@ -2327,18 +2327,12 @@ export class Gateway {
       this.#auth.isOwner({ adapterId: adapter.id, userId: message.userId });
     switch (name) {
       case 'sticker':
-        await send(
-          this.#stickers.command(args, locale, message.chatKind === 'dm'),
-        );
+        await send(this.#stickers.command(args, locale));
         break;
       case 'help': {
         const commands = chatCommands(locale)[
           owner ? 'owner' : 'member'
-        ].filter(
-          ({ name }) =>
-            message.chatKind === 'dm' ||
-            (name !== 'pair' && name !== 'sticker'),
-        );
+        ].filter(({ name }) => message.chatKind === 'dm' || name !== 'pair');
         const descriptions = new Map(
           commands.map(({ name, description }) => [`/${name}`, description]),
         );

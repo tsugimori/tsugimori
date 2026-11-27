@@ -236,14 +236,10 @@ export class StickerIndex {
     if (active.done) await Promise.allSettled([active.done]);
   }
 
-  command(args: string, locale: 'en' | 'zh-TW', direct: boolean) {
+  command(args: string, locale: 'en' | 'zh-TW') {
     const zh = locale === 'zh-TW';
     const { store } = this.#deps;
     if (!args) {
-      if (!direct)
-        return zh
-          ? '請在私訊中查看貼圖集。'
-          : 'List sticker sets in a direct message.';
       const sets = store.listStickerSets();
       const cached = store.countStickerDescriptions();
       const lines = sets.map(({ name, count, blocked }) =>
