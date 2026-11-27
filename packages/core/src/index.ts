@@ -151,7 +151,7 @@ function webhookStatusLine(status: WebhookStatus, locale: Config['locale']) {
     .join(' · ');
 }
 
-const choicesPerPage = 80;
+const defaultChoicesPerPage = 80;
 
 export class Gateway {
   readonly #deps;
@@ -2005,7 +2005,8 @@ export class Gateway {
         else await this.#outbound.send(adapter, reply(message, text));
         return;
       }
-      if (!supportsChoices(adapter)) {
+      const limit = adapter.capabilities.maxInlineButtons ?? Infinity;
+      if (!supportsChoices(adapter) || (limit < 3 && choices.length > limit)) {
         await this.#outbound.send(
           adapter,
           reply(
@@ -2024,6 +2025,10 @@ export class Gateway {
         return;
       }
       if (finish) await finish(selectedCommand);
+      const choicesPerPage =
+        choices.length <= Math.min(defaultChoicesPerPage, limit)
+          ? choices.length
+          : Math.min(defaultChoicesPerPage, limit - 2);
       const pages = Math.ceil(choices.length / choicesPerPage);
       const showPage = async (index: number) => {
         if (this.#isStopping()) return;

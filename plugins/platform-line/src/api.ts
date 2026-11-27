@@ -50,6 +50,17 @@ export class LineApiError extends Error {
 }
 
 export interface LineText {
+  quickReply?: {
+    items: {
+      action: {
+        data: string;
+        displayText: string;
+        label: string;
+        type: 'postback';
+      };
+      type: 'action';
+    }[];
+  };
   quoteToken?: string;
   text: string;
   type: 'text';

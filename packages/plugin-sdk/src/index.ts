@@ -113,6 +113,8 @@ export interface PlatformCapabilities {
     queued?: boolean;
   };
   inlineButtons?: boolean;
+  /** Maximum number of buttons in a single outbound prompt. */
+  maxInlineButtons?: number;
   /** Defaults to `free`. `metered` uses quota for sends outside a current inbound reply. `none` supports only replies to a current inbound. */
   outboundPush?: 'free' | 'metered' | 'none';
   /** Accept owner replies to the bot even in chats outside the allowlist. */

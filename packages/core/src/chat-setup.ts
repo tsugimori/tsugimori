@@ -363,7 +363,11 @@ export class ChatSetup {
                 await show(m.stepMessage(progress, m.sendingPrivately));
               signal.throwIfAborted();
               const current = platform();
-              const inline = options.length > 0 && supportsChoices(current);
+              const inline =
+                options.length > 0 &&
+                options.length <=
+                  (current.capabilities.maxInlineButtons ?? Infinity) &&
+                supportsChoices(current);
               const prompt = {
                 ...address,
                 text: secret

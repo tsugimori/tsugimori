@@ -1,6 +1,7 @@
 import type {
   AdapterContext,
   InboundMessage,
+  PlatformInboundEvent,
   PluginInstanceConfig,
   SetupContext,
   WebhookIngress,
@@ -165,6 +166,20 @@ function message(
   };
 }
 
+function postback(
+  id: string,
+  data: string,
+  source: object = { type: 'group', groupId, userId },
+) {
+  return {
+    type: 'postback',
+    webhookEventId: 'event-' + id,
+    replyToken: 'token-' + id,
+    source,
+    postback: { data },
+  };
+}
+
 async function waitFor(predicate: () => boolean) {
   const deadline = Date.now() + 3000;
   while (!predicate()) {
@@ -212,13 +227,17 @@ async function fixture(
   );
   t.after(() => adapter.stop());
   const events: InboundMessage[] = [];
+  const callbacks: Extract<PlatformInboundEvent, { type: 'callback' }>[] = [];
   const warnings: string[] = [];
   const debug: string[] = [];
   const info: Parameters<NonNullable<AdapterContext['logInfo']>>[] = [];
   await adapter.start({
     async emit(event) {
-      assert.equal(event.type, 'message');
-      events.push(event);
+      if (event.type === 'callback') callbacks.push(event);
+      else {
+        assert.equal(event.type, 'message');
+        events.push(event);
+      }
       await options.emit?.(event);
     },
     logDebug: (event) => debug.push(event),
@@ -257,6 +276,7 @@ async function fixture(
     api,
     base,
     debug,
+    callbacks,
     info,
     events,
     mediaDirectory,
@@ -408,6 +428,166 @@ test('redeliveries dedupe and group, room, DM, media, mentions and profiles map 
     f.api.calls.some(
       ({ path }) => path === `/v2/bot/room/${roomId}/member/${userId}`,
     ),
+  );
+});
+
+test('quick replies attach to the last text part and preserve LINE label and data limits', async (t) => {
+  const f = await fixture(t);
+  const label = '✅'.repeat(18) + '👋🏽 extra';
+  const longLabel = 'a'.repeat(299) + '👋';
+  const longId = 'x'.repeat(271);
+  const buttons = [
+    { id: 'approval:once:example', label: 'Approve' },
+    { id: 'choice:emoji', label },
+    { id: longId, label: longLabel },
+    ...Array.from({ length: 10 }, (_, i) => ({
+      id: String(i),
+      label: `Option ${i}`,
+    })),
+  ];
+  const text = 'x'.repeat(5000) + 'tail';
+  const receipt = await f.adapter.send({ chatId: groupId, text, buttons });
+  const messages = f.api.calls.at(-1)?.body?.messages;
+  assert.equal(messages?.length, 2);
+  assert.deepEqual(messages?.[0], { type: 'text', text: text.slice(0, 5000) });
+  const last = messages?.[1];
+  assert.equal(last?.type, 'text');
+  assert.equal(last.text, 'tail');
+  const items = last.quickReply?.items;
+  assert.equal(items?.length, 13);
+  const [approve, emoji, long] = items;
+  assert.match(
+    approve!.action.data,
+    /^tsm:[a-f0-9]{24}:approval:once:example$/,
+  );
+  assert.deepEqual(approve, {
+    type: 'action',
+    action: {
+      type: 'postback',
+      data: approve!.action.data,
+      label: 'Approve',
+      displayText: 'Approve',
+    },
+  });
+  assert.equal(emoji!.action.label, '✅'.repeat(18) + '…');
+  assert.equal(emoji!.action.displayText, label);
+  assert.equal(long!.action.data.length, 300);
+  assert.ok(long!.action.data.endsWith(longId));
+  assert.equal(long!.action.label, 'a'.repeat(19) + '…');
+  assert.equal(long!.action.displayText, 'a'.repeat(299) + '…');
+  assert.equal(receipt.messageId, '2');
+  assert.deepEqual(
+    receipt.parts?.map(({ messageId }) => messageId),
+    ['1', '2'],
+  );
+
+  const callCount = f.api.calls.length;
+  await assert.rejects(
+    f.adapter.send({
+      chatId: groupId,
+      text,
+      buttons: [...buttons, buttons[0]!],
+    }),
+    (error: unknown) =>
+      error instanceof SendFailure &&
+      error.cause instanceof Error &&
+      error.cause.message === 'LINE supports up to 13 quick replies',
+  );
+  await assert.rejects(
+    f.adapter.send({
+      chatId: groupId,
+      text,
+      buttons: [{ id: longId + 'x', label }],
+    }),
+    (error: unknown) =>
+      error instanceof SendFailure &&
+      error.cause instanceof Error &&
+      error.cause.message === 'Invalid LINE postback data length',
+  );
+  assert.equal(f.api.calls.length, callCount);
+});
+
+test('only issued LINE postbacks from the prompt chat map to callback events across restarts', async (t) => {
+  const first = await fixture(t);
+  const { messageId } = await first.adapter.send({
+    chatId: groupId,
+    text: 'Choose',
+    buttons: [{ id: 'choice:one', label: 'One' }],
+  });
+  const payload = first.api.calls.at(-1)?.body?.messages?.[0];
+  assert.equal(payload?.type, 'text');
+  const data = payload.quickReply?.items[0]?.action.data;
+  assert.ok(data);
+  await first.adapter.stop();
+  const f = await fixture(t, fakeApi(), {
+    mediaDirectory: first.mediaDirectory,
+  });
+  const allowed = postback('allowed', data);
+  await f.post([
+    postback('foreign', 'action=external'),
+    postback('unsent', data.replace(/[a-f0-9]{24}/, 'f'.repeat(24))),
+    postback('altered', data.replace('one', 'two')),
+    postback('wrong-chat', data, { type: 'room', roomId, userId }),
+    { ...postback('standby', data), mode: 'standby' },
+    postback('anonymous', data, { type: 'group', groupId }),
+    allowed,
+    allowed,
+  ]);
+  await waitFor(() => f.callbacks.length > 0);
+  assert.deepEqual(f.callbacks, [
+    {
+      type: 'callback',
+      chatId: groupId,
+      callbackId: 'choice:one',
+      messageId,
+      queryId: 'event-allowed',
+      userId,
+      userDisplay: 'Test User',
+    },
+  ]);
+  assert.equal(
+    f.debug.filter((name) => name === 'line.postback_ignored').length,
+    4,
+  );
+  assert.equal(f.events.length, 0);
+});
+
+test('LINE approval feedback falls back to push for a rejected postback reply token', async (t) => {
+  const f = await fixture(
+    t,
+    fakeApi(({ path }) =>
+      path.endsWith('/reply')
+        ? Response.json({ message: 'Invalid reply token' }, { status: 400 })
+        : undefined,
+    ),
+  );
+  const { messageId } = await f.adapter.send({
+    chatId: groupId,
+    text: 'Choose',
+    buttons: [{ id: 'approval:deny:example', label: 'Deny' }],
+  });
+  const payload = f.api.calls.at(-1)?.body?.messages?.[0];
+  assert.equal(payload?.type, 'text');
+  const data = payload.quickReply?.items[0]?.action.data;
+  assert.ok(data);
+  await f.post([postback('decline', data)]);
+  await waitFor(() => f.callbacks.length > 0);
+  await f.adapter.respondToApproval({
+    chatId: groupId,
+    messageId,
+    queryId: f.callbacks[0]?.queryId,
+    decision: 'deny',
+    decisionText: '❌ Denied',
+    notice: '❌ Denied',
+    prompt: 'Choose',
+  });
+  const messages = [{ type: 'text', text: '❌ Denied' }];
+  assert.deepEqual(
+    f.api.calls.slice(-2).map(({ body }) => body),
+    [
+      { messages, replyToken: 'token-decline' },
+      { messages, to: groupId },
+    ],
   );
 });
 

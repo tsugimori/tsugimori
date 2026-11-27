@@ -1,13 +1,14 @@
 import type {
   AdapterContext,
+  ApprovalFeedback,
   AttachmentContent,
-  InboundMessage,
   MediaDestination,
   MediaUpload,
   OutboundMessage,
   PlatformAdapter,
   PlatformCapabilities,
   PlatformFactory,
+  PlatformInboundEvent,
   QueuedMedia,
   SendPart,
   WebhookIngress,
@@ -24,12 +25,20 @@ import {
 } from '@tsugimori/plugin-sdk';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
+import { setImmediate as nextTurn } from 'node:timers/promises';
 
 import type { LineMessage } from './api.ts';
+import type { LinePostback } from './updates.ts';
 
 import { LineApi, LineApiError, nonempty, record } from './api.ts';
 import { messageParts } from './message-text.ts';
 import { LineMediaHost } from './outbound-media.ts';
+import {
+  LinePostbacks,
+  maxQuickReplies,
+  parsePostback,
+  quickReplies,
+} from './postbacks.ts';
 import {
   defaultReplyTokenTtlMs,
   lineChecks,
@@ -42,7 +51,7 @@ import {
   validToken,
 } from './setup.ts';
 import { lineStickers, searchLineStickers } from './stickers.ts';
-import { mapEvent } from './updates.ts';
+import { mapEvent, mapPostback } from './updates.ts';
 import { webhook, webhookPath } from './webhook.ts';
 
 const uploadLimits = {
@@ -63,6 +72,12 @@ type PendingMedia =
 
 const messagesPerRequest = 5;
 const profileTtlMs = 5 * 60_000;
+
+interface ReplyToken {
+  messageId: string;
+  receivedAt: number;
+  token: string;
+}
 
 class Lru<Value> {
   readonly #entries = new Map<string, Value>();
@@ -127,7 +142,8 @@ export class LineAdapter implements PlatformAdapter {
     ...uploadLimits,
     stickers: true,
     deleteEvents: false,
-    inlineButtons: false,
+    inlineButtons: true,
+    maxInlineButtons: maxQuickReplies,
     outboundPush: 'metered' as const,
     poll: false,
     richText: false,
@@ -143,11 +159,11 @@ export class LineAdapter implements PlatformAdapter {
   readonly #seen = new Lru<true>(4096);
   readonly #sent = new Lru<true>(4096);
   readonly #quotes = new Lru<string>(4096);
-  readonly #replies = new Lru<{
-    messageId: string;
-    receivedAt: number;
-    token: string;
-  }>(4096);
+  readonly #replies = new Lru<ReplyToken>(4096);
+  readonly #postbackReplies = new Lru<ReplyToken & { chatId: string }>(4096);
+  readonly #choiceReplies = new Lru<ReplyToken>(4096);
+  readonly #postbacks: LinePostbacks;
+  readonly #sendingPrompts = new Map<string, Promise<void>>();
   readonly #profiles = new Lru<{
     expires: number;
     result: Promise<string | undefined>;
@@ -172,6 +188,10 @@ export class LineAdapter implements PlatformAdapter {
       now,
       ttlMs: options.mediaTtlMs,
     });
+    this.#postbacks = new LinePostbacks(
+      join(options.mediaDirectory, 'postbacks.json'),
+      now,
+    );
     this.id = id;
   }
 
@@ -268,6 +288,7 @@ export class LineAdapter implements PlatformAdapter {
     }
     signal.throwIfAborted();
     await this.#mediaHost.start((event, error) => ctx.logError?.(event, error));
+    await this.#postbacks.start();
     signal.throwIfAborted();
     try {
       const path = webhookPath(this.id);
@@ -314,11 +335,14 @@ export class LineAdapter implements PlatformAdapter {
       await release?.();
     } finally {
       await this.#mediaHost.stop();
+      await this.#postbacks.flush();
       this.#botIdentity = undefined;
       this.#seen.clear();
       this.#sent.clear();
       this.#quotes.clear();
       this.#replies.clear();
+      this.#postbackReplies.clear();
+      this.#choiceReplies.clear();
       this.#profiles.clear();
       this.#listener = undefined;
     }
@@ -332,6 +356,16 @@ export class LineAdapter implements PlatformAdapter {
       const id = nonempty(event?.webhookEventId);
       if (!event || !id || this.#seen.get(id)) continue;
       this.#seen.set(id, true);
+      if (event.type === 'postback') {
+        const postback = mapPostback(event, ctx);
+        if (postback)
+          void this.#receivePostback(postback, receivedAt, ctx, signal).catch(
+            () => {
+              if (!signal.aborted) ctx.logError?.('line.event_emit_failed');
+            },
+          );
+        continue;
+      }
       const mapped = mapEvent(event, ctx);
       if (!mapped) continue;
       const { inbound, profilePath, quoteToken, replyToken } = mapped;
@@ -351,9 +385,47 @@ export class LineAdapter implements PlatformAdapter {
     }
   }
 
+  async #receivePostback(
+    { data, inbound, profilePath, replyToken }: LinePostback,
+    receivedAt: number,
+    ctx: AdapterContext,
+    signal: AbortSignal,
+  ) {
+    const postback = parsePostback(data);
+    const { chatId, queryId } = inbound;
+    if (postback) {
+      const sending = this.#sendingPrompts.get(postback.key);
+      if (sending) {
+        await sending;
+        // Let core link the prompt receipt before delivering an early tap.
+        await nextTurn();
+      }
+      if (signal.aborted) return;
+      const { callbackId, key } = postback;
+      const messageId = this.#postbacks.messageId(key, chatId, callbackId);
+      if (messageId) {
+        if (replyToken)
+          this.#postbackReplies.set(queryId, {
+            chatId,
+            messageId,
+            receivedAt,
+            token: replyToken,
+          });
+        await this.#emit(
+          ctx,
+          { ...inbound, callbackId, messageId },
+          profilePath,
+          signal,
+        );
+        return;
+      }
+    }
+    ctx.logDebug?.('line.postback_ignored');
+  }
+
   async #emit(
     ctx: AdapterContext,
-    inbound: InboundMessage,
+    inbound: Extract<PlatformInboundEvent, { type: 'callback' | 'message' }>,
     profilePath: string,
     signal: AbortSignal,
   ) {
@@ -543,6 +615,7 @@ export class LineAdapter implements PlatformAdapter {
     options?: Parameters<PlatformAdapter['send']>[1],
   ) {
     const parts: SendPart[] = [];
+    let finishPrompt: (() => void) | undefined;
     try {
       const listener = this.#listener;
       if (!listener || !this.#botIdentity)
@@ -552,8 +625,13 @@ export class LineAdapter implements PlatformAdapter {
         : listener.signal;
       const { chatId, replyTo, threadId } = message;
       const media = options?.media ?? [];
+      const prompt = message.buttons?.length
+        ? quickReplies(message.buttons)
+        : undefined;
       const chunks =
-        media.length && !message.text.trim() ? [] : messageParts(message);
+        !prompt && media.length && !message.text.trim()
+          ? []
+          : messageParts(message);
       const quoteToken =
         replyTo === undefined
           ? undefined
@@ -567,9 +645,14 @@ export class LineAdapter implements PlatformAdapter {
           type: 'text',
           text,
           ...(index === 0 && quoteToken ? { quoteToken } : {}),
+          ...(prompt && index === chunks.length - 1
+            ? { quickReply: prompt.quickReply }
+            : {}),
         },
         text,
       }));
+      // LINE displays the quick replies of the last object in a send.
+      const promptItem = prompt ? items.pop() : undefined;
       for (const handle of media) {
         const queued = this.#queued.get(handle);
         if (
@@ -596,6 +679,8 @@ export class LineAdapter implements PlatformAdapter {
           text: `[${type}]`,
         });
       }
+      if (promptItem) items.push(promptItem);
+      let promptMessageId: string | undefined;
       for (let i = 0; i < items.length; i += messagesPerRequest) {
         signal.throwIfAborted();
         const batch = items.slice(i, i + messagesPerRequest);
@@ -649,6 +734,14 @@ export class LineAdapter implements PlatformAdapter {
           signal.throwIfAborted();
           const token =
             i === 0 ? this.#takeReplyToken(chatId, replyTo) : undefined;
+          if (prompt && batch.at(-1) === promptItem) {
+            const sending = Promise.withResolvers<void>();
+            this.#sendingPrompts.set(prompt.key, sending.promise);
+            finishPrompt = () => {
+              this.#sendingPrompts.delete(prompt.key);
+              sending.resolve();
+            };
+          }
           const ids = await this.#sendBatch(
             messages,
             chatId,
@@ -658,8 +751,18 @@ export class LineAdapter implements PlatformAdapter {
           for (const [index, messageId] of ids.entries()) {
             if (!signal.aborted)
               this.#sent.set(messageKey(chatId, messageId), true);
-            const { mediaId, text } = batch[index]!;
+            const item = batch[index]!;
+            const { mediaId, text } = item;
             parts.push({ messageId, text, ...(mediaId && { mediaId }) });
+            if (prompt && item === promptItem) {
+              promptMessageId = messageId;
+              if (!signal.aborted)
+                await this.#postbacks
+                  .remember(prompt.key, chatId, messageId, prompt.ids)
+                  .catch((error: unknown) =>
+                    listener.logError?.('line.postback_save_failed', error),
+                  );
+            }
           }
         } catch (error) {
           if (!(error instanceof LineApiError) || !error.deliveryUnknown) {
@@ -673,7 +776,9 @@ export class LineAdapter implements PlatformAdapter {
         }
       }
       return {
-        messageId: (message.approval ? parts.at(-1) : parts[0])!.messageId,
+        messageId:
+          promptMessageId ??
+          (message.approval ? parts.at(-1) : parts[0])!.messageId,
         parts,
       };
     } catch (error) {
@@ -687,6 +792,8 @@ export class LineAdapter implements PlatformAdapter {
         },
         error,
       );
+    } finally {
+      finishPrompt?.();
     }
   }
 
@@ -694,11 +801,60 @@ export class LineAdapter implements PlatformAdapter {
     const reply = this.#replies.get(chatId);
     if (!reply || replyTo !== reply.messageId) return;
     this.#replies.delete(chatId);
+    return this.#usableToken(reply);
+  }
+
+  #usableToken(reply?: ReplyToken) {
     if (
+      reply &&
       this.#now() - reply.receivedAt <
-      (this.#options.replyTokenTtlMs ?? defaultReplyTokenTtlMs)
+        (this.#options.replyTokenTtlMs ?? defaultReplyTokenTtlMs)
     )
       return reply.token;
+  }
+
+  async respondToApproval({
+    chatId,
+    decisionText,
+    messageId,
+    notice,
+    queryId,
+  }: ApprovalFeedback) {
+    const key = messageKey(chatId, messageId);
+    let reply: ReplyToken | undefined;
+    if (queryId) {
+      const callback = this.#postbackReplies.get(queryId);
+      if (callback?.chatId === chatId && callback.messageId === messageId) {
+        reply = callback;
+        this.#postbackReplies.delete(queryId);
+      }
+      // Core acknowledges a valid chat choice before sending its result.
+      if (!notice && !decisionText) {
+        if (reply) this.#choiceReplies.set(key, reply);
+        return;
+      }
+    } else {
+      reply = this.#choiceReplies.get(key);
+      this.#choiceReplies.delete(key);
+    }
+
+    const text = decisionText || notice;
+    if (!text?.trim()) return;
+    const listener = this.#listener;
+    if (!listener || !this.#botIdentity)
+      throw new Error('LINE adapter is detached');
+    const signal = AbortSignal.any([
+      listener.signal,
+      AbortSignal.timeout(8000),
+    ]);
+    const token = this.#usableToken(reply);
+    const chunks = messageParts({ chatId, text });
+    for (let i = 0; i < chunks.length; i += messagesPerRequest) {
+      const batch = chunks
+        .slice(i, i + messagesPerRequest)
+        .map((text): LineMessage => ({ type: 'text', text }));
+      await this.#sendBatch(batch, chatId, i === 0 ? token : undefined, signal);
+    }
   }
 
   async #sendBatch(
