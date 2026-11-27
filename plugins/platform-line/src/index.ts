@@ -23,6 +23,7 @@ import {
   ToolFailure,
 } from '@tsugimori/plugin-sdk';
 import { randomUUID } from 'node:crypto';
+import { join } from 'node:path';
 
 import type { LineMessage } from './api.ts';
 
@@ -95,6 +96,9 @@ class Lru<Value> {
 
 interface LineOptions {
   ingress: WebhookIngress;
+  mediaDirectory: string;
+  mediaMaxBytes?: number;
+  mediaTtlMs?: number;
   replyTokenTtlMs?: number;
   secret: string;
   token: string;
@@ -102,6 +106,7 @@ interface LineOptions {
 
 interface Listener {
   controller: AbortController;
+  logError?: AdapterContext['logError'];
   signal: AbortSignal;
   start: Promise<() => Promise<void>>;
   stop?: Promise<void>;
@@ -157,7 +162,12 @@ export class LineAdapter implements PlatformAdapter {
     this.#api = new LineApi(fetch, options.token);
     this.#options = options;
     this.#now = now;
-    this.#mediaHost = new LineMediaHost(now);
+    this.#mediaHost = new LineMediaHost({
+      directory: options.mediaDirectory,
+      maxBytes: options.mediaMaxBytes,
+      now,
+      ttlMs: options.mediaTtlMs,
+    });
     this.id = id;
   }
 
@@ -182,12 +192,15 @@ export class LineAdapter implements PlatformAdapter {
     const route = (request: IncomingMessage, response: ServerResponse) => {
       const target = request.url?.split('?', 1)[0];
       if (!signal.aborted && target?.startsWith(mediaPath)) {
-        this.#mediaHost.serve(
-          target.slice(mediaPath.length),
-          request,
-          response,
-          () => ctx.logInfo?.('line.media_served'),
-        );
+        void this.#mediaHost
+          .serve(target.slice(mediaPath.length), request, response, ctx)
+          .catch((error: NodeJS.ErrnoException) => {
+            if (error.code === 'ERR_STREAM_PREMATURE_CLOSE') return;
+            ctx.logError?.('line.media_serve_failed');
+            if (response.destroyed) return;
+            if (!response.headersSent) response.writeHead(500).end();
+            else response.destroy();
+          });
         return;
       }
       if (
@@ -215,8 +228,9 @@ export class LineAdapter implements PlatformAdapter {
     };
     this.#listener = {
       controller,
+      logError: (event, error) => ctx.logError?.(event, error),
       signal,
-      start: this.#start(route, signal),
+      start: this.#start(route, signal, ctx),
     };
     try {
       await this.#listener.start;
@@ -227,7 +241,7 @@ export class LineAdapter implements PlatformAdapter {
     }
   }
 
-  async #start(route: WebhookRoute, signal: AbortSignal) {
+  async #start(route: WebhookRoute, signal: AbortSignal, ctx: AdapterContext) {
     signal.throwIfAborted();
     try {
       this.#botIdentity = await this.#api.identity(
@@ -247,6 +261,8 @@ export class LineAdapter implements PlatformAdapter {
       }
       throw error;
     }
+    signal.throwIfAborted();
+    await this.#mediaHost.start((event, error) => ctx.logError?.(event, error));
     signal.throwIfAborted();
     try {
       const path = webhookPath(this.id);
@@ -292,7 +308,7 @@ export class LineAdapter implements PlatformAdapter {
       const release = await listener.start.catch(() => undefined); // start() reports its failure.
       await release?.();
     } finally {
-      this.#mediaHost.clear();
+      await this.#mediaHost.stop();
       this.#botIdentity = undefined;
       this.#seen.clear();
       this.#sent.clear();
@@ -528,33 +544,42 @@ export class LineAdapter implements PlatformAdapter {
       }
       for (let i = 0; i < items.length; i += messagesPerRequest) {
         signal.throwIfAborted();
-        const requestSignal = AbortSignal.any([
-          signal,
-          AbortSignal.timeout(8000),
-        ]);
         const batch = items.slice(i, i + messagesPerRequest);
-        const releases: (() => void)[] = [];
+        const releases: (() => Promise<void>)[] = [];
         try {
-          const payload = batch.map(({ payload }): LineMessage => {
-            if (!('original' in payload)) return payload;
+          const messages: LineMessage[] = [];
+          for (const { payload } of batch) {
+            if (!('original' in payload)) {
+              messages.push(payload);
+              continue;
+            }
+            signal.throwIfAborted();
             const base = this.#mediaBase();
-            const original = this.#mediaHost.publish(base, payload.original);
+            const original = await this.#mediaHost.publish(
+              base,
+              payload.original,
+            );
             releases.push(original.release);
-            const preview = this.#mediaHost.publish(base, payload.preview);
+            signal.throwIfAborted();
+            const preview = await this.#mediaHost.publish(
+              base,
+              payload.preview,
+            );
             releases.push(preview.release);
-            return {
+            messages.push({
               type: payload.type,
               originalContentUrl: original.url,
               previewImageUrl: preview.url,
-            };
-          });
+            });
+          }
+          signal.throwIfAborted();
           const token =
             i === 0 ? this.#takeReplyToken(chatId, replyTo) : undefined;
           const ids = await this.#sendBatch(
-            payload,
+            messages,
             chatId,
             token,
-            requestSignal,
+            AbortSignal.any([signal, AbortSignal.timeout(8000)]),
           );
           for (const [index, messageId] of ids.entries()) {
             if (!signal.aborted)
@@ -563,8 +588,13 @@ export class LineAdapter implements PlatformAdapter {
             parts.push({ messageId, text, ...(mediaId && { mediaId }) });
           }
         } catch (error) {
-          if (!(error instanceof LineApiError) || !error.deliveryUnknown)
-            for (const release of releases) release();
+          if (!(error instanceof LineApiError) || !error.deliveryUnknown) {
+            for (const release of releases) {
+              await release().catch((cleanupError: unknown) =>
+                listener.logError?.('line.media_cleanup_failed', cleanupError),
+              );
+            }
+          }
           throw error;
         }
       }
@@ -645,6 +675,12 @@ const line: PlatformFactory = (config, ctx) => {
     secret,
     token,
     ingress: ctx.webhookIngress,
+    mediaDirectory: join(
+      ctx.workspace,
+      'data',
+      'platform-line',
+      `adapter-${encodeURIComponent(config.id)}`,
+    ),
     replyTokenTtlMs: config.replyTokenTtlMs as number | undefined,
   });
 };

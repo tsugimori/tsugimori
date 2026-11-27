@@ -16,7 +16,10 @@ import {
 } from '@tsugimori/plugin-sdk';
 import assert from 'node:assert/strict';
 import { createHmac } from 'node:crypto';
-import { createServer, type Server } from 'node:http';
+import { mkdtemp, readdir, rm } from 'node:fs/promises';
+import { createServer, get, type Server } from 'node:http';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 
@@ -87,6 +90,12 @@ function listen(server: Server, address: { host: string; port: number }) {
       resolve();
     });
   });
+}
+
+async function tempDirectory(t: TestContext) {
+  const directory = await mkdtemp(join(tmpdir(), 'tsugimori-line-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  return directory;
 }
 
 async function closeServer(server: Server) {
@@ -172,6 +181,10 @@ async function fixture(
   api = fakeApi(),
   options: {
     emit?: AdapterContext['emit'];
+    mediaDirectory?: string;
+    mediaMaxBytes?: number;
+    mediaTtlMs?: number;
+    now?: number;
     publicMedia?: boolean;
     replyTokenTtlMs?: number;
   } = {},
@@ -182,12 +195,16 @@ async function fixture(
       register: ingress.register,
     });
   }
-  let now = 1000;
+  let now = options.now ?? 1000;
+  const mediaDirectory = options.mediaDirectory ?? (await tempDirectory(t));
   const adapter = new LineAdapter(
     { fetch: api.fetch, now: () => now },
     'main',
     {
       ingress,
+      mediaDirectory,
+      mediaMaxBytes: options.mediaMaxBytes,
+      mediaTtlMs: options.mediaTtlMs,
       secret,
       token,
       replyTokenTtlMs: options.replyTokenTtlMs,
@@ -197,7 +214,7 @@ async function fixture(
   const events: InboundMessage[] = [];
   const warnings: string[] = [];
   const debug: string[] = [];
-  const info: string[] = [];
+  const info: Parameters<NonNullable<AdapterContext['logInfo']>>[] = [];
   await adapter.start({
     async emit(event) {
       assert.equal(event.type, 'message');
@@ -205,7 +222,7 @@ async function fixture(
       await options.emit?.(event);
     },
     logDebug: (event) => debug.push(event),
-    logInfo: (event) => info.push(event),
+    logInfo: (...event) => info.push(event),
     logWarning: (event) => warnings.push(event),
   });
   const base = `http://127.0.0.1:${port}`;
@@ -242,6 +259,7 @@ async function fixture(
     debug,
     info,
     events,
+    mediaDirectory,
     post,
     warnings,
     advance(ms: number) {
@@ -627,11 +645,13 @@ test('LINE instances share a listener and keep routes, credentials, and event st
     secret,
     token,
     ingress,
+    mediaDirectory: await tempDirectory(t),
   });
   const other = new LineAdapter(otherApi, 'other:bot', {
     secret: otherSecret,
     token: otherToken,
     ingress,
+    mediaDirectory: await tempDirectory(t),
   });
   t.after(async () => {
     await Promise.all([first.stop(), other.stop()]);
@@ -694,7 +714,12 @@ test('LINE reports ingress bind failures and honors startup cancellation', async
   const { ingress } = await fakeIngress(t);
   const api = fakeApi();
   const ctx: AdapterContext = { async emit() {} };
-  const options = { secret, token, ingress };
+  const options = {
+    secret,
+    token,
+    ingress,
+    mediaDirectory: await tempDirectory(t),
+  };
   const busy = new LineAdapter(api, 'busy', {
     ...options,
     ingress: {
@@ -1041,7 +1066,7 @@ test('LINE queues validated stickers, replies with final text and pushes overflo
   );
 });
 
-test('LINE media-only delivery serves one HTTPS fetch per asset and expires unused links', async (t) => {
+test('LINE media-only delivery serves repeated and concurrent GETs and HEAD', async (t) => {
   const f = await fixture(t, fakeApi(), { publicMedia: true });
   await f.post([message('72')]);
   await f.waitFor(1);
@@ -1092,25 +1117,212 @@ test('LINE media-only delivery serves one HTTPS fetch per asset and expires unus
   assert.notEqual(sent.previewImageUrl, sent.originalContentUrl);
   const path = new URL(sent.originalContentUrl).pathname;
   const previewPath = new URL(sent.previewImageUrl).pathname;
-  const fetchLocal = (pathname: string) => fetch(f.base + pathname);
-  const concurrent = await Promise.all([fetchLocal(path), fetchLocal(path)]);
-  assert.deepEqual(concurrent.map(({ status }) => status).sort(), [200, 404]);
-  const success = concurrent.find(({ ok }) => ok)!;
-  assert.equal(success.headers.get('content-type'), 'image/png');
-  assert.equal(success.headers.get('cache-control'), 'private, no-store');
-  assert.deepEqual(Buffer.from(await success.arrayBuffer()), tinyPng);
+  const fetchLocal = (pathname: string, method = 'GET') =>
+    fetch(f.base + pathname, { method });
+  const verify = async (response: Response, maxAge: number, body = tinyPng) => {
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get('content-type'), 'image/png');
+    assert.equal(
+      response.headers.get('content-length'),
+      String(tinyPng.length),
+    );
+    assert.equal(
+      response.headers.get('cache-control'),
+      `public, max-age=${maxAge}, immutable`,
+    );
+    assert.equal(response.headers.get('x-content-type-options'), 'nosniff');
+    assert.deepEqual(Buffer.from(await response.arrayBuffer()), body);
+  };
+  const maxAge = 14 * 24 * 60 * 60;
+  const responses = await Promise.all([
+    fetchLocal(path),
+    fetchLocal(path),
+    fetchLocal(previewPath, 'HEAD'),
+  ]);
+  await verify(responses[0]!, maxAge);
+  await verify(responses[1]!, maxAge);
+  await verify(responses[2]!, maxAge, Buffer.alloc(0));
+  f.advance(601_500);
+  await verify(await fetchLocal(path), maxAge - 602);
+  await verify(await fetchLocal(previewPath), maxAge - 602);
   const videoResponse = await fetchLocal(
     new URL(sentVideo.originalContentUrl).pathname,
   );
   assert.equal(videoResponse.headers.get('content-type'), 'video/mp4');
   assert.deepEqual(Buffer.from(await videoResponse.arrayBuffer()), mp4);
-  assert.deepEqual(f.info, ['line.media_served', 'line.media_served']);
-  assert.equal((await fetchLocal(path)).status, 404);
-  assert.equal(
-    (await fetchLocal('/line/main/media/' + 'a'.repeat(32))).status,
-    404,
+  await waitFor(() => f.info.length >= 6);
+  assert.deepEqual(
+    f.info.sort((a, b) =>
+      String(a[1]?.method).localeCompare(String(b[1]?.method)),
+    ),
+    [
+      ...Array.from({ length: 5 }, () => [
+        'line.media_served',
+        { method: 'GET' },
+      ]),
+      ['line.media_served', { method: 'HEAD' }],
+    ],
   );
-  assert.equal((await fetchLocal('/line/main/media/')).status, 404);
-  f.advance(10 * 60_000);
-  assert.equal((await fetchLocal(previewPath)).status, 404);
+
+  for (const invalid of [
+    '/line/main/media/' + 'a'.repeat(32),
+    path + '.json',
+    path + '/',
+  ]) {
+    assert.equal((await fetchLocal(invalid)).status, 404);
+  }
+  const traversalStatus = await new Promise<number | undefined>(
+    (resolve, reject) => {
+      const url = new URL(f.base);
+      get(
+        url,
+        { path: path.replace('/media/', '/media/extra/../') },
+        (response) => {
+          response.resume().on('end', () => resolve(response.statusCode));
+        },
+      ).on('error', reject);
+    },
+  );
+  assert.equal(traversalStatus, 404);
+  assert.equal((await fetchLocal(path, 'POST')).status, 404);
+  f.advance(maxAge * 1000);
+  const expired = await fetchLocal(path);
+  assert.equal(expired.status, 404);
+  assert.equal(expired.headers.get('cache-control'), 'no-store');
+  assert.deepEqual(f.info.slice(6), [
+    ...Array.from({ length: 4 }, () => [
+      'line.media_miss',
+      { reason: 'unknown' },
+    ]),
+    ['line.media_miss', { reason: 'method' }],
+    ['line.media_miss', { reason: 'expired' }],
+  ]);
+});
+
+async function sendSmallImage(adapter: LineAdapter, bytes = tinyPng) {
+  const destination = { chatId: userId };
+  const queued = await adapter.sendImage(
+    {
+      ...destination,
+      file: { name: 'small.png', bytes },
+      preview: () => assert.fail('unexpected preview'),
+    },
+    AbortSignal.timeout(3000),
+  );
+  return adapter.send({ ...destination, text: '' }, { media: [queued] });
+}
+
+function sentMediaPaths(api: ReturnType<typeof fakeApi>) {
+  const sent = api.calls.at(-1)?.body?.messages?.[0];
+  assert.equal(sent?.type, 'image');
+  return [sent.originalContentUrl, sent.previewImageUrl].map(
+    (url) => new URL(url).pathname,
+  );
+}
+
+test('LINE media survives an adapter restart and startup removes expired files', async (t) => {
+  const f = await fixture(t, fakeApi(), {
+    publicMedia: true,
+    mediaTtlMs: 2000,
+  });
+  await sendSmallImage(f.adapter);
+  const expiredPaths = sentMediaPaths(f.api);
+  f.advance(1500);
+  await sendSmallImage(f.adapter);
+  const livePaths = sentMediaPaths(f.api);
+  await f.adapter.stop();
+  assert.equal((await readdir(f.mediaDirectory)).length, 8);
+
+  const restarted = await fixture(t, fakeApi(), {
+    publicMedia: true,
+    mediaDirectory: f.mediaDirectory,
+    now: 3000,
+  });
+  assert.deepEqual(
+    (await readdir(f.mediaDirectory)).sort(),
+    livePaths
+      .flatMap((path) => {
+        const token = path.split('/').at(-1)!;
+        return [token, token + '.json'];
+      })
+      .sort(),
+  );
+  for (const path of expiredPaths)
+    assert.equal((await fetch(restarted.base + path)).status, 404);
+  for (const path of livePaths) {
+    const response = await fetch(restarted.base + path);
+    assert.equal(response.status, 200);
+    assert.equal(
+      response.headers.get('cache-control'),
+      'public, max-age=1, immutable',
+    );
+    assert.deepEqual(Buffer.from(await response.arrayBuffer()), tinyPng);
+  }
+  assert.deepEqual(restarted.info.slice(0, 2), [
+    ['line.media_miss', { reason: 'expired' }],
+    ['line.media_miss', { reason: 'expired' }],
+  ]);
+});
+
+test('LINE media evicts the oldest files at the size cap across restarts', async (t) => {
+  const options = { publicMedia: true, mediaMaxBytes: tinyPng.length * 4 };
+  const f = await fixture(t, fakeApi(), options);
+  await sendSmallImage(f.adapter);
+  const oldest = sentMediaPaths(f.api);
+  await sendSmallImage(f.adapter);
+  const newer = sentMediaPaths(f.api);
+  await f.adapter.stop();
+
+  const restarted = await fixture(t, fakeApi(), {
+    ...options,
+    mediaDirectory: f.mediaDirectory,
+  });
+  await sendSmallImage(restarted.adapter);
+  const newest = sentMediaPaths(restarted.api);
+  await assert.rejects(
+    sendSmallImage(
+      restarted.adapter,
+      Buffer.concat([tinyPng, Buffer.alloc(options.mediaMaxBytes)]),
+    ),
+    (error) =>
+      error instanceof SendFailure &&
+      error.cause instanceof Error &&
+      /storage size limit/.test(error.cause.message),
+  );
+  assert.equal((await readdir(f.mediaDirectory)).length, 8);
+  for (const path of oldest)
+    assert.equal((await fetch(restarted.base + path)).status, 404);
+  for (const path of [...newer, ...newest])
+    assert.equal(
+      (await fetch(restarted.base + path, { method: 'HEAD' })).status,
+      200,
+    );
+});
+
+test('LINE media is released only when send failure confirms non-delivery', async (t) => {
+  for (const [status, deliveryUnknown] of [
+    [400, false],
+    [200, true],
+  ] as const) {
+    const api = fakeApi(({ path }) =>
+      path.endsWith('/push') ? Response.json({}, { status }) : undefined,
+    );
+    const f = await fixture(t, api, { publicMedia: true });
+    await assert.rejects(
+      sendSmallImage(f.adapter),
+      (error) =>
+        error instanceof SendFailure &&
+        error.deliveryUnknown === deliveryUnknown,
+    );
+    assert.equal(
+      (await readdir(f.mediaDirectory)).length,
+      deliveryUnknown ? 4 : 0,
+    );
+    for (const path of sentMediaPaths(api)) {
+      assert.equal(
+        (await fetch(f.base + path, { method: 'HEAD' })).status,
+        deliveryUnknown ? 200 : 404,
+      );
+    }
+  }
 });
