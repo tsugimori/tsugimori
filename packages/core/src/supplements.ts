@@ -4,7 +4,6 @@ export interface TaskInput {
   compact?: boolean;
   message: InboundMessage & {
     migratedFromChatId?: string;
-    replyToMessageId?: string;
   };
   scheduled?: {
     allowTextMentions: boolean;

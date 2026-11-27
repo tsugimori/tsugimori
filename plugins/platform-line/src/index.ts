@@ -799,9 +799,20 @@ export class LineAdapter implements PlatformAdapter {
 
   #takeReplyToken(chatId: string, replyTo?: string) {
     const reply = this.#replies.get(chatId);
-    if (!reply || replyTo !== reply.messageId) return;
-    this.#replies.delete(chatId);
-    return this.#usableToken(reply);
+    if (reply && replyTo === reply.messageId) {
+      this.#replies.delete(chatId);
+      return this.#usableToken(reply);
+    }
+    if (replyTo !== undefined)
+      return this.#usableToken(
+        this.#takeChoiceReply(messageKey(chatId, replyTo)),
+      );
+  }
+
+  #takeChoiceReply(key: string) {
+    const reply = this.#choiceReplies.get(key);
+    this.#choiceReplies.delete(key);
+    return reply;
   }
 
   #usableToken(reply?: ReplyToken) {
@@ -834,8 +845,7 @@ export class LineAdapter implements PlatformAdapter {
         return;
       }
     } else {
-      reply = this.#choiceReplies.get(key);
-      this.#choiceReplies.delete(key);
+      reply = this.#takeChoiceReply(key);
     }
 
     const text = decisionText || notice;

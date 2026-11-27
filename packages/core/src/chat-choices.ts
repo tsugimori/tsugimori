@@ -48,6 +48,18 @@ export function choiceLabel(choice: PromptChoice, locale: Config['locale']) {
     : choice.label;
 }
 
+export function choiceReply(
+  adapter: PlatformAdapter,
+  message: OutboundMessage,
+  choice?: ChoiceAddress,
+): OutboundMessage {
+  return !adapter.updateChoices &&
+    choice?.chatId === message.chatId &&
+    choice.threadId === message.threadId
+    ? { ...message, replyTo: choice.messageId }
+    : message;
+}
+
 interface PendingChoice {
   active(): boolean;
   adapter: PlatformAdapter;
@@ -155,8 +167,10 @@ export class ChatChoices {
       let address =
         replace && (await this.#update(adapter, outbound, replace.address));
       if (!address) {
-        await replace?.fallback();
-        const receipt = await deliver(outbound);
+        if (adapter.updateChoices) await replace?.fallback();
+        const receipt = await deliver(
+          choiceReply(adapter, outbound, replace?.address),
+        );
         const delivered = receipt.parts?.find(
           ({ messageId }) => messageId === receipt.messageId,
         );

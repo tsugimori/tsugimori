@@ -56,7 +56,6 @@ import type { MemoryResult } from './memory.ts';
 import type { PreviewProviders } from './previews.ts';
 import type { RemovalPlan } from './removal.ts';
 import type { PlatformNotice } from './runtime.ts';
-import type { TaskInput } from './supplements.ts';
 import type { WebImageNetwork } from './web-image.ts';
 
 import { untilAborted } from './abort.ts';
@@ -965,17 +964,9 @@ export class Gateway {
     }
   }
 
-  async #process(
-    adapter: PlatformAdapter,
-    inbound: PlatformInboundEvent,
-    selectedChoice?: {
-      address: ChoiceAddress;
-      finish(text: string): Promise<void>;
-    },
-  ) {
+  async #process(adapter: PlatformAdapter, inbound: PlatformInboundEvent) {
     const at = Date.now();
     const { store } = this.#deps;
-    const finishChoice = selectedChoice?.finish;
     if (inbound.type === 'chat-migrated')
       this.#commandMenus.migrateChat(adapter, inbound);
     const original =
@@ -1077,20 +1068,12 @@ export class Gateway {
     };
     const parsed = parseCommand(event.text, adapter.botIdentity?.username);
     const command = parsed === 'other-bot' ? undefined : parsed;
-    const finishSelected = async (allowed = true) => {
-      if (!finishChoice || !command) return;
-      const { choices } = systemMessages(this.#runtime.config.locale);
-      await finishChoice(
-        allowed ? choices.answer(`/${command.name}`) : choices.unavailable,
-      );
-    };
     if (
       inbound.type !== 'chat-migrated' &&
       command?.name === 'cancel' &&
       (await this.#chatRemoval.receive(adapter, chat, event, true))
     ) {
       recordDecision('command', true);
-      if (finishChoice) await finishSelected();
       return;
     }
     if (
@@ -1104,7 +1087,6 @@ export class Gateway {
     ) {
       store.recordUser(user);
       recordDecision('command', true);
-      if (finishChoice) await finishSelected(this.#auth.isOwner(user));
       return;
     }
     if (
@@ -1210,7 +1192,6 @@ export class Gateway {
               command,
             );
             await received;
-            if (finishChoice) await finishSelected(Boolean(response));
             if (response)
               await this.#outbound.send(
                 adapter,
@@ -1261,11 +1242,9 @@ export class Gateway {
       userId: event.userId,
     });
     if (command) {
-      const finish =
-        finishChoice ??
-        (owner
-          ? this.#chatChoices.claimReply(adapter, message, command)
-          : undefined);
+      const finish = owner
+        ? this.#chatChoices.claimReply(adapter, message, command)
+        : undefined;
       let recorded = false;
       const commandDecision = (taskId?: string) => {
         if (recorded) return;
@@ -1285,7 +1264,6 @@ export class Gateway {
               owner,
               command,
               {
-                address: selectedChoice?.address,
                 finish,
                 onTask: commandDecision,
               },
@@ -2214,17 +2192,13 @@ export class Gateway {
           finish && existing
             ? { address: existing, fallback: () => finish(selection) }
             : undefined;
-        if (!replace && finish) await finish(selection);
+        if (!replace && adapter.updateChoices) await finish?.(selection);
         const choicesPerPage =
           choices.length <= Math.min(defaultChoicesPerPage, limit)
             ? choices.length
             : Math.min(defaultChoicesPerPage, limit - 2);
         const pages = Math.ceil(choices.length / choicesPerPage);
         const showPage = async (index: number, replace?: ChoiceReplacement) => {
-          if (replace && !adapter.updateChoices) {
-            await replace.fallback();
-            replace = undefined;
-          }
           if (this.#isStopping() || canChoose?.() === false) {
             await replace?.fallback();
             return;
@@ -2291,9 +2265,14 @@ export class Gateway {
       };
     const send = respond(finish, address);
     const setup = async (request: Parameters<ChatSetup['start']>[2]) => {
-      const started = await this.#chatSetup.start(adapter, message, request);
+      const started = await this.#chatSetup.start(
+        adapter,
+        message,
+        request,
+        address,
+      );
       if (!started) await send(m.setup.alreadyRunning);
-      else if (finish) await finish(selectedCommand);
+      else if (adapter.updateChoices) await finish?.(selectedCommand);
     };
     if (name === 'pair') {
       if (/^new(?:\s|$)/i.test(args)) {
@@ -2333,52 +2312,11 @@ export class Gateway {
         const commands = chatCommands(locale)[
           owner ? 'owner' : 'member'
         ].filter(({ name }) => message.chatKind === 'dm' || name !== 'pair');
-        const descriptions = new Map(
-          commands.map(({ name, description }) => [`/${name}`, description]),
+        await send(
+          commands
+            .map(({ name, description }) => `/${name} · ${description}`)
+            .join('\n'),
         );
-        const choices = [...descriptions.keys()].map((label) => ({
-          label,
-          value: label,
-        }));
-        const describePage = (page: readonly PromptChoice[]) =>
-          page
-            .map(({ label }) => `${label} · ${descriptions.get(label)}`)
-            .join('\n');
-        await send(m.choices.help, choices, describePage(choices), {
-          canChoose: () =>
-            !this.#isStopping() &&
-            !this.#removingPlatform(adapter.id) &&
-            this.#runtime.getAdapter(adapter.id) === adapter &&
-            canRunCommand(
-              'help',
-              this.#auth.isOwner({
-                adapterId: adapter.id,
-                userId: message.userId,
-              }),
-              this.#auth.isAllowlisted(chat),
-            ),
-          describePage,
-          select: ({ value }, edit, event) => {
-            // Give the tap its own log position while replying to a platform message.
-            const selected: TaskInput['message'] = {
-              type: 'message',
-              chatId: event.chatId,
-              chatKind: message.chatKind,
-              chatTitle: message.chatTitle,
-              messageId: event.callbackId,
-              replyToMessageId: event.messageId,
-              text: value,
-              threadId: event.threadId,
-              userDisplay: event.userDisplay,
-              userId: event.userId,
-              userUsername: event.userUsername,
-            };
-            return this.#process(adapter, selected, {
-              address: event,
-              finish: edit,
-            });
-          },
-        });
         break;
       }
       case 'webhook': {
@@ -2558,10 +2496,11 @@ export class Gateway {
         if (!match?.[2]) await send(removal.usage);
         else {
           const replace =
-            finish && address && adapter.updateChoices
+            finish && address
               ? { address, fallback: () => finish(selectedCommand) }
               : undefined;
-          if (!replace && finish) await finish(selectedCommand);
+          if (!replace && adapter.updateChoices)
+            await finish?.(selectedCommand);
           await this.#chatRemoval.start(
             adapter,
             chat,

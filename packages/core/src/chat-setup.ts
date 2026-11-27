@@ -11,7 +11,7 @@ import type { Tracer } from '@tsugimori/trace';
 import { SetupError } from '@tsugimori/plugin-sdk';
 import { setTimeout as delay } from 'node:timers/promises';
 
-import type { ChatChoices } from './chat-choices.ts';
+import type { ChatChoices, ChoiceAddress } from './chat-choices.ts';
 import type { Command } from './chat-commands.ts';
 import type { Logger } from './hooks.ts';
 import type { Outbound } from './outbound.ts';
@@ -19,7 +19,7 @@ import type { Runtime } from './runtime.ts';
 import type { GuidedSetup, SetupRequest } from './setup.ts';
 
 import { untilAborted } from './abort.ts';
-import { choiceLabel, supportsChoices } from './chat-choices.ts';
+import { choiceLabel, choiceReply, supportsChoices } from './chat-choices.ts';
 import { failureText } from './checks.ts';
 import { describeError } from './errors.ts';
 import { conversationId } from './outbound.ts';
@@ -224,6 +224,7 @@ export class ChatSetup {
     adapter: PlatformAdapter,
     message: InboundMessage,
     request: SetupRequest,
+    replyChoice?: ChoiceAddress,
   ) {
     const { auth, log, outbound, redact, runtime, setup, store, trace } =
       this.#deps;
@@ -240,7 +241,10 @@ export class ChatSetup {
       return current;
     };
     const show = async (text: string) => {
-      await platform().send(reply(message, text));
+      const current = platform();
+      await current.send(
+        choiceReply(current, reply(message, text), replyChoice),
+      );
     };
     if (this.#running) return false;
     const origin = conversationId(message);
@@ -327,11 +331,13 @@ export class ChatSetup {
               answer: string,
               finish = buttons?.finish,
               label?: string,
+              nextReply?: ChoiceAddress,
             ) => {
               if (answered || signal.aborted || timeout?.aborted) return;
               answered = true;
               if (secret && answer.trim()) secrets.add(answer.trim());
-              if (finish) {
+              if (nextReply) replyChoice = nextReply;
+              else if (finish) {
                 const typed = answer.trim();
                 const value =
                   !typed || typed === '-' ? 'default' : typed.toLowerCase();
@@ -368,29 +374,38 @@ export class ChatSetup {
                 options.length <=
                   (current.capabilities.maxInlineButtons ?? Infinity) &&
                 supportsChoices(current);
-              const prompt = {
-                ...address,
-                text: secret
-                  ? `${text} ${m.reply}\n${m.origin(originName)}`
-                  : [
-                      `${text} ${m.reply}`,
-                      ...(!inline && options.length
-                        ? [
-                            messages.values(
-                              options.map(({ value }) => value).join(' / '),
-                            ),
-                          ]
-                        : []),
-                    ].join('\n'),
-              };
+              const prompt = choiceReply(
+                current,
+                {
+                  ...address,
+                  text: secret
+                    ? `${text} ${m.reply}\n${m.origin(originName)}`
+                    : [
+                        `${text} ${m.reply}`,
+                        ...(!inline && options.length
+                          ? [
+                              messages.values(
+                                options.map(({ value }) => value).join(' / '),
+                              ),
+                            ]
+                          : []),
+                      ].join('\n'),
+                },
+                replyChoice,
+              );
               if (inline)
                 buttons = await this.#deps.choices.send(
                   current,
                   prompt,
                   message.userId,
                   options,
-                  (choice, finish) =>
-                    respond(choice.value, finish, choiceLabel(choice, locale)),
+                  (choice, finish, event) =>
+                    respond(
+                      choice.value,
+                      finish,
+                      choiceLabel(choice, locale),
+                      current.updateChoices ? undefined : event,
+                    ),
                   {
                     active: () =>
                       this.#pending === pending &&
@@ -421,11 +436,12 @@ export class ChatSetup {
             } finally {
               if (this.#pending === pending) this.#pending = undefined;
               try {
-                await (feedback ??
-                  buttons?.finish(
+                if (feedback) await feedback;
+                else if (!answered)
+                  await buttons?.finish(
                     signal.aborted ? messages.cancelled : messages.expired,
                     true,
-                  ));
+                  );
               } finally {
                 closed.resolve();
               }
@@ -503,7 +519,11 @@ export class ChatSetup {
         const direct = message.chatKind === 'dm';
         const delivered = await outbound.sendSecret(originAdapter, {
           ...(direct
-            ? reply(message, finishText(heading, instructions))
+            ? choiceReply(
+                originAdapter,
+                reply(message, finishText(heading, instructions)),
+                replyChoice,
+              )
             : { chatId: message.userId, text: instructions }),
           format: 'markdown',
         });

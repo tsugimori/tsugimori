@@ -30,14 +30,14 @@ Terminal setup with `corepack pnpm exec tsugimori add platform line --dir ./ws` 
 
 ## Checks and status
 
-Send `/help` to discover the commands you can use in this chat. Tap a command to run it or see how to supply its arguments. Use **Previous** and **Next** to browse longer menus. Each page or submenu arrives in a new quick-reply message.
+Send `/help` for a plain-text list of commands you can use in this chat. In command menus such as `/model`, use **Previous** and **Next** to browse longer lists. Each navigation tap sends the destination page or submenu as a single new quick-reply message.
 
 `tsugimori doctor` checks the channel secret and access token, reads the gateway's ingress status, and compares LINE's configured endpoint with the gateway URL when ingress is healthy. `/status` shows gateway ingress and LINE attachment status in **System**. In **This chat**, the card can show the latest approval decision because LINE uses metered push.
 
 ## Delivery and limits
 
 - The listener accepts signed POSTs at `/line/<id>`, `/line/<id>/`, and `/line/<id>/webhook`. It ignores query strings and limits bodies to 1 MiB.
-- The first batch can use the latest reply token for that chat when the outbound message replies to the matching inbound message and the token is fresh. Later batches, messages without a usable token, and replies rejected for an invalid reply token use metered push. Push counts against the LINE account's messaging quota, including scheduled messages.
+- The first batch can use a fresh reply token from the matching inbound message or quick-reply tap. Later batches, messages without a usable token, and replies rejected for an invalid reply token use metered push. Push counts against the LINE account's messaging quota, including scheduled messages.
 - The adapter sends text in chunks of at most 5,000 UTF-16 code units. Stickers, images, video, and audio are queued with the turn's text and sent in batches of up to five. A turn with only media still uses the reply token when available.
 - Approval and choice buttons use [LINE quick replies](https://developers.line.biz/en/docs/messaging-api/using-quick-reply/) on the last text chunk. Approval prompts use two buttons and longer command menus are paginated to fit 13 per message. Labels longer than 20 UTF-16 code units are shortened with an ellipsis. The selection shown in chat can use up to 300 code units. The adapter keeps the most recent 4,096 prompt links for up to 48 hours, including across restarts.
 - `send.image` accepts JPEG or PNG up to 10 MiB. Web GIF and WebP images up to 10 MiB are converted to a still JPEG with `ffmpeg`. `send.file` accepts MP4 video up to 200 MiB. Video and JPEG or PNG images over 1 MiB need `ffmpeg` to make a preview.

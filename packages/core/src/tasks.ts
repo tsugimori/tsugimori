@@ -1840,9 +1840,7 @@ export function reply(message: TaskInput['message'], text: string) {
   return {
     chatId: message.chatId,
     replyTo:
-      message.migratedFromChatId === undefined
-        ? (message.replyToMessageId ?? message.messageId)
-        : undefined,
+      message.migratedFromChatId === undefined ? message.messageId : undefined,
     threadId: message.threadId,
     text,
   };

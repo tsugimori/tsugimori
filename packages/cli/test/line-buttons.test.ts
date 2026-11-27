@@ -29,7 +29,7 @@ interface Delivery {
   text: string;
 }
 
-async function fixture(t: TestContext) {
+async function fixture(t: TestContext, locale = 'en') {
   const workspace = await mkdtemp(join(tmpdir(), 'tsugimori-line-buttons-'));
   const store = new SqliteStore(':memory:');
   const approved = Promise.withResolvers<boolean>();
@@ -57,6 +57,7 @@ async function fixture(t: TestContext) {
     if (pathname.endsWith('/loading/start')) return Response.json({});
     assert.match(pathname, /^\/v2\/bot\/message\/(reply|push)$/);
     const { messages, replyToken } = JSON.parse(String(init?.body));
+    if (replyToken) assert.equal(pathname, '/v2/bot/message/reply');
     const sentMessages = messages.map(
       (message: {
         quickReply?: { items: Delivery['items'] };
@@ -134,6 +135,7 @@ async function fixture(t: TestContext) {
     join(workspace, 'tsugimori.json'),
     JSON.stringify({
       owner: { [adapterId]: owner },
+      locale,
       platforms: [{ id: adapterId, kind: 'line' }],
       agents: [{ id: 'demo', kind: 'demo' }],
     }),
@@ -169,6 +171,7 @@ async function fixture(t: TestContext) {
   }
   return {
     approved: approved.promise,
+    deliveries,
     gateway,
     store,
     delivery: (predicate: (delivery: Delivery) => boolean) =>
@@ -236,10 +239,15 @@ test(
 );
 
 test(
-  'LINE paginates command choices and replies to the selected option',
+  'LINE uses the quick reply token for each submenu, next page, and final result',
   { timeout: 8000 },
   async (t) => {
-    const f = await fixture(t);
+    const f = await fixture(t, 'zh-TW');
+    const helpToken = await f.say('/help');
+    const help = await f.delivery(({ replyToken }) => replyToken === helpToken);
+    assert.equal(help.items, undefined);
+    assert.match(help.text, /^\/help · 查看可用指令$/m);
+    assert.match(help.text, /^\/webhook · /m);
     const sourceToken = await f.say('/model');
     const providers = await f.delivery(
       ({ replyToken, items }) => replyToken === sourceToken && !!items,
@@ -248,21 +256,43 @@ test(
       providers.items?.map(({ action }) => action.label),
       ['demo', 'default'],
     );
-    await f.press(providers.items![0]!.action.data);
+    const providerToken = await f.press(providers.items![0]!.action.data);
     const first = await f.delivery(
-      ({ text, items }) => text.includes('Page 1 of 3') && !!items,
+      ({ text, items }) => text.includes('第 1 頁，共 3 頁') && !!items,
     );
+    assert.equal(first.replyToken, providerToken);
     assert.equal(first.items?.length, 12);
     assert.equal(first.items?.[0]?.action.label, 'model-0');
     assert.match(first.text, /model-9 · model-10/);
-    await f.press(first.items!.at(-1)!.action.data);
+    const next = first.items!.at(-1)!.action;
+    assert.equal(next.label, '下一頁');
+    const nextToken = await f.press(next.data);
     const second = await f.delivery(({ items }) => items?.length === 13);
+    assert.equal(second.replyToken, nextToken);
     assert.equal(second.items?.[0]?.action.label, 'model-11');
     assert.match(second.text, /model-20 · model-21/);
-    const selectToken = await f.press(second.items![0]!.action.data);
+    const nextAgain = second.items!.at(-1)!.action;
+    assert.equal(nextAgain.label, '下一頁');
+    const nextAgainToken = await f.press(nextAgain.data);
+    const third = await f.delivery(
+      ({ text, items }) => text.includes('第 3 頁，共 3 頁') && !!items,
+    );
+    assert.equal(third.replyToken, nextAgainToken);
+    assert.equal(third.items?.[0]?.action.label, 'model-22');
+
+    const selectToken = await f.press(third.items![0]!.action.data);
     const selected = await f.delivery(
       ({ replyToken }) => replyToken === selectToken,
     );
-    assert.match(selected.text, /model-11/);
+    assert.equal(selected.text, '已將模型設為 model-22。');
+    await f.gateway.idle();
+    assert.deepEqual(f.deliveries, [
+      help,
+      providers,
+      first,
+      second,
+      third,
+      selected,
+    ]);
   },
 );

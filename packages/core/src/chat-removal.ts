@@ -8,12 +8,16 @@ import type { RemovalTarget } from '@tsugimori/storage';
 
 import { SetupError } from '@tsugimori/plugin-sdk';
 
-import type { ChatChoices, ChoiceReplacement } from './chat-choices.ts';
+import type {
+  ChatChoices,
+  ChoiceAddress,
+  ChoiceReplacement,
+} from './chat-choices.ts';
 import type { Logger } from './hooks.ts';
 import type { Outbound } from './outbound.ts';
 import type { Removal, RemovalPlan } from './removal.ts';
 
-import { choiceLabel, supportsChoices } from './chat-choices.ts';
+import { choiceLabel, choiceReply, supportsChoices } from './chat-choices.ts';
 import { formatRemovalPlan, removalMessages } from './removal-messages.ts';
 import { systemMessages } from './system-messages.ts';
 import { reply } from './tasks.ts';
@@ -66,8 +70,11 @@ export class ChatRemoval {
     const { outbound, removal } = this.#deps;
     const m = removalMessages(locale);
     const send = async (text: string) => {
-      await replace?.fallback();
-      return outbound.send(adapter, reply(message, text));
+      if (adapter.updateChoices) await replace?.fallback();
+      return outbound.send(
+        adapter,
+        choiceReply(adapter, reply(message, text), replace?.address),
+      );
     };
     if (this.#pending || this.#sending) {
       await send(m.busy);
@@ -89,7 +96,7 @@ export class ChatRemoval {
           reply(message, text),
           message.userId,
           confirmChoices,
-          (choice, done) => {
+          (choice, done, event) => {
             const current = this.#pending;
             if (current?.plan !== plan) return done(m.cancelled, true);
             return this.#decide(
@@ -98,6 +105,7 @@ export class ChatRemoval {
               message,
               choice.value === 'yes',
               choiceLabel(choice, locale),
+              event,
             );
           },
           { active: () => this.#pending?.plan === plan, replace },
@@ -170,18 +178,22 @@ export class ChatRemoval {
     message: InboundMessage,
     confirmed: boolean,
     label?: string,
+    address?: ChoiceAddress,
   ) {
     this.stop();
     const m = removalMessages(pending.plan.locale);
     const choices = systemMessages(pending.plan.locale).choices;
-    const feedback = pending.finish?.(
-      label
-        ? choices.answer(label)
-        : confirmed
-          ? choices.answer('yes')
-          : choices.cancelled,
-      true,
-    );
+    const feedback =
+      !address || adapter.updateChoices
+        ? pending.finish?.(
+            label
+              ? choices.answer(label)
+              : confirmed
+                ? choices.answer('yes')
+                : choices.cancelled,
+            true,
+          )
+        : undefined;
     const text = !confirmed
       ? m.cancelled
       : await this.#deps
@@ -190,7 +202,10 @@ export class ChatRemoval {
             error instanceof SetupError ? error.message : m.unavailable,
           );
     await feedback;
-    await this.#deps.outbound.send(adapter, reply(message, text));
+    await this.#deps.outbound.send(
+      adapter,
+      choiceReply(adapter, reply(message, text), address),
+    );
   }
 
   stop(adapterId?: string) {

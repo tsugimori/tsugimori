@@ -111,7 +111,7 @@ sticker catalog.
 
 | Command                                          | Who                                                       | What it does                                                                                                |
 | ------------------------------------------------ | --------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| `/help`                                          | Owner or members of an allowlisted chat                   | Lists the commands you can use in this chat, with tappable buttons where supported.                         |
+| `/help`                                          | Owner or members of an allowlisted chat                   | Lists the commands you can use in this chat as plain text.                                                  |
 | `/status`                                        | Owner                                                     | Shows gateway health, chat activity, incognito mode, and system state.                                      |
 | `/model [provider] [model]`                      | Owner                                                     | Shows the current provider and model, then offers provider and model choices.                               |
 | `/thinking [level]`                              | Owner                                                     | Shows or sets reasoning effort for this chat. Use `default` to clear the override.                          |
@@ -136,7 +136,7 @@ sticker catalog.
 | `/previews`                                      | Owner                                                     | Lists open previews on this adapter.                                                                        |
 | `/preview close <id>`                            | Owner                                                     | Closes a preview on this adapter.                                                                           |
 
-On Telegram, tapping through command menus such as `/help` and `/model` updates the same message. **Previous** and **Next** also update it in place. If the menu cannot be edited, the bot posts the next step in a new message, as it does with LINE quick replies.
+On Telegram, tapping through command menus such as `/model` updates the same message, including when you tap **Previous** or **Next**. On LINE, each page or submenu arrives in a new quick-reply message.
 
 Use `/model <agentId>` to list a provider's models, or `/model <agentId> <model>` to select both directly. With one argument, configured agent IDs take precedence over model names. Use `/model <model>` for other model names on the current provider. `/model <agentId> default` uses that provider's default model. `/model default` clears both chat overrides and restores the configured route. Switching providers starts a fresh session and reports any incompatible thinking or fast overrides it clears.
 

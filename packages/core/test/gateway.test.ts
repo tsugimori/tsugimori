@@ -1774,161 +1774,52 @@ test('/context shows usage and sizes for the current session in plain text', asy
   assert.match(platform.sent.at(-1)?.text ?? '', /^\/ask · /m);
 });
 
-test('/help lists commands for the sender and validates each tap', async (t) => {
-  const { configure, logs, platform, store } = await fixture(
-    t,
-    async function* () {},
-    false,
-    { locale: 'zh-TW' },
-  );
+test('/help is plain text with the commands available to the sender', async (t) => {
+  const { platform } = await fixture(t, async function* () {}, false, {
+    locale: 'zh-TW',
+  });
+  platform.platform.capabilities.maxInlineButtons = 13;
   const group = { chatKind: 'group' } as const;
   const member = { ...group, userId: 'member' };
   await platform.emit(inbound('denied-help', '/help', member));
   assert.equal(platform.sent.length, 0);
   await platform.emit(inbound('allow-help', '/allow', group));
-  await platform.emit(inbound('owner-help', '/help', group));
-  const ownerMenu = platform.sent.at(-1)!;
-  assert.match(ownerMenu.text, /^可用指令\n/);
-  assert.match(ownerMenu.text, /^\/deny · 將這個對話移出允許清單$/m);
-  assert.doesNotMatch(ownerMenu.text, /^\/pair ·/m);
-  assert.match(ownerMenu.text, /^\/sticker · /m);
-  await platform.emit(inbound('dm-help', '/help'));
-  const dmMenu = platform.sent.at(-1)!;
-  assert.match(dmMenu.text, /^\/pair · /m);
-  assert.match(dmMenu.text, /^\/sticker · /m);
-  await platform.emit(inbound('member-help', '/help', member));
-  const memberMenu = platform.sent.at(-1)!;
+
+  const help = async (id: string, overrides?: Partial<InboundMessage>) => {
+    const count = platform.sent.length;
+    await platform.emit(inbound(id, '/help', overrides));
+    assert.equal(platform.sent.length, count + 1);
+    const response = platform.sent.at(-1)!;
+    assert.equal(response.buttons, undefined);
+    assert.equal(response.format, undefined);
+    assert.match(response.text, /^(?:\/[a-z]+ · [^\n]+\n)*\/[a-z]+ · [^\n]+$/);
+    return response.text;
+  };
+
+  const ownerHelp = await help('owner-help', group);
+  assert.match(ownerHelp, /^\/deny · 將這個對話移出允許清單$/m);
+  assert.match(ownerHelp, /^\/webhook · /m);
+  assert.doesNotMatch(ownerHelp, /^\/pair ·/m);
+  const dmHelp = await help('dm-help');
+  assert.match(dmHelp, /^\/pair · /m);
+  assert.equal(dmHelp.split('\n').length, 23);
+  const memberHelp = await help('member-help', member);
   assert.deepEqual(
-    memberMenu.buttons?.map(({ label }) => label),
+    memberHelp.split('\n').map((line) => line.split(' · ')[0]),
     ['/ask', '/btw', '/context', '/help', '/incognito', '/new'],
   );
-  assert.match(memberMenu.text, /^\/help · 查看可用指令$/m);
-  assert.doesNotMatch(memberMenu.text, /^\/(deny|status) ·/m);
-
-  const tap = async (
-    menu: typeof memberMenu,
-    label: string,
-    userId: string,
-  ) => {
-    const button = menu.buttons?.find((entry) => entry.label === label);
-    assert.ok(button);
-    await platform.emit({
-      type: 'callback',
-      chatId: menu.chatId,
-      messageId: menu.messageId,
-      callbackId: button.id,
-      queryId: `tap-${platform.feedback.length}`,
-      userId,
-    });
-    return button.id;
-  };
-  await tap(ownerMenu, '/deny', 'member');
-  assert.equal(platform.feedback.at(-1)?.notice, '此選項目前無法使用。');
-  assert.equal(store.getChat(chat)?.allowlisted, true);
-  await tap(dmMenu, '/pair', 'owner');
-  assert.equal(
-    platform.feedback.at(-1)?.decisionText,
-    '用法：/pair new <adapterId>',
-  );
-  await tap(memberMenu, '/ask', 'member');
-  assert.equal(platform.feedback.at(-1)?.decisionText, '用法：/ask <訊息>');
-  assert.equal(store.listChatTasks(chat).length, 0);
-
-  await platform.emit(inbound('reset-help', '/help', member));
-  const resetMenu = platform.sent.at(-1)!;
-  await platform.emit(inbound('before-incognito', 'ordinary message', member));
-  const tapId = await tap(resetMenu, '/incognito', 'member');
-  const selected = store.getMessage(chat, tapId);
-  assert.equal(selected?.text, '/incognito');
-  assert.equal(selected?.userId, 'member');
-  assert.equal(store.getChat(chat)?.incognitoId, selected?.seq);
-  assert.ok(selected!.seq > store.getMessage(chat, 'before-incognito')!.seq);
-  assert.match(platform.sent.at(-1)!.text, /^無痕模式已開啟/);
-  assert.equal(platform.sent.at(-1)?.replyTo, resetMenu.messageId);
-
-  const reloads = () =>
-    logs.filter(({ event }) => event === 'config.reloaded').length;
-  const beforeReload = reloads();
-  await configure(false, { owner: 'new-owner' });
-  await until(t, () => reloads() > beforeReload);
-  const staleTap = await tap(ownerMenu, '/deny', 'owner');
-  assert.equal(store.getMessage(chat, staleTap)?.text, '/deny');
-  assert.equal(platform.feedback.at(-1)?.decisionText, '此選項目前無法使用。');
-  assert.equal(store.getChat(chat)?.allowlisted, true);
-});
-
-test('/help paginates within the inline button limit and falls back to text', async (t) => {
-  const { platform } = await fixture(t, async function* () {}, false);
-  platform.platform.capabilities.maxInlineButtons = 13;
-  await platform.emit(inbound('paged-help', '/help'));
-  const first = platform.sent.at(-1)!;
-  const commands: string[] = [];
-  const labels = (page: typeof first) =>
-    page.buttons?.map(({ label }) => label);
-  const checkPage = (page: typeof first, index: number) => {
-    assert.ok(page.buttons?.length);
-    assert.ok(page.buttons.length <= 13);
-    assert.match(
-      page.text,
-      new RegExp(`^Available commands\\nPage ${index} of 3\\n`),
-    );
-    const pageCommands = page.buttons
-      .map(({ label }) => label)
-      .filter((label) => label.startsWith('/'));
-    assert.deepEqual(
-      page.text
-        .split('\n')
-        .slice(2)
-        .map((line) => line.split(' · ')[0]),
-      pageCommands,
-    );
-    commands.push(...pageCommands);
-  };
-  const navigate = async (page: typeof first, label: string) => {
-    const button = page.buttons?.find((entry) => entry.label === label);
-    assert.ok(button);
-    await platform.emit({
-      type: 'callback',
-      chatId: page.chatId,
-      messageId: page.messageId,
-      callbackId: button.id,
-      userId: 'owner',
-    });
-    return platform.sent.at(-1)!;
-  };
-  checkPage(first, 1);
-  assert.equal(labels(first)?.at(-1), 'Next');
-  const second = await navigate(first, 'Next');
-  checkPage(second, 2);
-  assert.deepEqual(labels(second)?.slice(-2), ['Previous', 'Next']);
-  assert.equal(second.buttons?.length, 13);
-  const third = await navigate(second, 'Next');
-  checkPage(third, 3);
-  assert.equal(labels(third)?.at(-1), 'Previous');
-  assert.equal(commands.length, 23);
-  assert.ok(!commands.includes('/agent'));
-  assert.equal(new Set(commands).size, commands.length);
-  assert.deepEqual(labels(await navigate(third, 'Previous')), labels(second));
+  assert.match(memberHelp, /^\/help · 查看可用指令$/m);
 
   platform.platform.capabilities.inlineButtons = false;
-  const group = { chatKind: 'group' } as const;
-  await platform.emit(inbound('allow-text-help', '/allow', group));
-  await platform.emit(
-    inbound('text-help', '/help', { ...group, userId: 'member' }),
-  );
-  const fallback = platform.sent.at(-1)!;
-  assert.equal(fallback.buttons, undefined);
-  assert.match(
-    fallback.text,
-    /^\/context · Show session context and token usage$/m,
-  );
-  assert.match(fallback.text, /^\/new · Start a new conversation$/m);
-  assert.doesNotMatch(fallback.text, /^\/deny ·/m);
+  assert.equal(await help('text-help', member), memberHelp);
+  assert.equal(platform.feedback.length, 0);
 });
 
 test('command pages and submenus replace the tapped message and keep its reply link', async (t) => {
+  const listModels = () =>
+    Array.from({ length: 23 }, (_, i) => `model-${i + 1}`);
   const { platform, store } = await fixture(t, async function* () {}, true, {
-    listModels: () => ['one', 'two'],
+    listModels,
   });
   const updates: ChoiceUpdate[] = [];
   platform.platform.updateChoices = async (update) => {
@@ -1957,100 +1848,141 @@ test('command pages and submenus replace the tapped message and keep its reply l
     });
   };
 
-  await platform.emit(inbound('help', '/help', thread));
-  const first = platform.sent[0]!;
+  await platform.emit(inbound('model', '/model', thread));
+  const providers = platform.sent[0]!;
+  assert.deepEqual(
+    providers.buttons?.map(({ label }) => label),
+    ['test', 'default'],
+  );
+  await press(providers, 'test');
+  const first = updates[0]!;
+  assert.match(first.text, /Choose a model for test.*\nPage 1 of 3/);
   await press(first, 'Next');
-  const second = updates[0]!;
+  const second = updates[1]!;
   assert.match(second.text, /Page 2 of 3/);
-  assert.equal(second.messageId, first.messageId);
-  assert.equal(second.chatId, first.chatId);
+  assert.equal(second.messageId, providers.messageId);
+  assert.equal(second.chatId, providers.chatId);
   assert.equal(second.threadId, thread.threadId);
   await press(first, 'Next');
   assert.equal(
     platform.feedback.at(-1)?.notice,
     'This selection is unavailable.',
   );
-  assert.equal(updates.length, 1);
+  assert.equal(updates.length, 2);
 
-  await press(second, '/model');
-  const providers = updates[1]!;
-  assert.equal(providers.messageId, first.messageId);
-  assert.deepEqual(
-    providers.buttons.map(({ label }) => label),
-    ['test', 'default'],
-  );
-  await press(providers, 'test');
-  const models = updates[2]!;
-  assert.equal(models.messageId, first.messageId);
-  assert.match(models.text, /Choose a model for test/);
-  assert.deepEqual(
-    models.buttons.map(({ label }) => label),
-    ['one', 'two', 'default'],
-  );
   assert.equal(store.getChat(topic)?.model, null);
-  await press(models, 'one');
-  assert.equal(store.getChat(topic)?.model, 'one');
-  assert.equal(platform.feedback.at(-1)?.messageId, first.messageId);
-  assert.equal(platform.feedback.at(-1)?.decisionText, 'Model set to one.');
+  await press(second, 'model-12');
+  assert.equal(store.getChat(topic)?.model, 'model-12');
+  assert.equal(platform.feedback.at(-1)?.messageId, providers.messageId);
+  assert.equal(
+    platform.feedback.at(-1)?.decisionText,
+    'Model set to model-12.',
+  );
   assert.equal(platform.sent.length, 1);
 
-  await platform.emit(inbound('model', '/model', thread));
+  await platform.emit(inbound('model-again', '/model', thread));
   const next = platform.sent[1]!;
   await press(next, 'test');
-  const nextModels = updates[3]!;
+  const nextModels = updates[2]!;
   await platform.emit(
-    inbound('typed-model', '/model test two', {
+    inbound('typed-model', '/model test model-2', {
       ...thread,
       replyTo: { id: next.messageId },
     }),
   );
-  assert.equal(store.getChat(topic)?.model, 'two');
+  assert.equal(store.getChat(topic)?.model, 'model-2');
   assert.equal(platform.feedback.at(-1)?.messageId, next.messageId);
-  assert.equal(platform.feedback.at(-1)?.decisionText, 'Model set to two.');
+  assert.equal(platform.feedback.at(-1)?.decisionText, 'Model set to model-2.');
   assert.equal(platform.sent.length, 2);
-  await press(nextModels, 'two');
+  await press(nextModels, 'model-2');
   assert.equal(
     platform.feedback.at(-1)?.notice,
     'This selection is unavailable.',
   );
 });
 
-for (const failedUpdate of [false, true]) {
-  test(`a submenu is delivered once when message editing ${failedUpdate ? 'fails' : 'is unsupported'}`, async (t) => {
-    const { platform } = await fixture(t, async function* () {});
-    if (failedUpdate)
-      platform.platform.updateChoices = async () => {
-        throw new Error('Cannot edit message');
-      };
-    await platform.emit(inbound('model', '/model'));
-    const original = platform.sent[0]!;
-    const send = platform.platform.send.bind(platform.platform);
-    platform.platform.send = (outbound, options) => {
-      assert.equal(
-        platform.feedback.at(-1)?.decisionText,
-        'Selected: /model test',
-      );
-      assert.equal(platform.feedback.at(-1)?.messageId, original.messageId);
-      return send(outbound, options);
-    };
-    const [provider] = original.buttons!;
+test('a platform without menu editing sends one message for each navigation step and the final result', async (t) => {
+  const { platform, store } = await fixture(t, async function* () {}, true, {
+    listModels: () => Array.from({ length: 23 }, (_, i) => `model-${i + 1}`),
+  });
+  const adapter = platform.platform;
+  adapter.capabilities.maxInlineButtons = 13;
+  const acknowledge = adapter.respondToApproval!.bind(adapter);
+  adapter.respondToApproval = async (feedback) => {
+    await acknowledge(feedback);
+    const text = feedback.decisionText || feedback.notice;
+    if (text) await adapter.send({ chatId: feedback.chatId, text });
+  };
+
+  await platform.emit(inbound('model', '/model'));
+  const tap = async (label: string) => {
+    const previous = platform.sent.at(-1)!;
+    const button = previous.buttons?.find((entry) => entry.label === label);
+    assert.ok(button);
+    const count = platform.sent.length;
     await platform.emit({
       type: 'callback',
-      callbackId: provider!.id,
-      chatId: original.chatId,
-      messageId: original.messageId,
+      callbackId: button.id,
+      chatId: previous.chatId,
+      messageId: previous.messageId,
+      queryId: `query-${count}`,
       userId: 'owner',
     });
-    assert.equal(platform.sent.length, 2);
-    const submenu = platform.sent[1]!;
-    assert.notEqual(submenu.messageId, original.messageId);
-    assert.match(submenu.text, /Choose a model for test/);
-    assert.deepEqual(
-      submenu.buttons?.map(({ label }) => label),
-      ['default'],
+    assert.equal(platform.sent.length, count + 1);
+    return platform.sent.at(-1)!;
+  };
+
+  const providers = platform.sent[0]!;
+  const first = await tap('test');
+  assert.equal(first.replyTo, providers.messageId);
+  assert.match(first.text, /Choose a model for test.*\nPage 1 of 3/);
+  const second = await tap('Next');
+  assert.match(second.text, /Page 2 of 3/);
+  assert.equal(second.replyTo, first.messageId);
+  assert.equal(second.buttons?.length, 13);
+  const third = await tap('Next');
+  assert.match(third.text, /Page 3 of 3/);
+  assert.equal(third.replyTo, second.messageId);
+  const back = await tap('Previous');
+  assert.match(back.text, /Page 2 of 3/);
+  assert.equal(back.replyTo, third.messageId);
+  assert.equal((await tap('model-12')).text, 'Model set to model-12.');
+  assert.equal(store.getChat(chat)?.model, 'model-12');
+});
+
+test('a submenu is delivered once after the fallback when message editing fails', async (t) => {
+  const { platform } = await fixture(t, async function* () {});
+  platform.platform.updateChoices = async () => {
+    throw new Error('Cannot edit message');
+  };
+  await platform.emit(inbound('model', '/model'));
+  const original = platform.sent[0]!;
+  const send = platform.platform.send.bind(platform.platform);
+  platform.platform.send = (outbound, options) => {
+    assert.equal(
+      platform.feedback.at(-1)?.decisionText,
+      'Selected: /model test',
     );
+    assert.equal(platform.feedback.at(-1)?.messageId, original.messageId);
+    return send(outbound, options);
+  };
+  const [provider] = original.buttons!;
+  await platform.emit({
+    type: 'callback',
+    callbackId: provider!.id,
+    chatId: original.chatId,
+    messageId: original.messageId,
+    userId: 'owner',
   });
-}
+  assert.equal(platform.sent.length, 2);
+  const submenu = platform.sent[1]!;
+  assert.notEqual(submenu.messageId, original.messageId);
+  assert.match(submenu.text, /Choose a model for test/);
+  assert.deepEqual(
+    submenu.buttons?.map(({ label }) => label),
+    ['default'],
+  );
+});
 
 test(
   'session commands honor the allowlist and localize usage and busy replies',
@@ -5215,17 +5147,7 @@ test(
     assert.ok(
       f.store.listPreviews().every(({ url }) => !url.includes('token')),
     );
-    await f.platform.emit(inbound('owner-preview-help', '/help', group));
-    const help = f.platform.sent.at(-1);
-    const preview = help?.buttons?.find(({ label }) => label === '/preview');
-    assert.ok(help && preview);
-    await f.platform.emit({
-      type: 'callback',
-      chatId: chat.chatId,
-      messageId: help.messageId,
-      callbackId: preview.id,
-      userId: 'owner',
-    });
+    await f.platform.emit(inbound('owner-preview-close', '/preview', group));
     const menu = f.platform.sent.at(-1);
     assert.ok(menu?.buttons?.length);
     assert.deepEqual(menu.buttons.map(({ label }) => label).sort(), [
