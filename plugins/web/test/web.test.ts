@@ -273,6 +273,7 @@ const tool = {
 async function fixture() {
   const directory = await mkdtemp(join(tmpdir(), 'tsugimori-web-'));
   const listeners = new Set<(event: AdminEvent) => void>();
+  const demo = createFixtureReader().reader;
   const chat = {
     ...ref,
     title: payload,
@@ -347,7 +348,7 @@ async function fixture() {
             outcome: { kind: 'delivered' },
             output: 'Agent reply',
           }
-        : undefined,
+        : demo.task(id),
     messageRaw: (requested, seq) =>
       requested.adapterId === ref.adapterId &&
       requested.chatId === ref.chatId &&
@@ -376,7 +377,7 @@ async function fixture() {
           }
         : undefined,
     chats: () => [chat],
-    tasks: createFixtureReader().reader.tasks,
+    tasks: demo.tasks,
     trace: () => undefined,
     toolCall: (task, seq) =>
       task === 'task' && seq === tool.seq ? tool : undefined,
@@ -558,6 +559,12 @@ test('offers the APIs before the UI is built and redirects bookmarked routes', a
     'good',
   ]);
   assert.equal(execution.events[0].data.text, execution.output);
+  const completed = await (
+    await fetch(f.url + '/api/task?id=fixture-completed', { headers })
+  ).json();
+  assert.equal(completed.task.cachedInputTokens, 36_150);
+  assert.equal(completed.task.cacheWriteTokens, 400);
+  assert.equal(completed.task.agentRuns[0].prompt.instructionsChanged, true);
   assert.deepEqual(await (await fetch(rawUrl, { headers })).json(), {
     payload,
   });
@@ -786,6 +793,8 @@ test('task list authenticates viewers, validates filters, and returns opaque cur
     matches.tasks.map((row: { id: string }) => row.id),
     ['fixture-completed'],
   );
+  assert.equal(matches.tasks[0].cachedInputTokens, 36_150);
+  assert.equal(matches.tasks[0].cacheWriteTokens, 400);
   assert.equal(matches.nextCursor, null);
 
   for (const query of [

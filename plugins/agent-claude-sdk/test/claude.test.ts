@@ -596,7 +596,12 @@ test(
             subtype: 'success',
             result: 'reply',
             num_turns: 2,
-            usage: { input_tokens: 600_000, output_tokens: 10 },
+            usage: {
+              input_tokens: 600_000,
+              cache_read_input_tokens: 280_000,
+              cache_creation_input_tokens: 23,
+              output_tokens: 10,
+            },
             modelUsage: {
               'subagent-model': { contextWindow: 50_000 },
               'fake-model': { contextWindow: 300_000 },
@@ -633,7 +638,9 @@ test(
         type: 'usage',
         contextTokens: 260_010,
         contextWindow: 300_000,
-        inputTokens: 600_000,
+        inputTokens: 880_023,
+        cachedInputTokens: 280_000,
+        cacheWriteTokens: 23,
         outputTokens: 10,
       },
     );

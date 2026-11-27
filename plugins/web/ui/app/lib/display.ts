@@ -127,3 +127,28 @@ export function tokenPair(input?: number | null, output?: number | null) {
     .map((value) => (value == null ? '—' : abbreviated.format(value)))
     .join(' / ');
 }
+
+export function cacheHitRatio(
+  input: number | null | undefined,
+  cached: number | null | undefined,
+  locale: Locale,
+) {
+  if (input == null || input <= 0 || cached == null) return;
+  return new Intl.NumberFormat(locale, {
+    style: 'percent',
+    maximumFractionDigits: 1,
+  }).format(cached / input);
+}
+
+export function taskTokenLabel(
+  task: {
+    cachedInputTokens?: number | null;
+    inputTokens?: number | null;
+    outputTokens?: number | null;
+  },
+  locale: Locale,
+) {
+  const pair = tokenPair(task.inputTokens, task.outputTokens);
+  const hit = cacheHitRatio(task.inputTokens, task.cachedInputTokens, locale);
+  return hit === undefined ? pair : `${pair} · ${i18n(locale).cacheHit} ${hit}`;
+}

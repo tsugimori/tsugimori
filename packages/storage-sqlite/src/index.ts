@@ -1785,12 +1785,14 @@ export class SqliteStore implements Store {
       : undefined;
     const order = sort === 'oldest' ? asc : desc;
     const traceTask = sql`json_extract(${traceSpans.attrs}, '$.taskId') = ${tasks.id}`;
-    const usage = (path: string) =>
+    const usage = (path: string, pairedWithInput = false) =>
       sql<number | null>`(
-      select json_extract(${traceSpans.attrs}, ${path}) from ${traceSpans}
+      select case when json_type(${traceSpans.attrs}, ${path}) in ('integer', 'real')
+        then json_extract(${traceSpans.attrs}, ${path}) end from ${traceSpans}
       where ${traceTask} and ${traceSpans.name} = 'agent.usage'
         and json_extract(${traceSpans.attrs}, '$.purpose') is not 'summary'
-        and json_type(${traceSpans.attrs}, ${path}) in ('integer', 'real')
+        and (json_type(${traceSpans.attrs}, ${path}) in ('integer', 'real')
+          ${pairedWithInput ? sql`or json_type(${traceSpans.attrs}, '$.inputTokens') in ('integer', 'real')` : sql.empty()})
       order by ${traceSpans.startedAt} desc, ${traceSpans.id} desc limit 1
     )`.mapWith(Number);
     const rows = this.#db
@@ -1829,6 +1831,8 @@ export class SqliteStore implements Store {
         )`.mapWith(Number),
         inputTokens: usage('$.inputTokens'),
         outputTokens: usage('$.outputTokens'),
+        cachedInputTokens: usage('$.cachedInputTokens', true),
+        cacheWriteTokens: usage('$.cacheWriteTokens', true),
         error: sql<string | null>`(
           select substr(json_extract(${traceSpans.attrs}, '$.error'), 1, 241)
           from ${traceSpans} where ${traceTask} and ${traceSpans.name} = 'task.failed'

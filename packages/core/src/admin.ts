@@ -1,5 +1,6 @@
 import type { Config } from '@tsugimori/config';
 import type {
+  AdminAgentRun,
   AdminChat,
   AdminEvent,
   AdminReader,
@@ -64,6 +65,7 @@ function taskDetails(
   task: TaskRecord,
   calls: readonly AdminToolCall[],
   spans: readonly TraceSpan[],
+  includeRuns = false,
 ): AdminTask {
   const known = new Set(calls.map(({ seq }) => seq));
   const tools = [...calls];
@@ -92,17 +94,27 @@ function taskDetails(
   const usages = spans.filter(
     ({ attrs, name }) => name === 'agent.usage' && attrs.purpose !== 'summary',
   );
-  // Codex can report cumulative usage repeatedly, so display the latest recorded usage.
-  const inputTokens = usages.findLast(
-    ({ attrs }) => typeof attrs.inputTokens === 'number',
-  )?.attrs.inputTokens;
-  const outputTokens = usages.findLast(
-    ({ attrs }) => typeof attrs.outputTokens === 'number',
-  )?.attrs.outputTokens;
+  const usage = (
+    key:
+      'cachedInputTokens' | 'cacheWriteTokens' | 'inputTokens' | 'outputTokens',
+    pairedWithInput = false,
+  ) => {
+    const value = usages.findLast(
+      ({ attrs }) =>
+        typeof attrs[key] === 'number' ||
+        (pairedWithInput && typeof attrs.inputTokens === 'number'),
+    )?.attrs[key];
+    return typeof value === 'number' ? value : undefined;
+  };
   const error = spans.findLast(({ name }) => name === 'task.failed')?.attrs
     .error;
   return {
     ...task,
+    ...(includeRuns && {
+      agentRuns: spans
+        .filter(({ attrs, name }) => name === 'agent.run' && !attrs.purpose)
+        .map(agentRunDetails),
+    }),
     agentTiming: agentTiming(spans, toolSeqs),
     silent:
       task.status === 'completed' &&
@@ -117,9 +129,66 @@ function taskDetails(
         a.startedAt - b.startedAt ||
         (a.seq < 0 && b.seq < 0 ? b.seq - a.seq : a.seq - b.seq),
     ),
-    inputTokens: typeof inputTokens === 'number' ? inputTokens : undefined,
-    outputTokens: typeof outputTokens === 'number' ? outputTokens : undefined,
+    inputTokens: usage('inputTokens'),
+    outputTokens: usage('outputTokens'),
+    cachedInputTokens: usage('cachedInputTokens', true),
+    cacheWriteTokens: usage('cacheWriteTokens', true),
     error: typeof error === 'string' ? error : undefined,
+  };
+}
+
+function agentRunDetails({ attrs, startedAt }: TraceSpan): AdminAgentRun {
+  const {
+    cachedInputTokens,
+    cacheWriteTokens,
+    historyChars,
+    imageCount,
+    inputTokens,
+    instructionsChanged,
+    instructionsChars,
+    instructionsHash,
+    newChars,
+    outputTokens,
+    resumed,
+    summaryChars,
+    toolCount,
+    toolsChanged,
+    toolsChars,
+    toolsHash,
+  } = attrs;
+  return {
+    startedAt,
+    ...(typeof inputTokens === 'number' && { inputTokens }),
+    ...(typeof outputTokens === 'number' && { outputTokens }),
+    ...(typeof cachedInputTokens === 'number' && { cachedInputTokens }),
+    ...(typeof cacheWriteTokens === 'number' && { cacheWriteTokens }),
+    ...(typeof historyChars === 'number' &&
+      typeof imageCount === 'number' &&
+      typeof instructionsChars === 'number' &&
+      typeof instructionsHash === 'string' &&
+      typeof newChars === 'number' &&
+      typeof resumed === 'boolean' &&
+      typeof summaryChars === 'number' &&
+      typeof toolCount === 'number' &&
+      typeof toolsChars === 'number' &&
+      typeof toolsHash === 'string' && {
+        prompt: {
+          historyChars,
+          imageCount,
+          instructionsChars,
+          instructionsHash,
+          newChars,
+          resumed,
+          summaryChars,
+          toolCount,
+          toolsChars,
+          toolsHash,
+          ...(typeof instructionsChanged === 'boolean' && {
+            instructionsChanged,
+          }),
+          ...(typeof toolsChanged === 'boolean' && { toolsChanged }),
+        },
+      }),
   };
 }
 
@@ -483,6 +552,7 @@ export function adminReader({
         task,
         store.taskToolCalls([taskId]).map(showTool),
         store.taskTrace(taskId),
+        true,
       );
       const bySeq = new Map(detailedTask.tools.map((call) => [call.seq, call]));
       const events: TaskEvent[] = [];
@@ -526,6 +596,7 @@ export function adminReader({
           task,
           store.taskToolCalls([taskId]).map(showTool),
           spans,
+          true,
         ),
         spans,
       };

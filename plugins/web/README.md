@@ -55,7 +55,7 @@ For development, run the gateway on loopback with `allowLocalWithoutAccess: true
 ## Views
 
 - **Overview** (`/`) shows agent state, sign-in, model and activity, recent tasks, webhook status, record usage and chat summaries.
-- **Tasks** (`/tasks`) filters tasks by status, agent, chat, platform, date and trigger text. **Task details** (`/task/:taskId`) shows the timing, context, transcript, tool calls, final output and trace waterfall.
+- **Tasks** (`/tasks`) filters tasks by status, agent, chat, platform, date and trigger text. The token column includes the prompt cache hit ratio when available. **Task details** (`/task/:taskId`) shows per-run input, cached input, cache writes, output, the hit ratio, and prompt composition alongside timing, context, transcript, tool calls, final output and trace.
 - **Chat** (`/chat/:adapter/:chatId[/:topic]`) opens the latest message window and can load older messages. The task timeline expands active tasks and refreshes them over Server-Sent Events. The Tasks tab and the details panel show related tasks, routing, summaries, approvals and schedules. Plain chat history also works with JavaScript disabled.
 - **Approvals and schedules** (`/ops`) shows pending and recently handled requests, grants and schedules. [Decisions go through the chat platform](../../README.md#approvals-and-schedules).
 
@@ -64,6 +64,8 @@ The header offers System, Light and Dark. System follows the device preference. 
 ## Task list API
 
 `GET /api/tasks` returns `{ tasks, nextCursor }` to authorized owners and viewers. Use the returned `nextCursor` with the same filters and sort order to load the next page. The default limit is 25, and the maximum is 100.
+
+Task rows include `cachedInputTokens` and `cacheWriteTokens`, with `null` for unreported counts. Task detail (`GET /api/task?id=…`) includes the available counts and `task.agentRuns`. Each run's `prompt` contains the resume flag, tool and image counts, character counts, and 16-character SHA-256 prefixes. Tool size and hash use the JSON of tool names, descriptions and schemas. Instructions use the rendered trusted system and rule blocks in request order. Summary, history and new-message sizes count block text. The trace records sizes and hashes for these measurements. When a prior run in the same provider session has hashes, the detail shows whether each hash changed.
 
 | Parameter         | Meaning                                                                                                                                                                                                                                                           |
 | ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

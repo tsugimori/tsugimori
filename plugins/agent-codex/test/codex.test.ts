@@ -250,7 +250,7 @@ for await (const line of createInterface({ input: process.stdin })) {
       notify('item/agentMessage/delta', { delta: 'ng', itemId: item.id });
       notify('item/completed', { item });
       if (input === 'post compact') compact(260000);
-      notify('thread/tokenUsage/updated', { tokenUsage: { last: { inputTokens: 7, outputTokens: 2 } } });
+      notify('thread/tokenUsage/updated', { tokenUsage: { total: { inputTokens: 200, cachedInputTokens: 90 }, last: { inputTokens: 7, cachedInputTokens: 3, outputTokens: 2 } } });
       notify('turn/completed', { turn: { id: turnId, status: 'completed', items: [item] } });
     };
     if (input === 'crash') {
@@ -732,7 +732,13 @@ test(
       ),
     );
     assert.ok(
-      events.some((event) => event.type === 'usage' && event.inputTokens === 7),
+      events.some(
+        (event) =>
+          event.type === 'usage' &&
+          event.inputTokens === 7 &&
+          event.cachedInputTokens === 3 &&
+          event.cacheWriteTokens === undefined,
+      ),
     );
     const native = events.find((event) => event.type === 'sessionId');
     assert.ok(native);

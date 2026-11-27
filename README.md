@@ -47,6 +47,8 @@ An agent can stay silent by returning `NO_REPLY: <short reason>` on a single lin
 
 Open a task in the owner console to inspect its trigger decision, resolved model, session, new input, transcript, output, delivery receipts, and stage timings. The context view loads referenced message and summary revisions and guideline files on demand. Git-tracked guidelines are read from their recorded commit. Modified or untracked guidelines in a Git workspace are saved by content hash. Guidelines in a workspace without Git have hash references only.
 
+The task list shows the prompt cache hit ratio when the provider reports it. Task details show token counts and prompt composition per agent run, including tool and instruction hashes that help identify changes across a resumed session.
+
 The console also shows raw Telegram and LINE message payloads when available. Private commands omit their raw payload. Agent text, visible reasoning, and tool details use secret redaction. Stored tool arguments and results are capped at 64 KiB per field, with a 4 KiB cap for web search results. Codex web search records include the item duration and any result data Codex exposes. `web.toolDetails.maxChars` controls how much the console displays.
 
 `records.maxBytes` defaults to 2 GiB (2,147,483,648 bytes). The gateway checks usage one minute after startup and hourly thereafter. When usage exceeds the cap, it prunes the oldest transcripts and task input/output, then raw message payloads, then unreferenced guideline blobs and summary versions. It aims for 90% of the cap and keeps task outcomes, message text, and tool-call metadata. Records have no age limit.

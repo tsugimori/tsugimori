@@ -200,6 +200,9 @@ export class TurnOutput {
           ...(window !== undefined && { contextWindow: window }),
           contextTokens:
             typeof usage.totalTokens === 'number' ? usage.totalTokens : null,
+          ...(typeof usage.cachedInputTokens === 'number' && {
+            cachedInputTokens: usage.cachedInputTokens,
+          }),
           inputTokens:
             typeof usage.inputTokens === 'number'
               ? usage.inputTokens

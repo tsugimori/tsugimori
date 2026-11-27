@@ -1284,6 +1284,14 @@ export class Tasks {
         work.workdir = workdir;
         return {
           blocks: entries.map(({ block }) => block),
+          newMessages: new Set(
+            entries
+              .filter(
+                ({ kind, block }) =>
+                  kind === 'new' && block.source === 'message',
+              )
+              .map(({ block }) => block),
+          ),
           media: entries
             .filter(
               (entry) =>
@@ -1296,6 +1304,7 @@ export class Tasks {
       .finally(endContext);
 
     let blocks = assembled.blocks;
+    let newMessages = assembled.newMessages;
     let sessionId = session?.sessionId;
     const answers: string[] = [];
     const describeSupplement = (message: TaskInput['message']) => {
@@ -1411,6 +1420,7 @@ export class Tasks {
             task,
             recorder,
             approvalPending,
+            newMessages,
             incognito: incognitoId !== undefined,
             waitForClose: () => work.stopExec !== undefined,
             scopeChatId:
@@ -1483,6 +1493,7 @@ export class Tasks {
         break;
       }
       blocks = next.map((input) => deliverSupplement(input).block);
+      newMessages = new Set(blocks);
       media = blocks;
     }
     const seenAfter = [

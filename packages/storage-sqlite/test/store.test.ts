@@ -733,10 +733,21 @@ test('lists task summaries with indexed filters and stable pagination on timesta
     attrs: { ...attrs, taskId: 'tie-z' },
   });
   store.writeTraceSpans([
-    metric('agent.usage', 2012, { inputTokens: 3, outputTokens: 4 }),
-    metric('agent.usage', 2013, { inputTokens: 7 }),
+    metric('agent.usage', 2012, {
+      inputTokens: 3,
+      cachedInputTokens: 2,
+      cacheWriteTokens: 1,
+      outputTokens: 4,
+    }),
+    metric('agent.usage', 2013, {
+      inputTokens: 7,
+      cachedInputTokens: 0,
+      cacheWriteTokens: 3,
+    }),
     metric('agent.usage', 2014, {
       inputTokens: 1000,
+      cachedInputTokens: 500,
+      cacheWriteTokens: 50,
       outputTokens: 900,
       purpose: 'summary',
     }),
@@ -784,10 +795,14 @@ test('lists task summaries with indexed filters and stable pagination on timesta
   assert.ok(!failed.triggerText?.includes('tail marker'));
   assert.equal(failed.durationMs, 30);
   assert.equal(failed.inputTokens, 7);
+  assert.equal(failed.cachedInputTokens, 0);
+  assert.equal(failed.cacheWriteTokens, 3);
   assert.equal(failed.outputTokens, 4);
   assert.equal(failed.toolCount, 2);
   assert.equal(failed.error, 'fixture error');
   assert.equal(first[0]?.durationMs, null);
+  assert.equal(first[0]?.cachedInputTokens, null);
+  assert.equal(first[0]?.cacheWriteTokens, null);
   assert.equal(first[2]?.triggerText, null);
   assert.equal(first[2]?.triggerReason, null);
 });

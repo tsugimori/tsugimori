@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type {
+  AdminAgentRun,
   AdminModelGap,
   AdminTaskRecord,
   AdminTrace,
@@ -18,6 +19,7 @@ import {
 } from '@lucide/vue';
 
 import {
+  cacheHitRatio,
   chatHref,
   chatKey,
   chatTitle,
@@ -25,7 +27,7 @@ import {
   taskDuration,
   tokenPair,
 } from '../../lib/display.ts';
-import { duration } from '../../lib/format.ts';
+import { duration, number } from '../../lib/format.ts';
 import { renderMarkdown } from '../../lib/markdown.ts';
 import {
   callAnchor,
@@ -56,6 +58,16 @@ const tracing = useConsoleQuery<AdminTrace>(
 const data = record.data;
 const trace = tracing.data;
 const task = computed(() => data.value?.task ?? trace.value?.task);
+const agentRuns = computed<readonly AdminAgentRun[]>(() => {
+  const current = task.value;
+  if (!current) return [];
+  return current.agentRuns?.length
+    ? current.agentRuns
+    : [{ ...current, startedAt: current.startedAt ?? current.createdAt }];
+});
+function count(value?: number) {
+  return value === undefined ? '—' : number(value);
+}
 const agentTiming = computed(() => task.value?.agentTiming);
 const start = computed(
   () => task.value?.startedAt ?? task.value?.createdAt ?? now.value,
@@ -577,9 +589,89 @@ useHead({
                 }}</small>
               </dd></template
             >
-            <dt>{{ m.tokens }}</dt>
-            <dd>{{ tokenPair(task.inputTokens, task.outputTokens) }}</dd>
           </dl>
+        </div>
+        <div
+          v-for="(run, index) in agentRuns"
+          :key="index"
+          class="summary-group"
+        >
+          <h3>
+            {{ m.tokens
+            }}<template v-if="agentRuns.length > 1">
+              · {{ t('Run', '執行') }} {{ index + 1 }}</template
+            >
+          </h3>
+          <dl class="key-values">
+            <dt>{{ m.input }}</dt>
+            <dd>{{ count(run.inputTokens) }}</dd>
+            <dt>{{ t('Cached input', '快取輸入') }}</dt>
+            <dd>{{ count(run.cachedInputTokens) }}</dd>
+            <dt>{{ t('Cache write', '寫入快取') }}</dt>
+            <dd>{{ count(run.cacheWriteTokens) }}</dd>
+            <dt>{{ m.output }}</dt>
+            <dd>{{ count(run.outputTokens) }}</dd>
+            <dt>{{ m.cacheHit }}</dt>
+            <dd>
+              {{
+                cacheHitRatio(run.inputTokens, run.cachedInputTokens, locale) ??
+                '—'
+              }}
+            </dd>
+          </dl>
+          <template v-if="run.prompt">
+            <h3>{{ t('Prompt', '提示詞') }}</h3>
+            <dl class="key-values">
+              <dt>{{ t('Resumed session', '延續工作階段') }}</dt>
+              <dd>{{ run.prompt.resumed ? t('Yes', '是') : t('No', '否') }}</dd>
+              <dt>{{ t('Tools', '工具') }}</dt>
+              <dd>
+                {{ number(run.prompt.toolCount) }} ·
+                {{ number(run.prompt.toolsChars) }} {{ t('chars', '字元') }}
+                <small
+                  ><code>{{ run.prompt.toolsHash }}</code>
+                  <template v-if="run.prompt.toolsChanged !== undefined">
+                    ·
+                    {{
+                      run.prompt.toolsChanged
+                        ? t('Changed', '已變更')
+                        : t('Unchanged', '無變更')
+                    }}
+                  </template>
+                </small>
+              </dd>
+              <dt>{{ t('Instructions', '指示') }}</dt>
+              <dd>
+                {{ number(run.prompt.instructionsChars) }}
+                {{ t('chars', '字元') }}
+                <small
+                  ><code>{{ run.prompt.instructionsHash }}</code>
+                  <template v-if="run.prompt.instructionsChanged !== undefined">
+                    ·
+                    {{
+                      run.prompt.instructionsChanged
+                        ? t('Changed', '已變更')
+                        : t('Unchanged', '無變更')
+                    }}
+                  </template>
+                </small>
+              </dd>
+              <dt>{{ t('Summary', '摘要') }}</dt>
+              <dd>
+                {{ number(run.prompt.summaryChars) }} {{ t('chars', '字元') }}
+              </dd>
+              <dt>{{ t('History', '歷史訊息') }}</dt>
+              <dd>
+                {{ number(run.prompt.historyChars) }} {{ t('chars', '字元') }}
+              </dd>
+              <dt>{{ t('New messages', '新訊息') }}</dt>
+              <dd>
+                {{ number(run.prompt.newChars) }} {{ t('chars', '字元') }}
+              </dd>
+              <dt>{{ t('Images', '圖片') }}</dt>
+              <dd>{{ number(run.prompt.imageCount) }}</dd>
+            </dl>
+          </template>
         </div>
         <div class="summary-group">
           <h3>{{ m.outcome }}</h3>

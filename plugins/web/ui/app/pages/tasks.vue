@@ -8,7 +8,12 @@ import type {
 
 import { ListTodo, SlidersHorizontal } from '@lucide/vue';
 
-import { chatHref, taskDuration, tokenPair, taskHref } from '../lib/display.ts';
+import {
+  chatHref,
+  taskDuration,
+  taskHref,
+  taskTokenLabel,
+} from '../lib/display.ts';
 import { duration } from '../lib/format.ts';
 
 const route = useRoute();
@@ -237,7 +242,7 @@ useHead({ title: computed(() => t('Tasks', '任務')) });
           </td>
           <td :data-label="m.toolLane">{{ task.toolCount }}</td>
           <td :data-label="m.tokens">
-            {{ tokenPair(task.inputTokens, task.outputTokens) }}
+            {{ taskTokenLabel(task, locale) }}
           </td>
           <td class="primary-cell">
             <NuxtLink

@@ -403,6 +403,10 @@ export interface ContextBlock {
   trust: 'trusted' | 'owner' | 'member' | 'untrusted';
 }
 
+export function isTrustedInstruction({ source, trust }: ContextBlock) {
+  return trust === 'trusted' && (source === 'system' || source === 'rule');
+}
+
 export function renderContextLine({
   content,
   message,
@@ -643,11 +647,16 @@ export type AgentEvent =
   | { error: Error; type: 'error' }
   | AgentCompactionEvent
   | {
+      /** Input tokens read from the provider prompt cache. */
+      cachedInputTokens?: number;
+      /** Input tokens written to the provider prompt cache (Claude only). */
+      cacheWriteTokens?: number;
       /** Tokens occupying the session context. Null when the provider only reports aggregate usage. */
       contextTokens?: number | null;
       /** Context capacity of the model used for this turn, when reported. */
       contextWindow?: number;
       costUsd?: number;
+      /** Total input tokens processed, including cache reads and writes. */
       inputTokens?: number;
       outputTokens?: number;
       type: 'usage';
@@ -834,6 +843,7 @@ export type {
   AccessIdentity,
   AccessRole,
   AdminAgent,
+  AdminAgentRun,
   AdminAgentTiming,
   AdminApprovals,
   AdminChat,
@@ -841,6 +851,7 @@ export type {
   AdminEvent,
   AdminModelGap,
   AdminOverview,
+  AdminPromptComposition,
   AdminReader,
   AdminSchedules,
   AdminTask,

@@ -3589,6 +3589,20 @@ test(
       f.platform.sent.map((message) => message.text),
       ['First\n\nSupplement'],
     );
+    await f.trace.flush();
+    const [task] = f.store.listChatTasks(chat);
+    const record = await f.gateway.admin.task(task!.id);
+    assert.deepEqual(
+      record?.task.agentRuns?.map(({ prompt }) => [
+        prompt?.resumed,
+        prompt?.historyChars,
+        prompt?.newChars,
+      ]),
+      [
+        [false, 0, 'original'.length],
+        [true, 0, 'more detail'.length],
+      ],
+    );
   },
 );
 
@@ -6149,7 +6163,12 @@ test('agent run spans summarize the last usage, native and framework tools, and 
     observed = request;
     yield { type: 'sessionId', sessionId: 'private-session' };
     yield { type: 'model', model: 'resolved-model', reasoning: 'high' };
-    yield { type: 'usage', inputTokens: 9, outputTokens: 3 };
+    yield {
+      type: 'usage',
+      inputTokens: 9,
+      cachedInputTokens: 3,
+      outputTokens: 3,
+    };
     yield { type: 'text.delta', text: 'private draft' };
     yield {
       type: 'tool.started',
@@ -6176,6 +6195,10 @@ test('agent run spans summarize the last usage, native and framework tools, and 
     yield {
       type: 'usage',
       inputTokens: 42,
+      ...(!request.resumeSessionId && {
+        cachedInputTokens: 30,
+        cacheWriteTokens: 0,
+      }),
       outputTokens: 5,
       contextTokens: 40,
     };
@@ -6183,6 +6206,19 @@ test('agent run spans summarize the last usage, native and framework tools, and 
   });
   f.platform.platform.capabilities.reactions = true;
   f.platform.platform.sendReaction = async () => {};
+  await f.platform.emit(
+    inbound('summarized', 'Earlier summarized message', {
+      chatKind: 'group',
+      userId: 'member',
+    }),
+  );
+  assert.ok(
+    f.store.saveSummary({
+      ...f.store.beginSummary(chat),
+      throughSeq: f.store.getMessage(chat, 'summarized')!.seq,
+      text: 'private summary',
+    }),
+  );
   await f.platform.emit(
     inbound('history', 'Earlier message', {
       chatKind: 'group',
@@ -6206,8 +6242,37 @@ test('agent run spans summarize the last usage, native and framework tools, and 
   const scope = sessionScope(chat, 'test', 'default', 'private-session');
   assert.equal(run?.status, 'ok');
   assert.ok(observed);
+  const tools = JSON.stringify(
+    observed.tools.map(({ name, description, schema }) => ({
+      name,
+      description,
+      schema,
+    })),
+  );
+  const instructions = observed.context
+    .filter(
+      ({ source, trust }) =>
+        trust === 'trusted' && (source === 'system' || source === 'rule'),
+    )
+    .map(renderContextLine)
+    .join('\n');
+  const hash = (text: string) =>
+    createHash('sha256').update(text).digest('hex').slice(0, 16);
+  const prompt = {
+    resumed: false,
+    toolCount: observed.tools.length,
+    toolsChars: tools.length,
+    toolsHash: hash(tools),
+    instructionsChars: instructions.length,
+    instructionsHash: hash(instructions),
+    summaryChars: 'private summary'.length,
+    historyChars: 'Earlier message'.length,
+    newChars: 'private prompt'.length,
+    imageCount: 0,
+  };
   assert.deepEqual(run?.attrs, {
     ...attrs,
+    ...prompt,
     resolvedModel: 'resolved-model',
     reasoning: 'high',
     sessionScope: scope,
@@ -6226,6 +6291,8 @@ test('agent run spans summarize the last usage, native and framework tools, and 
     toolCalls: 3,
     toolErrors: 1,
     inputTokens: 42,
+    cachedInputTokens: 30,
+    cacheWriteTokens: 0,
     outputTokens: 5,
     contextTokens: 40,
     outputChars: 'Final reply'.length,
@@ -6252,8 +6319,44 @@ test('agent run spans summarize the last usage, native and framework tools, and 
   );
   assert.doesNotMatch(
     JSON.stringify(spans.map(({ attrs }) => attrs)),
-    /private (?:draft|args|result|prompt)|private-session|Final reply/,
+    /private (?:draft|args|result|prompt|summary)|Earlier message|private-session|Final reply/,
   );
+  const detail = (await f.gateway.admin.task(task.id))?.task;
+  assert.equal(detail?.cachedInputTokens, 30);
+  assert.equal(detail?.cacheWriteTokens, 0);
+  assert.deepEqual(detail?.agentRuns, [
+    {
+      startedAt: run!.startedAt,
+      inputTokens: 42,
+      outputTokens: 5,
+      cachedInputTokens: 30,
+      cacheWriteTokens: 0,
+      prompt,
+    },
+  ]);
+  const [listed] = f.gateway.admin.tasks({ limit: 1 });
+  assert.equal(listed?.cachedInputTokens, 30);
+  assert.equal(listed?.cacheWriteTokens, 0);
+
+  await f.platform.emit(
+    inbound('usage-next', 'Follow-up', {
+      chatKind: 'group',
+      mentionsBot: true,
+    }),
+  );
+  await f.gateway.idle();
+  await f.trace.flush();
+  const [followUp] = f.store.listChatTasks(chat);
+  const nextDetail = (await f.gateway.admin.task(followUp!.id))!.task;
+  const [nextRun] = nextDetail.agentRuns!;
+  assert.equal(nextDetail.cachedInputTokens, undefined);
+  assert.equal(nextRun?.cachedInputTokens, undefined);
+  assert.equal(f.gateway.admin.tasks({ limit: 1 })[0]?.cachedInputTokens, null);
+  assert.equal(nextRun?.prompt?.resumed, true);
+  assert.equal(nextRun?.prompt?.newChars, 'Follow-up'.length);
+  assert.equal(nextRun?.prompt?.summaryChars, 0);
+  assert.equal(nextRun?.prompt?.instructionsChanged, true);
+  assert.equal(nextRun?.prompt?.toolsChanged, false);
 });
 
 test('failed agent run records the same short redacted error as the task outcome', async (t) => {

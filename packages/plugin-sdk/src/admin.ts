@@ -125,9 +125,36 @@ export interface AdminAgentTiming {
   toolMs: number;
 }
 
+export interface AdminPromptComposition {
+  historyChars: number;
+  imageCount: number;
+  instructionsChanged?: boolean;
+  instructionsChars: number;
+  instructionsHash: string;
+  newChars: number;
+  resumed: boolean;
+  summaryChars: number;
+  toolCount: number;
+  toolsChanged?: boolean;
+  toolsChars: number;
+  toolsHash: string;
+}
+
+export interface AdminAgentRun {
+  cachedInputTokens?: number;
+  cacheWriteTokens?: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  prompt?: AdminPromptComposition;
+  startedAt: number;
+}
+
 export interface AdminTask extends ChatRef {
   agentId: string | null;
+  agentRuns?: readonly AdminAgentRun[];
   agentTiming?: AdminAgentTiming;
+  cachedInputTokens?: number;
+  cacheWriteTokens?: number;
   createdAt: number;
   error?: string;
   finishedAt: number | null;
@@ -386,6 +413,8 @@ export interface AdminTaskFilter {
 
 export interface AdminTaskSummary extends ChatRef {
   agentId: string | null;
+  cachedInputTokens: number | null;
+  cacheWriteTokens: number | null;
   chatKey: string;
   chatTitle: string;
   createdAt: number;

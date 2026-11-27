@@ -26,6 +26,7 @@ import {
   defaultCompactAt,
   definePlugin,
   imageLimits,
+  isTrustedInstruction,
   nativeCompactionLimit,
   renderContextLine,
   toolWireName,
@@ -101,13 +102,6 @@ async function* imagePrompt(
     parent_tool_use_id: null,
     session_id: '',
   };
-}
-
-function trustedInstructions(block: ContextBlock) {
-  return (
-    block.trust === 'trusted' &&
-    (block.source === 'system' || block.source === 'rule')
-  );
 }
 
 const implementation = 'Claude Agent SDK';
@@ -328,10 +322,10 @@ export class ClaudeAgent implements AgentConnector {
       const query =
         this.#query ?? (await import('@anthropic-ai/claude-agent-sdk')).query;
       signal.throwIfAborted();
-      const instructions = request.context.filter(trustedInstructions);
+      const instructions = request.context.filter(isTrustedInstruction);
       const context = request.resumeSessionId
         ? request.context.filter(({ source }) => source === 'message')
-        : request.context.filter((block) => !trustedInstructions(block));
+        : request.context.filter((block) => !isTrustedInstruction(block));
       const registered = request.tools.length
         ? gatewayTools(
             (await import('@anthropic-ai/claude-agent-sdk')).createSdkMcpServer,
@@ -727,6 +721,8 @@ export class ClaudeAgent implements AgentConnector {
       tokens > this.#compactAt
     )
       session(sessionId, tokens);
+    const { cache_read_input_tokens, cache_creation_input_tokens } =
+      result.usage;
     yield {
       type: 'usage',
       contextTokens: tokens ?? null,
@@ -735,8 +731,14 @@ export class ClaudeAgent implements AgentConnector {
         typeof result.total_cost_usd === 'number' && {
           costUsd: result.total_cost_usd,
         }),
-      inputTokens: result.usage.input_tokens,
-      outputTokens: result.usage.output_tokens,
+      ...(cache_read_input_tokens != null && {
+        cachedInputTokens: cache_read_input_tokens,
+      }),
+      ...(cache_creation_input_tokens != null && {
+        cacheWriteTokens: cache_creation_input_tokens,
+      }),
+      inputTokens: contextTokens(result.usage, false),
+      outputTokens: result.usage.output_tokens ?? undefined,
     };
     const text = result.result || lastText;
     if (text) yield { type: 'text.final', text };

@@ -6,6 +6,7 @@ import type {
   AgentRequest,
   AgentTool,
   ChatRef,
+  ContextBlock,
   ToolCallStatus,
   ToolContext,
   ToolDefinition,
@@ -13,6 +14,7 @@ import type {
 import type { ApprovalContinuation, TraceSpan } from '@tsugimori/storage';
 import type { Tracer } from '@tsugimori/trace';
 
+import { isTrustedInstruction, renderContextLine } from '@tsugimori/plugin-sdk';
 import { Ajv } from 'ajv';
 import { createHash } from 'node:crypto';
 
@@ -27,6 +29,7 @@ interface AgentRunDependencies {
   approvalPending?: AbortSignal;
   incognito?: boolean;
   log: Logger;
+  newMessages?: ReadonlySet<ContextBlock>;
   onSession?(sessionId: string): void;
   recorder?: TaskRecorder;
   scopeChatId?: string | null;
@@ -57,12 +60,54 @@ function isPendingApproval(result: unknown) {
   );
 }
 
+function promptComposition(
+  request: AgentRequest,
+  newMessages: AgentRunDependencies['newMessages'],
+) {
+  const tools = JSON.stringify(
+    request.tools.map(({ name, description, schema }) => ({
+      name,
+      description,
+      schema,
+    })),
+  );
+  const instructions = request.context
+    .filter(isTrustedInstruction)
+    .map(renderContextLine)
+    .join('\n');
+  const hash = (value: string) =>
+    createHash('sha256').update(value).digest('hex').slice(0, 16);
+  let summaryChars = 0;
+  let historyChars = 0;
+  let newChars = 0;
+  for (const block of request.context) {
+    if (block.source === 'summary') summaryChars += block.content.length;
+    if (block.source === 'message') {
+      if (newMessages?.has(block)) newChars += block.content.length;
+      else historyChars += block.content.length;
+    }
+  }
+  return {
+    resumed: Boolean(request.resumeSessionId),
+    toolCount: request.tools.length,
+    toolsChars: tools.length,
+    toolsHash: hash(tools),
+    instructionsChars: instructions.length,
+    instructionsHash: hash(instructions),
+    summaryChars,
+    historyChars,
+    newChars,
+    imageCount: request.images?.length ?? 0,
+  };
+}
+
 export async function runAgent(
   {
     approvalPending,
     incognito,
     trace,
     log,
+    newMessages,
     onSession,
     recorder,
     task,
@@ -98,6 +143,10 @@ export async function runAgent(
     !ephemeral && request.resumeSessionId
       ? scope(request.resumeSessionId)
       : null;
+  const prompt = promptComposition(request, newMessages);
+  const previous = activeScope
+    ? trace.latestSessionSpan(activeScope, 'run')?.attrs
+    : undefined;
   const reportCompaction = (event: AgentCompactionEvent) => {
     trace.record(
       'agent.compaction',
@@ -122,6 +171,14 @@ export async function runAgent(
   };
   const runAttrs: TraceSpan['attrs'] = {
     ...attrs,
+    ...prompt,
+    ...(typeof previous?.toolsHash === 'string' && {
+      toolsChanged: previous.toolsHash !== prompt.toolsHash,
+    }),
+    ...(typeof previous?.instructionsHash === 'string' && {
+      instructionsChanged:
+        previous.instructionsHash !== prompt.instructionsHash,
+    }),
     sessionMode: request.forkSessionId
       ? 'fork'
       : ephemeral
@@ -155,10 +212,13 @@ export async function runAgent(
     const approvals = new Map<string, { id: string; waiting: boolean }>();
     let toolCalls = 0;
     let toolErrors = 0;
-    let usage: Record<
-      'contextTokens' | 'inputTokens' | 'outputTokens',
-      number | null
-    > = { contextTokens: null, inputTokens: null, outputTokens: null };
+    let usage: {
+      cachedInputTokens?: number;
+      cacheWriteTokens?: number;
+      contextTokens: number | null;
+      inputTokens: number | null;
+      outputTokens: number | null;
+    } = { contextTokens: null, inputTokens: null, outputTokens: null };
     let resolvedModel: string | undefined;
     let complete = false;
     let failure: unknown;
@@ -340,6 +400,12 @@ export async function runAgent(
               contextTokens,
               inputTokens: event.inputTokens ?? null,
               outputTokens: event.outputTokens ?? null,
+              ...(event.cachedInputTokens !== undefined && {
+                cachedInputTokens: event.cachedInputTokens,
+              }),
+              ...(event.cacheWriteTokens !== undefined && {
+                cacheWriteTokens: event.cacheWriteTokens,
+              }),
             };
             trace.record('agent.usage', {
               ...attrs,

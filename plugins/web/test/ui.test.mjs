@@ -1,8 +1,21 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
+import { cacheHitRatio, taskTokenLabel } from '../ui/app/lib/display.ts';
 import { renderMarkdown } from '../ui/app/lib/markdown.ts';
 import { modelGapsByEvent, taskLanes } from '../ui/app/lib/timeline.ts';
+
+test('task token counts show the localized cache hit ratio when reported', () => {
+  const usage = { inputTokens: 80, cachedInputTokens: 30, outputTokens: 5 };
+  assert.equal(taskTokenLabel(usage, 'en'), '80 / 5 · Cache hit 37.5%');
+  assert.equal(taskTokenLabel(usage, 'zh-TW'), '80 / 5 · 快取命中 37.5%');
+  assert.equal(cacheHitRatio(80, 0, 'en'), '0%');
+  assert.equal(cacheHitRatio(0, 0, 'en'), undefined);
+  assert.equal(
+    taskTokenLabel({ ...usage, cachedInputTokens: null }, 'en'),
+    '80 / 5',
+  );
+});
 
 test('markdown renders formatting and escapes stored HTML and unsafe URLs', () => {
   const html = renderMarkdown(

@@ -52,6 +52,8 @@ To route a chat to Claude, run `/model` and choose the Claude instance and model
 
 For a chat routed to Claude, `/status` shows the effective model, reasoning and speed when known, along with context usage and the reported model window when available. It shows compaction timing and session count from traces. When the SDK reports subscription rate-limit events, the card shows cached five-hour and seven-day quota windows and reset times as available. The card uses cached state. **System** shows whether the Claude instance is attached.
 
+Usage events now include cache reads and writes in `inputTokens`. Earlier releases reported only uncached input. The task console shows the cache read and write counts from the SDK's aggregate turn result when reported.
+
 ## Execution records
 
 Claude reports the active model and reasoning effort from the SDK initialization message through the `model` event. It emits `reasoning` events for visible thinking text supplied by the SDK.

@@ -51,6 +51,8 @@ For an existing agent, use `/login <id>` or `corepack pnpm exec tsugimori setup 
 
 For a chat routed to Codex, `/status` shows the implementation, effective model, effort and speed, context usage, session age, and cached provider quota and compaction details when available. The gateway uses reported session information and the configured or native defaults it knows about. **System** lists the agent's attachment state.
 
+Usage events include `cachedInputTokens` when reported by the app server in `tokenUsage.last`. Codex's `inputTokens` already includes these tokens. The task console uses the last reported input breakdown for the cache hit ratio.
+
 ## Execution records
 
 Codex reports the active model and reasoning effort through the SDK `model` event when the app server supplies them. It emits `reasoning` events for visible reasoning summaries supplied by the server.
