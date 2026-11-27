@@ -200,6 +200,11 @@ function visibleToAgent(incognitoId: number | null) {
       );
 }
 
+type ReplyVisibility = 'background' | 'explicit';
+type MessageVisibility =
+  | { incognitoId: number | null; reply?: 'background' }
+  | { incognitoId?: never; reply: 'explicit' };
+
 // Children precede their parents so platform cleanup can keep foreign keys on.
 const platformTables = [
   approvals,
@@ -2662,7 +2667,12 @@ export class SqliteStore implements Store {
         return visible
           ? [
               {
-                ...this.#redactMessageReply(ref, row, incognitoId),
+                ...this.#redactMessageReply(
+                  ref,
+                  row,
+                  incognitoId,
+                  'background',
+                ),
                 attachmentOffset: offset,
               },
             ]
@@ -2680,7 +2690,9 @@ export class SqliteStore implements Store {
     const incognitoId = this.getChat(ref)?.incognitoId ?? null;
     if (
       sourceSeq === undefined &&
-      (!this.#messageVisible(ref, messageId, migratedFromChatId, incognitoId) ||
+      (!this.#messageVisible(ref, messageId, migratedFromChatId, {
+        incognitoId,
+      }) ||
         this.isSetupSecret(ref, messageId, migratedFromChatId))
     )
       return;
@@ -2708,7 +2720,12 @@ export class SqliteStore implements Store {
       .orderBy(desc(messages.seq))
       .get();
     if (!row) return;
-    const visible = this.#redactMessageReply(ref, row, incognitoId);
+    const visible = this.#redactMessageReply(
+      ref,
+      row,
+      incognitoId,
+      sourceSeq === undefined ? 'background' : 'explicit',
+    );
     const reply = visible.metadata?.replyTo;
     const target =
       sourceSeq === undefined
@@ -2719,12 +2736,9 @@ export class SqliteStore implements Store {
 
   messageVisible(ref: ChatRef, messageId: string, migratedFromChatId: string) {
     ref = this.resolveChat(ref);
-    return this.#messageVisible(
-      ref,
-      messageId,
-      migratedFromChatId,
-      this.getChat(ref)?.incognitoId ?? null,
-    );
+    return this.#messageVisible(ref, messageId, migratedFromChatId, {
+      incognitoId: this.getChat(ref)?.incognitoId ?? null,
+    });
   }
 
   replyTargetVisible(
@@ -2733,37 +2747,36 @@ export class SqliteStore implements Store {
     migratedFromChatId: string,
   ) {
     ref = this.resolveChat(ref);
-    return this.#messageVisible(
-      ref,
-      messageId,
-      migratedFromChatId,
-      this.getChat(ref)?.incognitoId ?? null,
-      true,
-    );
+    return this.#messageVisible(ref, messageId, migratedFromChatId, {
+      reply: 'explicit',
+    });
   }
 
   #messageVisible(
     ref: ChatRef,
     messageId: string,
     migratedFromChatId: string,
-    incognitoId: number | null,
-    explicitReply = false,
+    { incognitoId, reply }: MessageVisibility,
   ) {
-    if (explicitReply && this.isSetupSecret(ref, messageId, migratedFromChatId))
+    if (reply && this.isSetupSecret(ref, messageId, migratedFromChatId))
       return false;
     const window =
-      explicitReply && incognitoId !== null
-        ? or(
-            isNull(messages.incognitoId),
-            eq(messages.incognitoId, incognitoId),
-          )
-        : visibleToAgent(incognitoId);
+      reply === 'explicit'
+        ? undefined
+        : reply === 'background' && incognitoId !== null
+          ? or(
+              isNull(messages.incognitoId),
+              eq(messages.incognitoId, incognitoId),
+            )
+          : visibleToAgent(incognitoId);
     const eligible = and(
       window,
       eq(messages.deleted, false),
-      explicitReply
-        ? sql`json_extract(${messages.metadata}, '$.sideQuestion') is not 1
-          and json_extract(${messages.metadata}, '$.privateReply') is not 1`
+      reply
+        ? sql`json_extract(${messages.metadata}, '$.privateReply') is not 1`
+        : undefined,
+      reply === 'background'
+        ? sql`json_extract(${messages.metadata}, '$.sideQuestion') is not 1`
         : undefined,
     );
     const rows = this.#db
@@ -2782,7 +2795,7 @@ export class SqliteStore implements Store {
       .all();
     return rows.length
       ? rows.every(({ visible }) => visible)
-      : !explicitReply && incognitoId === null;
+      : !reply && incognitoId === null;
   }
 
   visibleReply(ref: ChatRef, reply: ReplyTarget, migratedFromChatId: string) {
@@ -2800,21 +2813,24 @@ export class SqliteStore implements Store {
     reply: ReplyTarget,
     migratedFromChatId: string,
     incognitoId: number | null,
+    replyVisibility: ReplyVisibility = 'explicit',
   ): ReplyTarget {
     const chain = reply.replyChain;
     if (!chain?.length)
-      return this.#messageVisible(
-        ref,
-        reply.id,
-        migratedFromChatId,
+      return this.#messageVisible(ref, reply.id, migratedFromChatId, {
         incognitoId,
-      )
+      })
         ? reply
         : { id: reply.id };
+    // Keep the original reply filters for history tools, summaries, and unscoped attachment lookups.
+    const visibility: MessageVisibility =
+      replyVisibility === 'explicit'
+        ? { reply: 'explicit' }
+        : { incognitoId, reply: 'background' };
     // Walk from the direct quote toward older ancestors, dropping any prefix beyond a hidden link.
     const hidden = chain.findLastIndex(
       ({ id }) =>
-        !this.#messageVisible(ref, id, migratedFromChatId, incognitoId, true),
+        !this.#messageVisible(ref, id, migratedFromChatId, visibility),
     );
     if (hidden === -1) return reply;
     if (hidden === chain.length - 1) return { id: reply.id };
@@ -2826,7 +2842,12 @@ export class SqliteStore implements Store {
       MessageRecord,
       'metadata' | 'migratedFromChatId' | 'replyTo'
     >,
-  >(ref: ChatRef, row: Row, incognitoId: number | null): Row {
+  >(
+    ref: ChatRef,
+    row: Row,
+    incognitoId: number | null,
+    replyVisibility: ReplyVisibility,
+  ): Row {
     const replyId = row.metadata?.replyTo?.id ?? row.replyTo;
     if (!replyId) return row;
     const target = row.metadata?.replyTo ?? { id: replyId };
@@ -2835,6 +2856,7 @@ export class SqliteStore implements Store {
       target,
       row.migratedFromChatId,
       incognitoId,
+      replyVisibility,
     );
     if (visible === target) return row;
     return {
@@ -3016,7 +3038,12 @@ export class SqliteStore implements Store {
       .offset(offset)
       .all()
       .map((row) =>
-        this.#redactMessageReply(ref, readMessage(row), incognitoId),
+        this.#redactMessageReply(
+          ref,
+          readMessage(row),
+          incognitoId,
+          'background',
+        ),
       );
   }
 
@@ -3081,7 +3108,12 @@ export class SqliteStore implements Store {
     )
       .reverse()
       .map((row) =>
-        this.#redactMessageReply(ref, readMessage(row), incognitoId),
+        this.#redactMessageReply(
+          ref,
+          readMessage(row),
+          incognitoId,
+          'explicit',
+        ),
       );
   }
 
@@ -3149,7 +3181,9 @@ export class SqliteStore implements Store {
       .orderBy(search ? desc(messages.seq) : asc(messages.seq))
       .limit(options.limit)
       .all()
-      .map((row) => this.#redactMessageReply(ref, row, incognitoId));
+      .map((row) =>
+        this.#redactMessageReply(ref, row, incognitoId, 'background'),
+      );
   }
 
   getSession(ref: ChatRef, agentId: string, model?: string) {

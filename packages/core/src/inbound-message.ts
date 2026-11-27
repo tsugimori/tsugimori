@@ -31,7 +31,7 @@ export function resolveReplyTarget(
   migratedFromChatId = '',
 ): { replyTo?: ReplyTarget; sensitiveReply?: boolean } {
   if (!reply) return {};
-  const sensitive = (text: string | undefined) => {
+  const sensitive = (text: string | undefined, storedTarget = true) => {
     if (!text) return false;
     const command = parseCommand(text, bot?.username);
     return (
@@ -39,8 +39,8 @@ export function resolveReplyTarget(
       (command !== undefined &&
         command !== 'other-bot' &&
         (hasPrivateArguments(command.name) ||
-          command.name === 'btw' ||
-          command.name === 'ask'))
+          (!storedTarget &&
+            (command.name === 'btw' || command.name === 'ask'))))
     );
   };
   const load = (id: string) =>
@@ -49,9 +49,10 @@ export function resolveReplyTarget(
     !sensitive(message.text) &&
     store.replyTargetVisible(chat, message.messageId, migratedFromChatId);
   let target = load(reply.id);
+  // A side question supplied by the platform needs a stored target to establish the thread.
   if (
-    sensitive(reply.text) ||
-    sensitive(reply.quote) ||
+    sensitive(reply.text, target !== undefined) ||
+    sensitive(reply.quote, target !== undefined) ||
     (target
       ? !canQuote(target)
       : !store.messageVisible(chat, reply.id, migratedFromChatId) ||
@@ -79,11 +80,9 @@ export function resolveReplyTarget(
   };
   const immediate = toThreadMessage(target, reply);
   if (!target) return { replyTo: immediate };
-  const sensitiveReply = !store.messageVisible(
-    chat,
-    reply.id,
-    migratedFromChatId,
-  );
+  const sensitiveReply =
+    target.metadata?.sideQuestion === true ||
+    !store.messageVisible(chat, reply.id, migratedFromChatId);
   const chain = [immediate];
   const visited = new Set([reply.id]);
   while (target.replyTo && chain.length < replyMessageLimit && remaining > 0) {

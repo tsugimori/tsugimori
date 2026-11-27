@@ -117,7 +117,7 @@ const messages = {
     newBusy: (command: string) =>
       `This chat has pending work. Try /${command} when it finishes.`,
     incognitoOn:
-      "Incognito on. Reply to an earlier ordinary message to bring its thread into this conversation. After `/incognito off` or `/new`, I won't see what was said in this window.",
+      'Incognito on. Reply to an earlier message to bring its thread into this conversation. After `/incognito off` or `/new`, messages from this window are available by explicit reply.',
     incognitoEnabled: 'Incognito on.',
     incognitoOff: 'Incognito off.',
     newSuccess:
@@ -324,7 +324,7 @@ const messages = {
     newBusy: (command: string) =>
       `此聊天室還有任務未完成，請等任務結束後再使用 /${command}。`,
     incognitoOn:
-      '無痕模式已開啟。回覆先前的非無痕訊息，即可將該回覆串帶入這次對話。使用 `/incognito off` 或 `/new` 後，我就看不到這段無痕對話。',
+      '無痕模式已開啟。回覆先前的訊息，即可將該回覆串帶入這次對話。使用 `/incognito off` 或 `/new` 後，仍可透過明確回覆帶入這段無痕對話中的訊息。',
     incognitoEnabled: '無痕模式已開啟。',
     incognitoOff: '無痕模式已關閉。',
     newSuccess: '已開始新對話，下一則訊息會用新的 session。',

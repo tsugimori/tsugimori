@@ -651,7 +651,7 @@ export interface Store {
     user: Omit<UserRecord, 'username'> & Partial<Pick<UserRecord, 'username'>>,
   ): void;
   releaseRemoval(id: string, lease: string): void;
-  /** Whether an explicit reply can expose this known target in the current window. */
+  /** Whether an explicit reply can expose this known target. */
   replyTargetVisible(
     ref: ChatRef,
     messageId: string,

@@ -624,7 +624,7 @@ test('/btw uses a fresh session without a parent or fork support', async (t) => 
   );
 });
 
-test('/btw forks the current session and keeps both messages out of agent history', async (t) => {
+test('/btw forks the current session and makes both messages available by explicit reply', async (t) => {
   const requests: AgentRequest[] = [];
   const { gateway, platform, store, trace } = await fixture(
     t,
@@ -665,11 +665,7 @@ test('/btw forks the current session and keeps both messages out of agent histor
     mode: 'fork',
   });
 
-  await platform.emit(
-    inbound('next', 'Continue the original', {
-      replyTo: { id: sideReply, text: 'Side answer', quote: 'Side answer' },
-    }),
-  );
+  await platform.emit(inbound('next', 'Continue the original'));
   await gateway.idle();
   assert.equal(requests[2]?.resumeSessionId, 'parent');
   assert.deepEqual(
@@ -693,6 +689,69 @@ test('/btw forks the current session and keeps both messages out of agent histor
       .filter(({ name }) => name === 'agent.run')
       .map(({ attrs }) => attrs.sessionMode),
     ['new', 'fork', 'resume'],
+  );
+
+  await platform.emit(
+    inbound('quote-side', 'Follow up on the side question', {
+      replyTo: { id: sideReply, text: 'Side answer', quote: 'Side answer' },
+      raw: { replyText: 'Side answer' },
+    }),
+  );
+  await gateway.idle();
+  assert.equal(store.getMessage(chat, 'quote-side')?.raw, null);
+  const sideThread = [
+    ['side', '/btw Side question'],
+    [sideReply, 'Side answer'],
+  ];
+  assert.deepEqual(
+    requests[3]?.context
+      .at(-1)
+      ?.message?.replyTo?.replyChain?.map(({ id, text }) => [id, text]),
+    sideThread,
+  );
+
+  store.clearSession(chat);
+  await platform.emit(inbound('later', 'Another ordinary turn'));
+  await gateway.idle();
+  const later = requests[4]?.context;
+  assert.ok(
+    later?.every(
+      ({ message }) => !['side', sideReply].includes(message?.id ?? ''),
+    ),
+  );
+  assert.deepEqual(
+    later
+      ?.find(({ message }) => message?.id === 'quote-side')
+      ?.message?.replyTo?.replyChain?.map(({ id, text }) => [id, text]),
+    sideThread,
+  );
+  const history = store.historyMessages(chat, {
+    query: 'side question',
+    limit: 10,
+  });
+  assert.deepEqual(
+    history.map(({ messageId }) => messageId),
+    ['quote-side'],
+  );
+  assert.deepEqual(history[0]?.metadata?.replyTo, { id: sideReply });
+  const summary = store.summaryMessages(chat, 0, Number.MAX_SAFE_INTEGER, 20);
+  assert.deepEqual(
+    summary.find(({ messageId }) => messageId === 'quote-side')?.metadata
+      ?.replyTo,
+    { id: sideReply },
+  );
+
+  await platform.emit(
+    inbound('unrecorded-side', 'Quote with no stored target', {
+      replyTo: { id: 'unknown', text: '/btw Unrecorded side question' },
+    }),
+  );
+  await gateway.idle();
+  assert.deepEqual(
+    store.getMessage(chat, 'unrecorded-side')?.metadata?.replyTo,
+    {
+      id: 'unknown',
+    },
   );
 });
 
@@ -728,7 +787,9 @@ test('/ask uses fresh-session context without forking or replacing the main sess
   const main = store.getSession(chat, 'test');
   assert.equal(main?.sessionId, 'main-session');
 
-  await platform.emit(inbound('ask', '/ask One-off question'));
+  await platform.emit(
+    inbound('ask', '/ask One-off question', { replyTo: { id: 'recent' } }),
+  );
   await gateway.idle();
   const ask = requests[2]!;
   assert.equal(ask.ephemeral, true);
@@ -751,6 +812,7 @@ test('/ask uses fresh-session context without forking or replacing the main sess
     ],
   );
   assert.equal(platform.sent.at(-1)?.text, 'One-off answer');
+  const answerId = platform.sent.at(-1)!.messageId;
   assert.deepEqual(store.getSession(chat, 'test'), main);
   await platform.emit(inbound('resume', 'Back to the main conversation'));
   await gateway.idle();
@@ -761,6 +823,31 @@ test('/ask uses fresh-session context without forking or replacing the main sess
       .filter(({ name }) => name === 'agent.run')
       .map(({ attrs }) => attrs.sessionMode),
     ['new', 'resume', 'ephemeral', 'resume'],
+  );
+
+  await platform.emit(
+    inbound('ask-bridge', 'Reply to the one-off answer', {
+      replyTo: { id: answerId },
+    }),
+  );
+  await gateway.idle();
+  await platform.emit(
+    inbound('ask-thread', 'Read the whole thread', {
+      replyTo: { id: 'ask-bridge' },
+    }),
+  );
+  await gateway.idle();
+  assert.deepEqual(
+    requests
+      .at(-1)
+      ?.context.at(-1)
+      ?.message?.replyTo?.replyChain?.map(({ id, text }) => [id, text]),
+    [
+      ['recent', 'Recent main message'],
+      ['ask', '/ask One-off question'],
+      [answerId, 'One-off answer'],
+      ['ask-bridge', 'Reply to the one-off answer'],
+    ],
   );
 });
 
@@ -800,8 +887,8 @@ test('/incognito limits context and tools across turns, model changes, compactio
       JSON.stringify(range),
       /incognito-only|private\.pdf|private-sticker/i,
     );
+    await get.run({ messageId: 'private-first', index: 0 });
     for (const messageId of [
-      'private-first',
       'private-sticker',
       'outbound-sticker',
       hiddenReplyId,
@@ -906,7 +993,7 @@ test('/incognito limits context and tools across turns, model changes, compactio
   assert.equal(store.getMessage(chat, 'private-start')?.text, '/incognito');
   assert.equal(
     platform.sent.at(-1)?.text,
-    "Incognito on. Reply to an earlier ordinary message to bring its thread into this conversation. After `/incognito off` or `/new`, I won't see what was said in this window.",
+    'Incognito on. Reply to an earlier message to bring its thread into this conversation. After `/incognito off` or `/new`, messages from this window are available by explicit reply.',
   );
   assert.equal(store.getMessage(chat, 'private-start')?.incognitoId, start);
   assert.equal(
@@ -1129,9 +1216,14 @@ test('/incognito limits context and tools across turns, model changes, compactio
         .map(({ content }) => content),
       ['First turn in the next window'],
     );
-    assert.doesNotMatch(
-      JSON.stringify(requests.at(-1)?.context),
-      /Incognito-only|private-sticker\.webp/i,
+    const restartReply = requests.at(-1)?.context.at(-1)?.message?.replyTo;
+    assert.deepEqual(
+      restartReply?.replyChain?.map(({ id, text }) => [id, text]),
+      [['private-sticker', 'Incognito-only sticker']],
+    );
+    assert.equal(
+      restartReply?.replyChain?.[0]?.attachments[0]?.name,
+      'private-sticker.webp',
     );
 
     const count = requests.length;
@@ -1140,13 +1232,6 @@ test('/incognito limits context and tools across turns, model changes, compactio
     assert.equal(platform.sent.at(-1)?.text, 'Incognito off.');
     assert.equal(reopened.getSession(chat, 'test'), undefined);
     assert.equal(requests.length, count);
-    await platform.emit(
-      inbound('outbound-sticker-quote', 'Public sticker reference', {
-        chatKind: 'group',
-        userId: 'bystander',
-        replyTo: { id: 'outbound-sticker', attachments: [sticker] },
-      }),
-    );
     await platform.emit(
       inbound('regular', 'Ordinary turn', {
         replyTo: {
@@ -1163,11 +1248,14 @@ test('/incognito limits context and tools across turns, model changes, compactio
     assert.equal(requests.at(-1)?.resumeSessionId, undefined);
     assert.doesNotMatch(
       JSON.stringify(requests.at(-1)?.context),
-      /Incognito-only|First private turn|Second private turn|First turn in the next window|private\.pdf|private-sticker\.webp/i,
+      /Incognito-only agent answer|Second private turn|First turn in the next window|private-sticker\.webp/i,
     );
-    assert.equal(
-      requests.at(-1)?.context.at(-1)?.message?.replyTo?.id,
-      'private-first',
+    assert.deepEqual(
+      requests
+        .at(-1)
+        ?.context.at(-1)
+        ?.message?.replyTo?.replyChain?.map(({ id, text }) => [id, text]),
+      [['private-first', 'Incognito-only edit']],
     );
     const summaryInput = reopened.summaryMessages(
       chat,
@@ -1178,6 +1266,11 @@ test('/incognito limits context and tools across turns, model changes, compactio
     assert.ok(summaryInput.some(({ text }) => text === 'Old conversation'));
     assert.ok(summaryInput.some(({ text }) => text === 'Ordinary turn'));
     assert.ok(summaryInput.every(({ incognitoId }) => incognitoId === null));
+    assert.deepEqual(
+      summaryInput.find(({ messageId }) => messageId === 'regular')?.metadata
+        ?.replyTo,
+      { id: 'private-first' },
+    );
     assert.ok(
       reopened
         .listChatMessages(chat)
@@ -1230,9 +1323,11 @@ test('incognito explicit replies expose only the quoted thread and its attachmen
           const fetch = (messageId: string, index = 0) =>
             get.run({ messageId, index });
           if (source === 'read-thread') {
+            await fetch('old-private');
             await fetch('root');
             await fetch('latest');
           } else {
+            await assert.rejects(fetch('old-private'), /Attachment not found/);
             await assert.rejects(fetch('root'), /Attachment not found/);
             await assert.rejects(fetch('latest'), /Attachment not found/);
           }
@@ -1273,9 +1368,11 @@ test('incognito explicit replies expose only the quoted thread and its attachmen
   const file = { kind: 'file', index: 0, name: 'file.pdf' } as const;
 
   await platform.emit(inbound('earlier-start', '/incognito on'));
-  await post('old-private', 'Earlier window text');
+  await post('old-private', 'Earlier window text', undefined, {
+    attachments: [{ ...file, fileId: 'earlier-window-file' }],
+  });
   await platform.emit(inbound('earlier-end', '/incognito off'));
-  await post('root', 'First message', undefined, {
+  await post('root', 'First message', 'old-private', {
     attachments: [
       { kind: 'image', index: 0, fileId: 'root-image', mime: 'image/png' },
     ],
@@ -1290,16 +1387,33 @@ test('incognito explicit replies expose only the quoted thread and its attachmen
     attachments: [{ ...file, fileId: 'unrelated-file' }],
   });
   await post('deleted', 'Deleted text', 'root');
-  await post('side', '/ask Side question text', 'root');
   await post('pairing', 'Pairing reply with /pair abcdefghijklmnop', 'root');
   await post('private-command', '/login example-secret', 'root');
   await post('setup-secret', 'Setup secret text', 'root');
+  store.recordOutbound({
+    ...chat,
+    messageId: 'private-reply',
+    text: 'Private reply text',
+    direction: 'outbound',
+    replyTo: 'root',
+    userId: null,
+    threadId: null,
+    raw: null,
+    metadata: { privateReply: true },
+  });
+  assert.equal(
+    store.getMessage(chat, 'pairing')?.text,
+    'Pairing reply with /pair [redacted]',
+  );
+  assert.equal(
+    store.getMessage(chat, 'private-command')?.text,
+    '/login [redacted]',
+  );
   const blockers = [
-    'old-private',
     'deleted',
-    'side',
     'pairing',
     'private-command',
+    'private-reply',
     'setup-secret',
     'missing',
   ];
@@ -1320,8 +1434,8 @@ test('incognito explicit replies expose only the quoted thread and its attachmen
   assert.deepEqual(
     downloads,
     hasFfmpeg
-      ? ['root-image', 'root-image', 'latest-file']
-      : ['root-image', 'latest-file'],
+      ? ['root-image', 'earlier-window-file', 'root-image', 'latest-file']
+      : ['earlier-window-file', 'root-image', 'latest-file'],
   );
 
   const [request] = requests;
@@ -1343,6 +1457,7 @@ test('incognito explicit replies expose only the quoted thread and its attachmen
   assert.deepEqual(
     reply?.replyChain?.map(({ id, text }) => [id, text]),
     [
+      ['old-private', 'Earlier window text'],
       ['root', 'First message'],
       ['middle', 'Second message'],
       ['latest', 'Third message'],
@@ -1355,9 +1470,9 @@ test('incognito explicit replies expose only the quoted thread and its attachmen
     recent.map(({ messageId }) => messageId),
     ['read-thread'],
   );
-  assert.equal(recent[0]?.metadata?.replyTo?.replyChain?.length, 3);
+  assert.equal(recent[0]?.metadata?.replyTo?.replyChain?.length, 4);
   assert.deepEqual(
-    store.historyMessages(chat, { query: 'First message', limit: 10 }),
+    store.historyMessages(chat, { query: 'Earlier window text', limit: 10 }),
     [],
   );
   assert.deepEqual(store.messageAlbum(chat, 'old-album', ''), []);
