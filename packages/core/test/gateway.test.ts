@@ -39,6 +39,7 @@ import { setTimeout as delay, setImmediate } from 'node:timers/promises';
 import type { Logger } from '../src/index.ts';
 import type { WebImageNetwork } from '../src/web-image.ts';
 
+import { LocalSandbox } from '../../../plugins/exec-local-sandbox/src/index.ts';
 import { LineApi } from '../../../plugins/platform-line/src/api.ts';
 import { mapEvent } from '../../../plugins/platform-line/src/updates.ts';
 import { telegramAttachments } from '../../../plugins/platform-telegram/src/inbound-media.ts';
@@ -6843,6 +6844,58 @@ test('send tools require advertised capabilities and keep files and reactions in
 
 const webPng = Buffer.from('89504e470d0a1a0a', 'hex');
 
+test('send.image maps sandbox paths and enforces chat workspace file checks', async (t) => {
+  const uploaded: string[] = [];
+  const f = await fixture(
+    t,
+    async function* (request) {
+      const image = request.tools.find(({ name }) => name === 'send.image');
+      assert.ok(image);
+      assert.match(image.description, /absolute path under \/workspace\//);
+      await writeFile(join(request.workdir, 'a.png'), webPng);
+      await writeFile(join(request.workdir, 'relative.png'), webPng);
+      await writeFile(join(request.workdir, '.env'), 'test fixture');
+      await writeFile(join(request.workdir, 'agents.json'), '{}');
+      await writeFile(join(request.workdir, 'large.png'), Buffer.alloc(17));
+      await symlink('a.png', join(request.workdir, 'link.png'));
+
+      await image.run({ path: '/workspace/a.png' });
+      await image.run({ path: 'relative.png' });
+      for (const path of [
+        '/workspace',
+        '/workspace/../etc/passwd',
+        '/workspace/.env',
+        '/workspace/agents.json',
+        '/workspace/link.png',
+        '/workspace-other/a.png',
+        '/references/a.png',
+      ])
+        await assert.rejects(image.run({ path }), /accessible chat workspace/);
+      await assert.rejects(
+        image.run({ path: '/workspace/large.png' }),
+        /size limit/,
+      );
+      yield { type: 'text.final', text: 'NO_REPLY: Images sent' };
+    },
+    true,
+    {
+      plugins: [{ name: 'test-exec', execBackends: [new LocalSandbox()] }],
+    },
+  );
+  const { platform } = f.platform;
+  platform.capabilities.images = { maxBytes: 16 };
+  platform.sendImage = async ({ file }) => {
+    assert.deepEqual(Buffer.from(file.bytes), webPng);
+    assert.equal(file.mime, 'image/png');
+    uploaded.push(file.name);
+    return { messageId: file.name };
+  };
+  await f.platform.emit(inbound('source', 'Send the workspace images'));
+  await f.gateway.idle();
+  assert.equal(f.store.listChatTasks(chat)[0]?.status, 'sent');
+  assert.deepEqual(uploaded, ['a.png', 'relative.png']);
+});
+
 test('send.audio validates sources, encodes voice and music, and records delivery', async (t) => {
   if (spawnSync('ffmpeg', ['-version']).status !== 0) {
     t.skip('ffmpeg is unavailable on PATH');
@@ -7030,6 +7083,10 @@ test('send.image provides the redirected URL only for web sources and omits quer
         },
       );
       await writeFile(join(request.workdir, 'local.png'), webPng);
+      await assert.rejects(
+        image.run({ path: '/workspace/local.png' }),
+        /accessible chat workspace/,
+      );
       await image.run({ path: 'local.png' });
       await image.run({ attachment: { messageId: 'source', index: 0 } });
       yield { type: 'text.final', text: 'NO_REPLY: Image sent' };

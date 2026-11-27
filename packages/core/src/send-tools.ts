@@ -1,5 +1,6 @@
 import type {
   ChatRef,
+  ExecBackend,
   ExecScope,
   MediaDestination,
   MediaFile,
@@ -19,6 +20,7 @@ import {
   basename,
   extname,
   isAbsolute,
+  posix,
   relative,
   resolve,
   sep,
@@ -62,6 +64,7 @@ type Source =
   { attachment: { index: number; messageId: string } } | { path: string };
 
 interface Dependencies {
+  backend(): ExecBackend | undefined;
   outbound: Outbound;
   scope(workdir: string): ExecScope;
   store: Store;
@@ -84,6 +87,10 @@ export function sendTools(
   round?: Round,
 ) {
   const tools: ToolDefinition[] = [];
+  const sandboxRoot = deps.backend()?.sandboxRoot;
+  const workspaceSource = sandboxRoot
+    ? `a path relative to the chat workspace or an absolute path under ${sandboxRoot}/`
+    : 'a path in the chat workspace';
   const current = () => {
     if (!round)
       throw new ToolFailure('Media tools require an active chat task');
@@ -183,7 +190,7 @@ export function sendTools(
     tools.push({
       name: 'send.audio',
       description:
-        'Send audio to this chat from exactly one source: a workspace path, chat attachment, or HTTPS URL.' +
+        `Send audio to this chat from one source. Use ${workspaceSource}, a chat attachment, or an HTTPS URL.` +
         (voice
           ? ' Sends a voice message by default. Set music=true for an audio track.'
           : '') +
@@ -223,8 +230,8 @@ export function sendTools(
       name: `send.${kind}`,
       description:
         kind === 'image'
-          ? 'Send an image to this chat from exactly one source: a workspace path, chat attachment, or HTTP(S) URL.'
-          : `Send ${adapter.kind === 'line' ? 'an MP4 video' : 'a file or MP4 video'} to this chat from a path in the chat workspace or an attachment reference from this chat. Provide exactly one source.` +
+          ? `Send an image to this chat from one source. Use ${workspaceSource}, a chat attachment, or an HTTP(S) URL.`
+          : `Send ${adapter.kind === 'line' ? 'an MP4 video' : 'a file or MP4 video'} to this chat from one source. Use ${workspaceSource} or an attachment reference from this chat.` +
             completeReply,
       schema: uploadSchema(kind === 'image'),
       async run(args, task) {
@@ -294,7 +301,14 @@ async function loadMedia(
   }
   const workdir = await deps.workdir(chat);
   const scope = deps.scope(workdir);
-  return readWorkspaceMedia(scope, source.path, limit, signal, error);
+  return readWorkspaceMedia(
+    scope,
+    source.path,
+    deps.backend()?.sandboxRoot,
+    limit,
+    signal,
+    error,
+  );
 }
 
 const mediaTypes = new Map([
@@ -331,12 +345,12 @@ function inside(root: string, path: string) {
 async function readWorkspaceMedia(
   scope: ExecScope,
   path: string,
+  sandboxRoot: string | undefined,
   limit: number,
   signal: AbortSignal,
   limitError: () => ToolFailure,
 ) {
   const { workdir, denyRead } = scope;
-  const target = resolve(workdir, path);
   const allowed = (root: string, candidate: string) =>
     candidate !== root &&
     inside(root, candidate) &&
@@ -348,6 +362,16 @@ async function readWorkspaceMedia(
     new ToolFailure(
       'File is outside the accessible chat workspace or is unavailable',
     );
+  let workspacePath = path;
+  if (
+    sandboxRoot &&
+    (path === sandboxRoot || path.startsWith(`${sandboxRoot}/`))
+  ) {
+    workspacePath = posix.relative(sandboxRoot, path);
+    if (workspacePath === '..' || workspacePath.startsWith('../'))
+      throw unavailable();
+  }
+  const target = resolve(workdir, workspacePath);
   if (
     path.includes('\0') ||
     /^[a-z][a-z\d+.-]*:\/\//i.test(path) ||

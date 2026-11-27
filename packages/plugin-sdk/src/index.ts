@@ -527,6 +527,8 @@ export interface ExecSession {
 
 export interface ExecBackend {
   id: string;
+  /** Absolute POSIX path of the chat workdir inside the sandbox, without a trailing slash. */
+  readonly sandboxRoot?: string;
   start(scope: ExecScope): Promise<ExecSession>;
 }
 

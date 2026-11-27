@@ -123,6 +123,7 @@ interface BackendDependencies {
 
 export class LocalSandbox implements ExecBackend {
   readonly id = 'local-sandbox';
+  readonly sandboxRoot = sandboxRoot;
   readonly #deps: BackendDependencies;
 
   constructor(deps: BackendDependencies = {}) {
