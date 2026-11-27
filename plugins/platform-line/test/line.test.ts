@@ -15,6 +15,8 @@ import {
   SendFailure,
   SetupError,
 } from '@tsugimori/plugin-sdk';
+import { checkAdapterContract } from '@tsugimori/plugin-sdk/contract-test';
+import { HostedMedia } from '@tsugimori/plugin-sdk/hosted-media';
 import assert from 'node:assert/strict';
 import { createHmac } from 'node:crypto';
 import { mkdtemp, readdir, rm } from 'node:fs/promises';
@@ -55,6 +57,7 @@ interface ApiCall {
 function fakeApi(
   override?: (
     call: ApiCall,
+    signal?: AbortSignal | null,
   ) => Response | undefined | Promise<Response | undefined>,
   expectedToken = token,
 ) {
@@ -68,7 +71,7 @@ function fakeApi(
     const body = init?.body ? JSON.parse(String(init.body)) : undefined;
     const call = { path, headers, body, method: init?.method };
     calls.push(call);
-    const result = await override?.(call);
+    const result = await override?.(call, init?.signal);
     if (result) return result;
     if (path === '/v2/bot/info') return Response.json(bot);
     if (path.includes('/profile/') || path.includes('/member/'))
@@ -112,9 +115,9 @@ async function fakeIngress(t: TestContext) {
   const server = createServer((req, res) => {
     const path = req.url?.split('?', 1)[0]?.replace(/\/$/, '') ?? '';
     const exact = routes.get(path);
-    const prefix = [...routes].find(
-      ([base, value]) => value.prefix && path.startsWith(base + '/'),
-    );
+    const prefix = [...routes]
+      .filter(([base, value]) => value.prefix && path.startsWith(base + '/'))
+      .sort(([a], [b]) => b.length - a.length)[0];
     const route = exact?.route ?? prefix?.[1].route;
     if (route) route(req, res);
     else res.writeHead(404).end();
@@ -136,6 +139,11 @@ async function fakeIngress(t: TestContext) {
     port: (server.address() as AddressInfo).port,
   };
 }
+
+const unusedMediaHost = {
+  checkAvailable: () => assert.fail('Unexpected hosted media check'),
+  publish: async () => assert.fail('Unexpected hosted media publication'),
+};
 
 function publicIngress(baseUrl: string): WebhookIngress {
   return {
@@ -191,14 +199,37 @@ async function waitFor(predicate: () => boolean) {
   }
 }
 
+async function post(
+  base: string,
+  events: unknown[],
+  {
+    path = '/line/main/',
+    mode = 'valid',
+    raw,
+  }: { mode?: 'bad' | 'missing' | 'valid'; path?: string; raw?: string } = {},
+) {
+  const body = raw ?? JSON.stringify({ events });
+  const signature = createHmac('sha256', secret).update(body).digest('base64');
+  const response = await fetch(base + path, {
+    method: 'POST',
+    body,
+    headers:
+      mode === 'missing'
+        ? {}
+        : {
+            'x-line-signature':
+              mode === 'bad' ? 'a'.repeat(signature.length) : signature,
+          },
+  });
+  await response.arrayBuffer();
+  return response.status;
+}
 async function fixture(
   t: TestContext,
   api = fakeApi(),
   options: {
     emit?: AdapterContext['emit'];
     mediaDirectory?: string;
-    mediaMaxBytes?: number;
-    mediaTtlMs?: number;
     now?: number;
     publicMedia?: boolean;
     replyTokenTtlMs?: number;
@@ -212,14 +243,20 @@ async function fixture(
   }
   let now = options.now ?? 1000;
   const mediaDirectory = options.mediaDirectory ?? (await tempDirectory(t));
+  const mediaHost = new HostedMedia({
+    directory: mediaDirectory,
+    eventPrefix: 'line',
+    ingress,
+    now: () => now,
+    path: '/line/main/media/',
+  });
   const adapter = new LineAdapter(
     { fetch: api.fetch, now: () => now },
     'main',
     {
       ingress,
-      mediaDirectory,
-      mediaMaxBytes: options.mediaMaxBytes,
-      mediaTtlMs: options.mediaTtlMs,
+      mediaHost,
+      postbackDirectory: mediaDirectory,
       secret,
       token,
       replyTokenTtlMs: options.replyTokenTtlMs,
@@ -231,6 +268,10 @@ async function fixture(
   const warnings: string[] = [];
   const debug: string[] = [];
   const info: Parameters<NonNullable<AdapterContext['logInfo']>>[] = [];
+  await mediaHost.start(new AbortController().signal, {
+    logInfo: (...event) => info.push(event),
+  });
+  t.after(() => mediaHost.stop());
   await adapter.start({
     async emit(event) {
       if (event.type === 'callback') callbacks.push(event);
@@ -245,32 +286,6 @@ async function fixture(
     logWarning: (event) => warnings.push(event),
   });
   const base = `http://127.0.0.1:${port}`;
-  async function post(
-    events: unknown[],
-    {
-      path = '/line/main/',
-      mode = 'valid',
-      raw,
-    }: { mode?: 'bad' | 'missing' | 'valid'; path?: string; raw?: string } = {},
-  ) {
-    const body = raw ?? JSON.stringify({ events });
-    const signature = createHmac('sha256', secret)
-      .update(body)
-      .digest('base64');
-    const response = await fetch(base + path, {
-      method: 'POST',
-      body,
-      headers:
-        mode === 'missing'
-          ? {}
-          : {
-              'x-line-signature':
-                mode === 'bad' ? 'a'.repeat(signature.length) : signature,
-            },
-    });
-    await response.arrayBuffer();
-    return response.status;
-  }
   return {
     adapter,
     api,
@@ -280,7 +295,8 @@ async function fixture(
     info,
     events,
     mediaDirectory,
-    post,
+    post: (events: unknown[], options?: Parameters<typeof post>[2]) =>
+      post(base, events, options),
     warnings,
     advance(ms: number) {
       now += ms;
@@ -825,13 +841,15 @@ test('LINE instances share a listener and keep routes, credentials, and event st
     secret,
     token,
     ingress,
-    mediaDirectory: await tempDirectory(t),
+    mediaHost: unusedMediaHost,
+    postbackDirectory: await tempDirectory(t),
   });
   const other = new LineAdapter(otherApi, 'other:bot', {
     secret: otherSecret,
     token: otherToken,
     ingress,
-    mediaDirectory: await tempDirectory(t),
+    mediaHost: unusedMediaHost,
+    postbackDirectory: await tempDirectory(t),
   });
   t.after(async () => {
     await Promise.all([first.stop(), other.stop()]);
@@ -898,7 +916,8 @@ test('LINE reports ingress bind failures and honors startup cancellation', async
     secret,
     token,
     ingress,
-    mediaDirectory: await tempDirectory(t),
+    mediaHost: unusedMediaHost,
+    postbackDirectory: await tempDirectory(t),
   };
   const busy = new LineAdapter(api, 'busy', {
     ...options,
@@ -1600,85 +1619,6 @@ function sentMediaPaths(api: ReturnType<typeof fakeApi>) {
   );
 }
 
-test('LINE media survives an adapter restart and startup removes expired files', async (t) => {
-  const f = await fixture(t, fakeApi(), {
-    publicMedia: true,
-    mediaTtlMs: 2000,
-  });
-  await sendSmallImage(f.adapter);
-  const expiredPaths = sentMediaPaths(f.api);
-  f.advance(1500);
-  await sendSmallImage(f.adapter);
-  const livePaths = sentMediaPaths(f.api);
-  await f.adapter.stop();
-  assert.equal((await readdir(f.mediaDirectory)).length, 8);
-
-  const restarted = await fixture(t, fakeApi(), {
-    publicMedia: true,
-    mediaDirectory: f.mediaDirectory,
-    now: 3000,
-  });
-  assert.deepEqual(
-    (await readdir(f.mediaDirectory)).sort(),
-    livePaths
-      .flatMap((path) => {
-        const token = path.split('/').at(-1)!;
-        return [token, token + '.json'];
-      })
-      .sort(),
-  );
-  for (const path of expiredPaths)
-    assert.equal((await fetch(restarted.base + path)).status, 404);
-  for (const path of livePaths) {
-    const response = await fetch(restarted.base + path);
-    assert.equal(response.status, 200);
-    assert.equal(
-      response.headers.get('cache-control'),
-      'public, max-age=1, immutable',
-    );
-    assert.deepEqual(Buffer.from(await response.arrayBuffer()), tinyPng);
-  }
-  assert.deepEqual(restarted.info.slice(0, 2), [
-    ['line.media_miss', { reason: 'expired' }],
-    ['line.media_miss', { reason: 'expired' }],
-  ]);
-});
-
-test('LINE media evicts the oldest files at the size cap across restarts', async (t) => {
-  const options = { publicMedia: true, mediaMaxBytes: tinyPng.length * 4 };
-  const f = await fixture(t, fakeApi(), options);
-  await sendSmallImage(f.adapter);
-  const oldest = sentMediaPaths(f.api);
-  await sendSmallImage(f.adapter);
-  const newer = sentMediaPaths(f.api);
-  await f.adapter.stop();
-
-  const restarted = await fixture(t, fakeApi(), {
-    ...options,
-    mediaDirectory: f.mediaDirectory,
-  });
-  await sendSmallImage(restarted.adapter);
-  const newest = sentMediaPaths(restarted.api);
-  await assert.rejects(
-    sendSmallImage(
-      restarted.adapter,
-      Buffer.concat([tinyPng, Buffer.alloc(options.mediaMaxBytes)]),
-    ),
-    (error) =>
-      error instanceof SendFailure &&
-      error.cause instanceof Error &&
-      /storage size limit/.test(error.cause.message),
-  );
-  assert.equal((await readdir(f.mediaDirectory)).length, 8);
-  for (const path of oldest)
-    assert.equal((await fetch(restarted.base + path)).status, 404);
-  for (const path of [...newer, ...newest])
-    assert.equal(
-      (await fetch(restarted.base + path, { method: 'HEAD' })).status,
-      200,
-    );
-});
-
 test('LINE media is released only when send failure confirms non-delivery', async (t) => {
   for (const [status, deliveryUnknown] of [
     [400, false],
@@ -1705,4 +1645,104 @@ test('LINE media is released only when send failure confirms non-delivery', asyn
       );
     }
   }
+});
+
+test('LINE conforms to the platform contract', { timeout: 5000 }, async (t) => {
+  const chatId = userId;
+  const upload = (name: string, bytes: Uint8Array, mime: string) => ({
+    chatId,
+    file: { name, bytes, mime },
+    async preview() {
+      return { bytes: tinyPng, mime: 'image/png' };
+    },
+  });
+  await checkAdapterContract({
+    message: { chatId, text: 'Contract message' },
+    media: {
+      images: upload('test.png', tinyPng, 'image/png'),
+      files: upload(
+        'test.mp4',
+        Buffer.from('0000ftypmp42synthetic'),
+        'video/mp4',
+      ),
+      audio: {
+        ...upload(
+          'test.m4a',
+          Buffer.from('0000ftypM4A synthetic'),
+          'audio/mp4',
+        ),
+        audioDurationMs: 1000,
+      },
+    },
+    oversizedError: /size limit/i,
+    startupError: /LINE.*token/i,
+    async create(scenario) {
+      const { ingress, port } = await fakeIngress(t);
+      const { status, url } = publicIngress('https://hooks.example.test');
+      Object.assign(ingress, { status, url });
+      const directory = await tempDirectory(t);
+      const mediaHost = new HostedMedia({
+        directory,
+        ingress,
+        path: '/line/main/media/',
+      });
+      if (scenario === 'normal') {
+        await mediaHost.start(new AbortController().signal, {});
+        t.after(() => mediaHost.stop());
+      }
+      let startupCalls = 0;
+      let typingCalls = 0;
+      const typing = Promise.withResolvers<void>();
+      const entered = Promise.withResolvers<void>();
+      const api = fakeApi(({ path }, signal) => {
+        if (path.endsWith('/loading/start')) {
+          typingCalls++;
+          typing.resolve();
+        }
+        if (path !== '/v2/bot/info') return;
+        startupCalls++;
+        if (scenario === 'failed') return Response.json({}, { status: 401 });
+        if (scenario === 'pending') {
+          assert.ok(signal);
+          entered.resolve();
+          return new Promise<Response>((_resolve, reject) => {
+            signal.throwIfAborted();
+            signal.addEventListener('abort', () => reject(signal.reason), {
+              once: true,
+            });
+          });
+        }
+      });
+      return {
+        adapter: new LineAdapter(api, 'main', {
+          ingress,
+          mediaHost,
+          postbackDirectory: directory,
+          secret,
+          token,
+        }),
+        startupCalls: () => startupCalls,
+        startupEntered: entered.promise,
+        deliveryCount: () =>
+          api.calls.filter(({ path }) => /\/(push|reply)$/.test(path)).length,
+        async receive(events) {
+          const status = await post('http://127.0.0.1:' + port, [
+            message('normal'),
+            message('echo', { type: 'group', groupId, userId: bot.userId }),
+          ]);
+          assert.equal(status, 200);
+          await waitFor(() => events.length === 2);
+          return {
+            messageId: 'normal',
+            ownEcho: { disposition: 'emitted', messageId: 'echo' },
+          };
+        },
+        typing: {
+          calls: () => typingCalls,
+          waitForCall: () => typing.promise,
+          tick: () => delay(25),
+        },
+      };
+    },
+  });
 });

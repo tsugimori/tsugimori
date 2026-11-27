@@ -1,5 +1,7 @@
 import type { InboundAttachment, PlatformSticker } from '@tsugimori/plugin-sdk';
 
+import { attachmentSize } from '@tsugimori/plugin-sdk';
+
 import { record } from './api.ts';
 
 const media = [
@@ -9,11 +11,6 @@ const media = [
   ['voice', 'voice', 'audio/ogg'],
   ['audio', 'audio', undefined],
 ] as const;
-
-function number(value: unknown) {
-  if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0)
-    return value;
-}
 
 function string(value: unknown) {
   if (typeof value === 'string' && value) return value;
@@ -31,10 +28,10 @@ function attachment(
     kind,
     fileId,
     mime: string(file.mime_type) ?? mime,
-    size: number(file.file_size),
+    size: attachmentSize(file.file_size),
     name: string(file.file_name),
-    width: number(file.width),
-    height: number(file.height),
+    width: attachmentSize(file.width),
+    height: attachmentSize(file.height),
   };
 }
 
@@ -46,7 +43,9 @@ export function telegramAttachments(
     let largestArea = -1;
     for (const value of message.photo as unknown[]) {
       const photo = record(value);
-      const area = (number(photo?.width) ?? 0) * (number(photo?.height) ?? 0);
+      const area =
+        (attachmentSize(photo?.width) ?? 0) *
+        (attachmentSize(photo?.height) ?? 0);
       if (photo && string(photo.file_id) && area >= largestArea) {
         largest = photo;
         largestArea = area;

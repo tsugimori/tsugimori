@@ -1,6 +1,10 @@
 import type { InboundAttachment } from '@tsugimori/plugin-sdk';
 
-import { attachmentBytes, ToolFailure } from '@tsugimori/plugin-sdk';
+import {
+  attachmentBytes,
+  attachmentMime,
+  ToolFailure,
+} from '@tsugimori/plugin-sdk';
 import { setTimeout as delay } from 'node:timers/promises';
 
 export function record(value: unknown): Record<string, unknown> | undefined {
@@ -131,9 +135,7 @@ export class BotApi {
       }
       return {
         bytes: await attachmentBytes(response, limit, limitError),
-        mime:
-          attachment.mime ??
-          response.headers.get('content-type')?.split(';')[0],
+        mime: attachment.mime ?? attachmentMime(response),
       };
     } catch (error) {
       signal.throwIfAborted();

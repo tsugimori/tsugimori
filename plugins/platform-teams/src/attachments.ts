@@ -1,6 +1,6 @@
 import type { InboundAttachment } from '@tsugimori/plugin-sdk';
 
-import { attachmentBytes } from '@tsugimori/plugin-sdk';
+import { attachmentBytes, attachmentMime } from '@tsugimori/plugin-sdk';
 
 import type { teamsSession } from './auth.ts';
 import type { Data } from './wire.ts';
@@ -337,11 +337,7 @@ export async function downloadMedia(
       throw new HttpError(response.status);
     }
   }
-  const mime = response.headers
-    .get('content-type')
-    ?.split(';')[0]
-    ?.trim()
-    .toLowerCase();
+  const mime = attachmentMime(response)?.trim().toLowerCase();
   if (image && !imageMime(mime)) {
     await response.body?.cancel();
     throw new Error('Unsupported Teams image response type');

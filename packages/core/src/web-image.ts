@@ -1,7 +1,7 @@
 import type { MediaFile } from '@tsugimori/plugin-sdk';
 import type { IncomingMessage } from 'node:http';
 
-import { ToolFailure } from '@tsugimori/plugin-sdk';
+import { sniffImageMime, ToolFailure } from '@tsugimori/plugin-sdk';
 import { lookup } from 'node:dns/promises';
 import { request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
@@ -120,17 +120,12 @@ function mediaUrl(kind: DownloadKind, source: string, base?: URL) {
   return url;
 }
 
-const formats = [
-  { mime: 'image/jpeg', extensions: ['.jpg', '.jpeg'], magic: 'ffd8ff' },
-  { mime: 'image/png', extensions: ['.png'], magic: '89504e470d0a1a0a' },
-  { mime: 'image/gif', extensions: ['.gif'], magic: '474946383761' },
-  { mime: 'image/gif', extensions: ['.gif'], magic: '474946383961' },
-  { mime: 'image/webp', extensions: ['.webp'], magic: '52494646' },
-].map(({ magic, ...format }) => ({
-  ...format,
-  magic: Buffer.from(magic, 'hex'),
-}));
-
+const imageExtensions = {
+  'image/jpeg': ['.jpg', '.jpeg'],
+  'image/png': ['.png'],
+  'image/gif': ['.gif'],
+  'image/webp': ['.webp'],
+} as const;
 function urlFilename(url: URL) {
   const segment = url.pathname.split('/').at(-1) ?? '';
   let name = segment;
@@ -145,23 +140,20 @@ function urlFilename(url: URL) {
 }
 
 function imageFile(url: URL, bytes: Buffer): MediaFile {
-  const format = formats.find(
-    ({ mime, magic }) =>
-      bytes.subarray(0, magic.length).equals(magic) &&
-      (mime !== 'image/webp' || bytes.toString('latin1', 8, 12) === 'WEBP'),
-  );
-  if (!format) throw new ToolFailure('Downloaded content is not an image');
+  const mime = sniffImageMime(bytes);
+  if (!mime) throw new ToolFailure('Downloaded content is not an image');
+  const extensions: readonly string[] = imageExtensions[mime];
   const name = urlFilename(url);
   const extension = extname(name);
   const stem = name.slice(0, name.length - extension.length).slice(0, 100);
   return {
     bytes,
-    mime: format.mime,
+    mime,
     name:
       (stem || 'image') +
-      (format.extensions.includes(extension.toLowerCase())
+      (extensions.includes(extension.toLowerCase())
         ? extension
-        : format.extensions[0]),
+        : extensions[0]),
   };
 }
 

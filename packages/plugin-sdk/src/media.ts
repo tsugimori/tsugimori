@@ -171,3 +171,49 @@ export async function attachmentBytes(
     reader.releaseLock();
   }
 }
+
+/** An instance-scoped public URL for media that the platform fetches. */
+export interface HostedMediaReceipt {
+  /** Expiry in milliseconds since the Unix epoch. */
+  expires: number;
+  /** Remove a publication when delivery is known to have failed. */
+  release(): Promise<void>;
+  url: string;
+}
+
+export interface MediaHost {
+  /** Throws when public HTTPS ingress is unavailable. */
+  checkAvailable(): void;
+  publish(
+    bytes: Uint8Array,
+    options: { mime: string; ttlMs?: number },
+    signal?: AbortSignal,
+  ): Promise<HostedMediaReceipt>;
+}
+
+/** Recognize the file signature only. Callers decide which formats and bounds to accept. */
+export function sniffImageMime(bytes: Uint8Array) {
+  const data = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  if (data.length >= 8 && data.readBigUInt64BE(0) === 0x89504e470d0a1a0an)
+    return 'image/png';
+  if (data.length >= 3 && data.readUInt16BE(0) === 0xffd8 && data[2] === 0xff)
+    return 'image/jpeg';
+  if (/^GIF8[79]a$/.test(data.toString('latin1', 0, 6))) return 'image/gif';
+  if (
+    data.toString('latin1', 0, 4) === 'RIFF' &&
+    data.toString('latin1', 8, 12) === 'WEBP'
+  )
+    return 'image/webp';
+}
+
+/** Platform size metadata may be absent or malformed. */
+export function attachmentSize(value: unknown) {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+    ? value
+    : undefined;
+}
+
+/** Return the response media type without its parameters. */
+export function attachmentMime(response: Response) {
+  return response.headers.get('content-type')?.split(';', 1)[0];
+}

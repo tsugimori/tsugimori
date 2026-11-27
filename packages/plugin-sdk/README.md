@@ -28,3 +28,47 @@ Declare `images.queued` when `sendImage` prepares a handle for the next reply.
 Resolve the handle when `send` receives it in `options.media`. Report its ID in
 the delivered `SendPart.mediaId`, or report all the handle IDs in
 `SendPart.mediaIds` when a single native message delivers several queued images.
+
+## Adding a platform
+
+Register an adapter factory in `definePlugin({ adapters: { … } })`. Declare
+only the capabilities the adapter implements, with positive byte limits for
+media. Use `sendImage`, `sendFile`, `sendAudio`, `sendReaction`, and
+`sendSticker` for their corresponding capabilities. Stickers can be searched
+natively or indexed from `getStickerSet`. Declare `deleteEvents` when the
+adapter emits native inbound deletions. The gateway discovers outbound
+`deleteMessage`, `updateChoices`, and `typing` through their methods. Stop
+typing when its task signal aborts. For presence, advertise the supported
+states and see [Platform presence](#platform-presence).
+
+Set `factory.requires = ['webhook']` for inbound HTTPS routes, or
+`['media-host']` if the platform fetches outbound media by URL. The latter
+also requires public HTTPS webhook ingress and makes `ctx.mediaHost`
+available. After startup, call
+`mediaHost.publish(bytes, { mime, ttlMs }, signal)` for each file. It returns
+`{ url, expires, release }`, where `expires` is an epoch timestamp in
+milliseconds. Use `release()` when delivery is known to have failed. The
+gateway retains publications for up to 14 days by default and evicts the
+oldest as needed to keep each instance under 1 GiB and 4,096 files. It removes
+expired files on startup and while the instance is attached.
+
+Use `attachmentBytes` for bounded downloads, `attachmentMime` for the base
+response media type, `attachmentSize` for non-negative integer metadata, and
+`sniffImageMime` for JPEG, PNG, GIF, and WebP signatures. Keep provider
+credentials, supported formats, dimension limits, and conversion rules in
+the adapter.
+
+Run `checkAdapterContract` from `@tsugimori/plugin-sdk/contract-test` in the
+plugin's tests. Pass one `{ create, message, media, startupError }` object.
+Have `create(scenario)` return a fresh adapter and its fake counters for
+`normal`, `failed`, and `pending` startup. Add a `receive` hook to replay
+native events and declare how the fixture handles its own echo. Teams
+suppresses its own echoes because the gateway records delivery from receipts.
+Supply valid
+samples for advertised uploads and fake typing observations when implemented.
+Use `checkAgentContract` from the same entry point for connector lifecycle,
+event shape, and provider failure checks.
+
+LINE retains its existing `/line/<instance>/media/<token>` URLs and on-disk
+metadata. Existing unexpired files remain available with the same instance
+and public webhook URL, subject to the shared storage limits.

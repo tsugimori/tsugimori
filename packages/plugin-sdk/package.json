@@ -11,6 +11,10 @@
       "production": "./dist/index.js",
       "default": "./src/index.ts"
     },
+    "./hosted-media": {
+      "production": "./dist/hosted-media.js",
+      "default": "./src/hosted-media.ts"
+    },
     "./contract-test": {
       "production": "./dist/contract-checks.js",
       "default": "./src/contract-checks.ts"

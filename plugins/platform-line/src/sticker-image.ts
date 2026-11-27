@@ -1,9 +1,13 @@
 import type { InboundAttachment } from '@tsugimori/plugin-sdk';
 
-import { attachmentBytes, ToolFailure } from '@tsugimori/plugin-sdk';
+import {
+  attachmentBytes,
+  attachmentMime,
+  sniffImageMime,
+  ToolFailure,
+} from '@tsugimori/plugin-sdk';
 
 const cdn = 'https://stickershop.line-scdn.net/stickershop/v1/sticker';
-const pngSignature = Buffer.from('89504e470d0a1a0a', 'hex');
 
 export function validStickerId(
   stickerId: string | undefined,
@@ -41,19 +45,14 @@ export async function downloadSticker(
       await response.body?.cancel();
       throw new ToolFailure(unavailable);
     }
-    const mime = response.headers.get('content-type');
-    if (
-      mime !== null &&
-      mime.split(';', 1)[0]!.trim().toLowerCase() !== 'image/png'
-    ) {
+    const mime = attachmentMime(response);
+    if (mime !== undefined && mime.trim().toLowerCase() !== 'image/png') {
       await response.body?.cancel();
       throw new ToolFailure('LINE sticker image is not a PNG');
     }
     const bytes = await attachmentBytes(response, maxBytes);
     cdnSignal.throwIfAborted();
-    if (
-      !Buffer.from(bytes.subarray(0, pngSignature.length)).equals(pngSignature)
-    )
+    if (sniffImageMime(bytes) !== 'image/png')
       throw new ToolFailure('LINE sticker image is not a PNG');
     return { bytes, mime: 'image/png' };
   } catch (error) {

@@ -160,16 +160,19 @@ function mapMessage(
       Number.isSafeInteger(date * 1000) && { at: date * 1000 }),
     type: 'message',
     raw: message,
-    ...(sender?.is_bot === true && { botMessage: true }),
+    ...((sender?.is_bot === true || userId === bot.id) && { botMessage: true }),
     ...(addressedToOther && { addressedToOther: true }),
     edited,
-    ...(senderChatId !== undefined && {
-      sender: {
-        id: senderChatId,
-        name:
-          typeof senderChat?.title === 'string' ? senderChat.title : undefined,
-      },
-    }),
+    sender:
+      senderChatId === undefined
+        ? { id: userId, name: userDisplay || undefined }
+        : {
+            id: senderChatId,
+            name:
+              typeof senderChat?.title === 'string'
+                ? senderChat.title
+                : undefined,
+          },
     userId,
     userDisplay: userDisplay || undefined,
     userUsername: typeof sender?.username === 'string' ? sender.username : null,

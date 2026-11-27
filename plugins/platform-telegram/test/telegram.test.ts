@@ -1,6 +1,7 @@
 import type { AdapterCursor, InboundEvent } from '@tsugimori/plugin-sdk';
 
 import { SendFailure } from '@tsugimori/plugin-sdk';
+import { checkAdapterContract } from '@tsugimori/plugin-sdk/contract-test';
 import assert from 'node:assert/strict';
 import { test, type TestContext } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -1472,3 +1473,118 @@ test('Telegram retrieves file references and types for a sticker set', async (t)
   assert.equal(stickers[0]?.emoji, '🥰');
   assert.equal(stickers[1]?.thumbnail?.fileId, 'thumb');
 });
+
+test(
+  'Telegram conforms to the platform contract',
+  { timeout: 5000 },
+  async () => {
+    const chatId = '79';
+    const upload = (name: string, mime: string) => ({
+      chatId,
+      file: { name, bytes: Buffer.from('fixture'), mime },
+      preview: () => assert.fail('Unexpected Telegram preview'),
+    });
+    await checkAdapterContract({
+      message: { chatId, text: 'Contract message' },
+      media: {
+        images: upload('test.png', 'image/png'),
+        files: upload('test.txt', 'text/plain'),
+        audio: upload('test.m4a', 'audio/mp4'),
+      },
+      oversizedError: /size limit/i,
+      startupError: /getMe|token|unauthorized/i,
+      create(scenario) {
+        let startupCalls = 0;
+        let deliveryCount = 0;
+        let typingCalls = 0;
+        let firstPoll = true;
+        const typed = Promise.withResolvers<void>();
+        const received = Promise.withResolvers<void>();
+        const startup = Promise.withResolvers<void>();
+        const adapter = new TelegramAdapter(
+          {
+            typingIntervalMs: 20,
+            async fetch(input, init) {
+              const method = String(input).split('/').at(-1);
+              switch (method) {
+                case 'getMe':
+                  startupCalls++;
+                  if (scenario === 'pending') {
+                    startup.resolve();
+                    return longPoll(init);
+                  }
+                  if (scenario === 'failed')
+                    return Response.json(
+                      {
+                        ok: false,
+                        error_code: 401,
+                        description: 'Unauthorized',
+                      },
+                      { status: 401 },
+                    );
+                  return ok(me);
+                case 'getUpdates':
+                  if (firstPoll) {
+                    firstPoll = false;
+                    return ok([
+                      {
+                        update_id: 1,
+                        message: {
+                          ...address,
+                          from,
+                          message_id: 21,
+                          text: 'hello',
+                        },
+                      },
+                      {
+                        update_id: 2,
+                        message: {
+                          ...address,
+                          from: me,
+                          message_id: 22,
+                          text: 'echo',
+                        },
+                      },
+                    ]);
+                  }
+                  received.resolve();
+                  return longPoll(init);
+                case 'sendChatAction':
+                  typingCalls++;
+                  typed.resolve();
+                  return ok(true);
+                case 'sendMessage':
+                case 'sendDocument':
+                case 'sendPhoto':
+                case 'sendAudio':
+                  return ok({ message_id: ++deliveryCount });
+                default:
+                  assert.fail('Unexpected Telegram method: ' + method);
+              }
+            },
+          },
+          'tg',
+          '1:fake',
+        );
+        return {
+          adapter,
+          startupCalls: () => startupCalls,
+          startupEntered: startup.promise,
+          deliveryCount: () => deliveryCount,
+          async receive() {
+            await received.promise;
+            return {
+              messageId: '21',
+              ownEcho: { disposition: 'emitted', messageId: '22' },
+            };
+          },
+          typing: {
+            calls: () => typingCalls,
+            waitForCall: () => typed.promise,
+            tick: () => delay(50),
+          },
+        };
+      },
+    });
+  },
+);

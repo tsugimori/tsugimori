@@ -17,6 +17,7 @@ import type {
   ImageLimits,
   InboundAttachment,
   MediaDestination,
+  MediaHost,
   MediaReceipt,
   MediaUpload,
   MessageSender,
@@ -76,16 +77,25 @@ export {
   textMentionMatches,
   userMentionLinks,
 } from './mentions.ts';
-export { attachmentBytes, attachmentMetadata, imageLimits } from './media.ts';
+export {
+  attachmentBytes,
+  attachmentMetadata,
+  attachmentMime,
+  attachmentSize,
+  imageLimits,
+  sniffImageMime,
+} from './media.ts';
 export type {
   AgentImage,
   AttachmentContent,
   AttachmentMetadata,
   ContextMessage,
+  HostedMediaReceipt,
   ImageLimits,
   InboundAttachment,
   MediaDestination,
   MediaFile,
+  MediaHost,
   MediaReceipt,
   MediaUpload,
   MessageSender,
@@ -811,6 +821,7 @@ export type AgentInstanceConfig = PluginInstanceConfig & {
 export interface PluginFactoryContext {
   credential(name: string): string | undefined;
   fetch?: typeof globalThis.fetch;
+  mediaHost?: MediaHost;
   webhookIngress?: WebhookIngress;
   workspace: string;
 }
@@ -820,7 +831,8 @@ export interface PlatformFactory {
     config: PlatformInstanceConfig,
     ctx: PluginFactoryContext,
   ): PlatformAdapter | Promise<PlatformAdapter>;
-  requires?: readonly ['webhook'];
+  /** Hosted media also requires verified public webhook ingress. */
+  requires?: readonly ('webhook' | 'media-host')[];
 }
 
 export interface AgentFactory {

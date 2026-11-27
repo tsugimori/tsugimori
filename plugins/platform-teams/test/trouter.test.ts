@@ -1,7 +1,9 @@
 import type { MediaUpload } from '@tsugimori/plugin-sdk';
+import type { AdapterStartScenario } from '@tsugimori/plugin-sdk/contract-test';
 import type { TestContext } from 'node:test';
 
 import { platformHome } from '@tsugimori/plugin-sdk';
+import { checkAdapterContract } from '@tsugimori/plugin-sdk/contract-test';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -319,10 +321,11 @@ test('adapter waits for gateway readiness before delivery and cancels that wait 
   assert.equal(emissions, 1);
 });
 
-async function connectedAdapter(
+async function adapterFixture(
   t: TestContext,
   respond: typeof globalThis.fetch,
   wait?: Wait,
+  scenario: AdapterStartScenario = 'normal',
 ) {
   const workspace = await mkdtemp(join(tmpdir(), 'teams-phase-2-'));
   t.after(() => rm(workspace, { recursive: true, force: true }));
@@ -335,6 +338,8 @@ async function connectedAdapter(
   });
   const sockets: FakeSocket[] = [];
   const warnings: string[] = [];
+  const entered = Promise.withResolvers<void>();
+  let startupCalls = 0;
   let messagingEndpoint: string | null = null;
   const adapter = createTeamsAdapter(
     {
@@ -348,10 +353,27 @@ async function connectedAdapter(
       },
       fetch(input, init) {
         const url = new URL(String(input));
-        if (url.hostname === 'login.microsoftonline.com')
+        if (url.hostname === 'login.microsoftonline.com') {
+          startupCalls++;
+          if (scenario === 'failed')
+            return Promise.resolve(
+              Response.json({ error: 'invalid_grant' }, { status: 400 }),
+            );
+          if (scenario === 'pending') {
+            const signal = init?.signal;
+            assert.ok(signal);
+            entered.resolve();
+            return new Promise<Response>((_resolve, reject) => {
+              signal.throwIfAborted();
+              signal.addEventListener('abort', () => reject(signal.reason), {
+                once: true,
+              });
+            });
+          }
           return Promise.resolve(
             Response.json({ access_token: 'fake-access' }),
           );
+        }
         if (url.hostname === 'teams.microsoft.com')
           return Promise.resolve(new Response(null));
         if (url.pathname === '/api/auth/v1.0/authz/consumer') {
@@ -368,18 +390,29 @@ async function connectedAdapter(
     { id: 'teams', account, workspace, home },
   );
   t.after(() => adapter.stop());
-  await adapter.start({
-    emit: async () => {},
-    logWarning: (event) => warnings.push(event),
-  });
   return {
     adapter,
     sockets,
     warnings,
+    startupCalls: () => startupCalls,
+    startupEntered: entered.promise,
     get messagingEndpoint() {
       return messagingEndpoint;
     },
   };
+}
+
+async function connectedAdapter(
+  t: TestContext,
+  respond: typeof globalThis.fetch,
+  wait?: Wait,
+) {
+  const fixture = await adapterFixture(t, respond, wait);
+  await fixture.adapter.start({
+    emit: async () => {},
+    logWarning: (event) => fixture.warnings.push(event),
+  });
+  return fixture;
 }
 
 function media(bytes: Uint8Array, name: string): MediaUpload {
@@ -739,3 +772,105 @@ test('Teams publishes and refreshes an isolated presence endpoint, repairs it, a
     'teams.presence_refresh_failed',
   ]);
 });
+
+test(
+  'Teams conforms to the platform contract',
+  { timeout: 5000 },
+  async (t) => {
+    const chatId = '8:peer';
+    await checkAdapterContract({
+      message: { chatId, text: 'Contract message' },
+      media: {
+        images: media(
+          Buffer.from(
+            '89504e470d0a1a0a0000000d494844520000032000000190',
+            'hex',
+          ),
+          'test.png',
+        ),
+        files: media(Buffer.from('test'), 'test.txt'),
+      },
+      oversizedError: /uploads require/i,
+      startupError: /Teams sign-in required/,
+      async create(scenario) {
+        const { pauses, wait } = controlledWait();
+        const typed = Promise.withResolvers<void>();
+        let typingCalls = 0;
+        let deliveries = 0;
+        const fixture = await adapterFixture(
+          t,
+          async (input, init) => {
+            const url = new URL(String(input));
+            if (url.hostname === 'api.asm.skype.com') {
+              deliveries++;
+              if (init?.method === 'POST')
+                return Response.json({ id: 'object' });
+              return new Response(null);
+            }
+            assert.match(url.pathname, /\/conversations\/8%3Apeer\/messages$/);
+            const body = JSON.parse(String(init?.body));
+            if (body.messagetype === 'Control/Typing') {
+              typingCalls++;
+              typed.resolve();
+              return new Response(null);
+            }
+            return Response.json({ OriginalArrivalTime: String(++deliveries) });
+          },
+          wait,
+          scenario,
+        );
+        return {
+          ...fixture,
+          deliveryCount: () => deliveries,
+          async receive() {
+            const socket = fixture.sockets[0];
+            assert.ok(socket);
+            for (const [id, from, resourceType] of [
+              [101, '8:self', 'NewMessage'],
+              [102, '8:peer', 'NewMessage'],
+              [103, '8:peer', 'MessageRemoved'],
+            ] as const) {
+              socket.receive(
+                '3:::' +
+                  JSON.stringify({
+                    id,
+                    url: '/messaging',
+                    body: JSON.stringify({
+                      resourceType,
+                      resource: {
+                        id: String(id),
+                        conversationid: chatId,
+                        from,
+                        messagetype: 'Text',
+                        content: 'Hello',
+                      },
+                    }),
+                  }),
+              );
+            }
+            await flush();
+            assert.ok(
+              socket.sent.some((frame) =>
+                frame.includes('"id":103,"status":200'),
+              ),
+            );
+            return {
+              messageId: '102',
+              ownEcho: { disposition: 'ignored', messageId: '101' },
+            };
+          },
+          typing: {
+            calls: () => typingCalls,
+            waitForCall: () => typed.promise,
+            async tick() {
+              await flush();
+              for (const pause of pauses.filter(({ ms }) => ms === 4000))
+                pause.resume();
+              await flush();
+            },
+          },
+        };
+      },
+    });
+  },
+);

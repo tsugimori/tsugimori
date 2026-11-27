@@ -8,6 +8,7 @@ import type {
   AgentRequest,
 } from '@tsugimori/plugin-sdk';
 
+import { checkAgentContract } from '@tsugimori/plugin-sdk/contract-test';
 import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -777,3 +778,35 @@ test('Claude sends native base64 image blocks with the new user message', async 
     ),
   );
 });
+
+test(
+  'Claude SDK conforms to the agent contract',
+  { timeout: 5000 },
+  async () => {
+    const providerFailure = new Error('Fixture query failed');
+    let queries = 0;
+    const events = await checkAgentContract({
+      create: () =>
+        new ClaudeAgent(
+          {
+            async *query() {
+              if (++queries === 2) throw providerFailure;
+              yield frame({
+                type: 'system',
+                subtype: 'init',
+                model: 'fake-model',
+              });
+              yield success;
+            },
+          },
+          'claude',
+          null,
+        ),
+      io,
+      request: request(tmpdir()),
+      failure: { request: request(tmpdir()), expected: providerFailure },
+    });
+    assert.ok(events.some((event) => event.type === 'sessionId'));
+    assert.ok(events.some((event) => event.type === 'usage'));
+  },
+);

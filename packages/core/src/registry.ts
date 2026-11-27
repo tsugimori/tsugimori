@@ -62,7 +62,14 @@ export class PluginRegistry implements PluginKinds {
   }
 
   requiresWebhook(kind: string) {
-    return this.#platforms.get(kind)?.requires?.includes('webhook') === true;
+    return (
+      this.requiresMediaHost(kind) ||
+      this.#platforms.get(kind)?.requires?.includes('webhook') === true
+    );
+  }
+
+  requiresMediaHost(kind: string) {
+    return this.#platforms.get(kind)?.requires?.includes('media-host') === true;
   }
 
   execution(id: string) {

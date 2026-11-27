@@ -1,10 +1,22 @@
-import type { OutboundMessage, PlatformFactory } from '@tsugimori/plugin-sdk';
+import type {
+  MediaHost,
+  OutboundMessage,
+  PlatformFactory,
+} from '@tsugimori/plugin-sdk';
 import type { TestContext } from 'node:test';
 
 import { loadConfig, loadSettings } from '@tsugimori/config';
+import { HostedMedia } from '@tsugimori/plugin-sdk/hosted-media';
 import { SqliteStore } from '@tsugimori/storage-sqlite';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import {
+  mkdir,
+  mkdtemp,
+  readdir,
+  rm,
+  symlink,
+  writeFile,
+} from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -361,4 +373,241 @@ test('webhook ingress keeps descendant routes scoped to their registered prefix'
   assert.deepEqual(listener.paths(), ['/line/main', '/line/main/webhook']);
   await release();
   assert.equal((await request('/line/main/media/token')).status, 404);
+});
+
+test('hosted media enforces TTL, byte and file caps across restarts', async (t) => {
+  const listen = await freeAddress();
+  const registry = new PluginRegistry();
+  const workspace = await workspaceWith(t, {
+    webhooks: { provider: 'manual', publicBaseUrl: publicUrl, listen },
+  });
+  const ingress = new Webhooks({
+    registry,
+    workspace,
+    fetch: (url, init) => forward(listen, url, init),
+  });
+  t.after(() => ingress.stop());
+  await ingress.configure(await loadConfig(workspace, registry));
+  const signal = new AbortController().signal;
+  const directory = join(workspace, 'data', 'media', 'one');
+  const path = '/media/one/';
+  let now = 1000;
+  const makeHost = (instancePath = path, storage = directory) =>
+    new HostedMedia({
+      workspace,
+      directory: storage,
+      ingress,
+      path: instancePath,
+      maxBytes: 8,
+      maxEntries: 2,
+      now: () => now,
+    });
+  const host = makeHost();
+  t.after(() => host.stop());
+  await host.start(signal, {});
+  await assert.rejects(
+    host.publish(Buffer.from('aaa'), { mime: 'image/png' }),
+    /Configure the public webhook URL/,
+  );
+  assert.equal((await ingress.check()).state, 'ok');
+  const read = (url: string, method = 'GET') =>
+    forward(listen, url, { method });
+  const publish = (bytes: string, ttlMs = 4000) =>
+    host.publish(Buffer.from(bytes), { mime: 'image/png', ttlMs });
+  const expired = await publish('abc', 1000);
+  assert.equal(expired.expires, 2000);
+  const live = await publish('def');
+  assert.match(live.url, /\/media\/one\/[A-Za-z0-9_-]{32}$/);
+  const [get, head] = await Promise.all([
+    read(live.url),
+    read(live.url, 'HEAD'),
+  ]);
+  assert.equal(get.status, 200);
+  assert.equal(get.headers.get('content-type'), 'image/png');
+  assert.equal(get.headers.get('x-content-type-options'), 'nosniff');
+  assert.equal(
+    get.headers.get('cache-control'),
+    'public, max-age=4, immutable',
+  );
+  assert.equal(await get.text(), 'def');
+  assert.equal(head.status, 200);
+  assert.equal(head.headers.get('content-length'), '3');
+  assert.equal(await head.text(), '');
+  for (const url of [live.url + '/', live.url + '.json', publicUrl + path])
+    assert.equal((await read(url)).status, 404);
+  assert.equal((await read(live.url, 'POST')).status, 404);
+  const cancelled = new Error('Cancel publish');
+  await assert.rejects(
+    host.publish(
+      Buffer.from('abc'),
+      { mime: 'image/png' },
+      AbortSignal.abort(cancelled),
+    ),
+    cancelled,
+  );
+  await assert.rejects(publish('123456789'), /storage size limit/);
+  await assert.rejects(publish('', 0), /TTL/);
+  await assert.rejects(
+    host.publish(Buffer.from('abc'), { mime: 'image/png\ninvalid' }),
+    /MIME type/,
+  );
+
+  now = 2000;
+  const miss = await read(expired.url);
+  assert.equal(miss.status, 404);
+  assert.equal(miss.headers.get('cache-control'), 'no-store');
+  await host.stop();
+  const restarted = makeHost();
+  t.after(() => restarted.stop());
+  await restarted.start(signal, {});
+  assert.equal((await readdir(directory)).length, 2);
+  assert.equal(
+    (await read(live.url, 'HEAD')).headers.get('cache-control'),
+    'public, max-age=3, immutable',
+  );
+  const jpeg = { mime: 'image/jpeg' };
+  const full = await restarted.publish(Buffer.from('123456'), jpeg);
+  assert.equal(
+    (await read(live.url)).status,
+    404,
+    'Byte limit evicts the oldest file',
+  );
+  const [first, second] = await Promise.all([
+    restarted.publish(Buffer.from('1'), jpeg),
+    restarted.publish(Buffer.from('2'), jpeg),
+  ]);
+  assert.equal(
+    (await read(full.url)).status,
+    404,
+    'File count limit evicts the oldest file',
+  );
+  assert.equal(await (await read(first.url)).text(), '1');
+  assert.equal(await (await read(second.url)).text(), '2');
+  assert.equal((await readdir(directory)).length, 4);
+  await first.release();
+  await first.release();
+  assert.equal((await read(first.url)).status, 404);
+
+  const other = makeHost(
+    '/media/two/',
+    join(workspace, 'data', 'media', 'two'),
+  );
+  t.after(() => other.stop());
+  await other.start(signal, {});
+  assert.equal((await read(second.url.replace('/one/', '/two/'))).status, 404);
+  const token = new URL(second.url).pathname.split('/').at(-1)!;
+  await rm(join(directory, token));
+  const outside = join(workspace, 'outside');
+  await writeFile(outside, 'private');
+  await symlink(outside, join(directory, token));
+  assert.equal((await read(second.url)).status, 404);
+  const linked = join(workspace, 'linked');
+  await symlink(directory, linked);
+  await assert.rejects(
+    makeHost('/media/linked/', join(linked, 'other')).start(signal, {}),
+    /storage operation failed/,
+  );
+});
+
+test('gateway provisions instance media hosts and preserves previously issued LINE URLs', async (t) => {
+  const listen = await freeAddress();
+  const workspace = await workspaceWith(t, {});
+  const config = {
+    platforms: [
+      { id: 'line:main', kind: 'line' },
+      { id: 'other', kind: 'example' },
+      { id: 'plain', kind: 'plain' },
+    ],
+    webhooks: { provider: 'manual', publicBaseUrl: publicUrl, listen },
+  };
+  const legacyDir = join(
+    workspace,
+    'data',
+    'platform-line',
+    'adapter-line%3Amain',
+  );
+  const token = 'a'.repeat(32);
+  const order = Date.now();
+  await mkdir(legacyDir, { recursive: true });
+  await writeFile(join(legacyDir, token), 'previous publication');
+  await writeFile(
+    join(legacyDir, token + '.json'),
+    JSON.stringify({ expires: order + 60_000, mime: 'audio/mp4', order }),
+  );
+
+  const hosts = new Map<string, MediaHost>();
+  const make: PlatformFactory = ({ id, kind }, { mediaHost }) => {
+    if (kind === 'plain') assert.equal(mediaHost, undefined);
+    else {
+      assert.ok(mediaHost);
+      hosts.set(id, mediaHost);
+    }
+    return {
+      id,
+      kind,
+      capabilities: {},
+      async start() {},
+      async stop() {},
+      async send() {
+        return { messageId: '1' };
+      },
+    };
+  };
+  make.requires = ['media-host'];
+  const plain: PlatformFactory = (...args) => make(...args);
+  const registry = new PluginRegistry([
+    { name: 'fixture', adapters: { line: make, example: make, plain } },
+  ]);
+  assert.equal(registry.requiresWebhook('example'), true);
+  const store = new SqliteStore(':memory:');
+  const gateway = new Gateway({
+    registry,
+    store,
+    workspace,
+    log: () => {},
+    setup: {
+      runCommand: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
+      fetch: (url, init) => forward(listen, url, init),
+    },
+  });
+  t.after(async () => {
+    await gateway.stop();
+    store.close();
+  });
+  await gateway.start();
+  const save = (value: object) =>
+    writeFile(join(workspace, 'tsugimori.json'), JSON.stringify(value));
+  const until = async (predicate: () => boolean) => {
+    const signal = AbortSignal.timeout(4000);
+    while (!predicate()) await delay(10, undefined, { signal });
+  };
+  await save(config);
+  await until(
+    () =>
+      gateway.webhookInfo('other').attached &&
+      gateway.webhookInfo().status.state === 'ok',
+  );
+  assert.equal(
+    await (
+      await forward(listen, publicUrl + '/line/line%3Amain/media/' + token)
+    ).text(),
+    'previous publication',
+  );
+  const { url } = await hosts
+    .get('other')!
+    .publish(Buffer.from('new publication'), { mime: 'audio/mp4' });
+  assert.match(url, /\/media\/adapter-other\//);
+  assert.equal(await (await forward(listen, url)).text(), 'new publication');
+
+  await save({
+    ...config,
+    platforms: config.platforms.filter(({ id }) => id !== 'other'),
+  });
+  await until(
+    () => !gateway.webhookInfo().paths.includes('/media/adapter-other'),
+  );
+  assert.equal((await forward(listen, url)).status, 404);
+  await save(config);
+  await until(() => gateway.webhookInfo('other').attached);
+  assert.equal(await (await forward(listen, url)).text(), 'new publication');
 });

@@ -169,32 +169,33 @@ export class TelegramAdapter implements PlatformAdapter {
   }
 
   async start(ctx: AdapterContext) {
+    ctx.signal?.throwIfAborted();
     if (this.#controller)
       throw new Error('Telegram adapter is already started');
     const controller = new AbortController();
     this.#controller = controller;
     this.#ctx = ctx;
     try {
-      const signal = AbortSignal.any([
-        controller.signal,
-        AbortSignal.timeout(8_000),
-        ...(ctx.signal ? [ctx.signal] : []),
-      ]);
-      const bot = await telegramIdentity(this.#fetch, this.#token, signal, 0);
-      signal.throwIfAborted();
+      const active = ctx.signal
+        ? AbortSignal.any([controller.signal, ctx.signal])
+        : controller.signal;
+      const startup = AbortSignal.any([active, AbortSignal.timeout(8_000)]);
+      const bot = await telegramIdentity(this.#fetch, this.#token, startup, 0);
+      startup.throwIfAborted();
       this.#botIdentity = bot;
-      this.#polling = this.#poll(ctx, bot, controller.signal).catch(
-        (error: unknown) => {
-          if (controller.signal.aborted) return;
-          ctx.logError?.('telegram.poll_stopped');
-          throw error;
-        },
-      );
+      this.#polling = this.#poll(ctx, bot, active).catch((error: unknown) => {
+        if (active.aborted) return;
+        ctx.logError?.('telegram.poll_stopped');
+        throw error;
+      });
       void this.#polling.catch(() => undefined); // stop() observes the failure.
     } catch (error) {
-      this.#controller = undefined;
-      this.#ctx = undefined;
+      if (this.#controller === controller) {
+        this.#controller = undefined;
+        this.#ctx = undefined;
+      }
       controller.abort();
+      ctx.signal?.throwIfAborted();
       if (error instanceof BotApiError) {
         if (error.invalidToken)
           throw new PlatformStartError(error.message, {
@@ -210,14 +211,18 @@ export class TelegramAdapter implements PlatformAdapter {
   }
 
   async stop() {
-    this.#controller?.abort();
+    const controller = this.#controller;
+    if (!controller) return;
+    controller.abort();
     try {
       await this.#polling;
     } finally {
-      this.#polling = undefined;
-      this.#controller = undefined;
-      this.#ctx = undefined;
-      this.#botIdentity = undefined;
+      if (this.#controller === controller) {
+        this.#polling = undefined;
+        this.#controller = undefined;
+        this.#ctx = undefined;
+        this.#botIdentity = undefined;
+      }
     }
   }
 
@@ -832,7 +837,10 @@ export class TelegramAdapter implements PlatformAdapter {
 
   #signal() {
     if (!this.#controller) throw new Error('Telegram adapter is detached');
-    return this.#controller.signal;
+    const caller = this.#ctx?.signal;
+    return caller
+      ? AbortSignal.any([this.#controller.signal, caller])
+      : this.#controller.signal;
   }
 }
 

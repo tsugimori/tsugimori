@@ -1,6 +1,10 @@
 import type { InboundAttachment } from '@tsugimori/plugin-sdk';
 
-import { attachmentBytes, ToolFailure } from '@tsugimori/plugin-sdk';
+import {
+  attachmentBytes,
+  attachmentMime,
+  ToolFailure,
+} from '@tsugimori/plugin-sdk';
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 
@@ -124,7 +128,7 @@ export class LineApi {
     }
     return {
       bytes: await attachmentBytes(response, maxBytes),
-      mime: response.headers.get('content-type')?.split(';')[0],
+      mime: attachmentMime(response),
     };
   }
 

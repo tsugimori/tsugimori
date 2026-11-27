@@ -5,6 +5,7 @@ import type {
 } from '@tsugimori/plugin-sdk';
 
 import { nativeCompactionLimit } from '@tsugimori/plugin-sdk';
+import { checkAgentContract } from '@tsugimori/plugin-sdk/contract-test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
@@ -1084,3 +1085,37 @@ test(
     );
   },
 );
+
+test('Codex conforms to the agent contract', { timeout: 5000 }, async () => {
+  let processes = 0;
+  const events = await checkAgentContract({
+    create: () =>
+      new CodexAgent(
+        {
+          inspect: noInspection,
+          spawn(_command, _args, options) {
+            processes++;
+            return spawn(
+              process.execPath,
+              ['--input-type=module', '--eval', fakeServer],
+              options,
+            );
+          },
+        },
+        'codex',
+      ),
+    io,
+    request: request('contract'),
+    failure: {
+      request: request('rejected effort'),
+      expected: /not supported|does not support/i,
+    },
+  });
+  assert.equal(
+    processes,
+    2,
+    'Repeated starts share a process until the connector stops',
+  );
+  assert.ok(events.some((event) => event.type === 'sessionId'));
+  assert.ok(events.some((event) => event.type === 'usage'));
+});

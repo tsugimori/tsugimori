@@ -123,7 +123,7 @@ export class ClaudeAgent implements AgentConnector {
   readonly #model?: string;
   readonly #token?: string;
   readonly #active = new Set<AbortController>();
-  readonly #lifecycle = new AbortController();
+  #lifecycle = new AbortController();
   readonly #sessionTails = new Map<string, Promise<void>>();
   readonly #compactions = new Map<string, Promise<AgentCompactResult>>();
   readonly #contextWindows = new Map<string, number>();
@@ -223,6 +223,10 @@ export class ClaudeAgent implements AgentConnector {
     if (status === 'rejected') this.#reached.add(rateLimitType);
     if (status === 'allowed' || status === 'allowed_warning')
       this.#reached.delete(rateLimitType);
+  }
+
+  async start() {
+    if (this.#lifecycle.signal.aborted) this.#lifecycle = new AbortController();
   }
 
   async stop() {

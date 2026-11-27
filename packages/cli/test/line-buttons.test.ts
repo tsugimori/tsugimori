@@ -91,7 +91,13 @@ async function fixture(t: TestContext, locale = 'en') {
               status: () => ({ state: 'unconfigured' }),
               url: () => undefined,
             },
-            mediaDirectory: join(workspace, 'line'),
+            mediaHost: {
+              checkAvailable: () =>
+                assert.fail('Unexpected hosted media check'),
+              publish: async () =>
+                assert.fail('Unexpected hosted media publication'),
+            },
+            postbackDirectory: join(workspace, 'line'),
             secret,
             token: 'fake-access-token',
           }),

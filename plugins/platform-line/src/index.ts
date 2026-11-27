@@ -3,6 +3,7 @@ import type {
   ApprovalFeedback,
   AttachmentContent,
   MediaDestination,
+  MediaHost,
   MediaUpload,
   OutboundMessage,
   PlatformAdapter,
@@ -18,9 +19,9 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 
 import {
   definePlugin,
-  parseWebhookBaseUrl,
   PlatformStartError,
   SendFailure,
+  sniffImageMime,
   ToolFailure,
 } from '@tsugimori/plugin-sdk';
 import { randomUUID } from 'node:crypto';
@@ -32,7 +33,6 @@ import type { LinePostback } from './updates.ts';
 
 import { LineApi, LineApiError, nonempty, record } from './api.ts';
 import { messageParts } from './message-text.ts';
-import { LineMediaHost } from './outbound-media.ts';
 import {
   LinePostbacks,
   maxQuickReplies,
@@ -61,12 +61,13 @@ const uploadLimits = {
 };
 const maxPreview = 1024 * 1024;
 const maxMediaUrlLength = 2000;
+type HostedAttachment = AttachmentContent & { mime: string };
 type PendingMedia =
   | { packageId: string; stickerId: string; type: 'sticker' }
-  | { duration: number; original: AttachmentContent; type: 'audio' }
+  | { duration: number; original: HostedAttachment; type: 'audio' }
   | {
-      original: AttachmentContent | string;
-      preview: AttachmentContent | string;
+      original: HostedAttachment | string;
+      preview: HostedAttachment | string;
       type: 'image' | 'video';
     };
 
@@ -114,9 +115,8 @@ class Lru<Value> {
 
 interface LineOptions {
   ingress: WebhookIngress;
-  mediaDirectory: string;
-  mediaMaxBytes?: number;
-  mediaTtlMs?: number;
+  mediaHost: MediaHost;
+  postbackDirectory: string;
   replyTokenTtlMs?: number;
   secret: string;
   token: string;
@@ -151,7 +151,6 @@ export class LineAdapter implements PlatformAdapter {
   readonly #api: LineApi;
   readonly #options: LineOptions;
   readonly #now: () => number;
-  readonly #mediaHost: LineMediaHost;
   readonly #queued = new WeakMap<
     QueuedMedia,
     PendingMedia & { destination: MediaDestination }
@@ -182,14 +181,8 @@ export class LineAdapter implements PlatformAdapter {
     this.#api = new LineApi(fetch, options.token);
     this.#options = options;
     this.#now = now;
-    this.#mediaHost = new LineMediaHost({
-      directory: options.mediaDirectory,
-      maxBytes: options.mediaMaxBytes,
-      now,
-      ttlMs: options.mediaTtlMs,
-    });
     this.#postbacks = new LinePostbacks(
-      join(options.mediaDirectory, 'postbacks.json'),
+      join(options.postbackDirectory, 'postbacks.json'),
       now,
     );
     this.id = id;
@@ -212,21 +205,8 @@ export class LineAdapter implements PlatformAdapter {
       ? AbortSignal.any([ctx.signal, controller.signal])
       : controller.signal;
     const path = webhookPath(this.id);
-    const mediaPath = path + 'media/';
     const route = (request: IncomingMessage, response: ServerResponse) => {
       const target = request.url?.split('?', 1)[0];
-      if (!signal.aborted && target?.startsWith(mediaPath)) {
-        void this.#mediaHost
-          .serve(target.slice(mediaPath.length), request, response, ctx)
-          .catch((error: NodeJS.ErrnoException) => {
-            if (error.code === 'ERR_STREAM_PREMATURE_CLOSE') return;
-            ctx.logError?.('line.media_serve_failed');
-            if (response.destroyed) return;
-            if (!response.headersSent) response.writeHead(500).end();
-            else response.destroy();
-          });
-        return;
-      }
       if (
         request.method !== 'POST' ||
         signal.aborted ||
@@ -255,7 +235,7 @@ export class LineAdapter implements PlatformAdapter {
       logError: (event, error) => ctx.logError?.(event, error),
       logInfo: (event, fields) => ctx.logInfo?.(event, fields),
       signal,
-      start: this.#start(route, signal, ctx),
+      start: this.#start(route, signal),
     };
     try {
       await this.#listener.start;
@@ -266,7 +246,7 @@ export class LineAdapter implements PlatformAdapter {
     }
   }
 
-  async #start(route: WebhookRoute, signal: AbortSignal, ctx: AdapterContext) {
+  async #start(route: WebhookRoute, signal: AbortSignal) {
     signal.throwIfAborted();
     try {
       this.#botIdentity = await this.#api.identity(
@@ -287,7 +267,6 @@ export class LineAdapter implements PlatformAdapter {
       throw error;
     }
     signal.throwIfAborted();
-    await this.#mediaHost.start((event, error) => ctx.logError?.(event, error));
     await this.#postbacks.start();
     signal.throwIfAborted();
     try {
@@ -334,7 +313,6 @@ export class LineAdapter implements PlatformAdapter {
       const release = await listener.start.catch(() => undefined); // start() reports its failure.
       await release?.();
     } finally {
-      await this.#mediaHost.stop();
       await this.#postbacks.flush();
       this.#botIdentity = undefined;
       this.#seen.clear();
@@ -370,6 +348,7 @@ export class LineAdapter implements PlatformAdapter {
       if (!mapped) continue;
       const { inbound, profilePath, quoteToken, replyToken } = mapped;
       const { chatId, messageId } = inbound;
+      if (inbound.userId === this.#botIdentity?.id) inbound.botMessage = true;
       const replyTo = inbound.replyTo?.id;
       if (replyToken)
         this.#replies.set(chatId, { messageId, receivedAt, token: replyToken });
@@ -447,7 +426,16 @@ export class LineAdapter implements PlatformAdapter {
       this.#profiles.set(profilePath, profile);
     }
     const userDisplay = await profile.result;
-    if (!signal.aborted) await ctx.emit({ ...inbound, userDisplay });
+    if (!signal.aborted)
+      await ctx.emit(
+        inbound.type === 'message'
+          ? {
+              ...inbound,
+              userDisplay,
+              sender: { id: inbound.userId, name: userDisplay },
+            }
+          : { ...inbound, userDisplay },
+      );
   }
 
   searchStickers(query: string, limit: number) {
@@ -490,8 +478,12 @@ export class LineAdapter implements PlatformAdapter {
       throw new ToolFailure(
         'LINE requires AAC/M4A audio with a positive duration',
       );
-    this.#mediaBase();
-    return this.#queue(message, { type: 'audio', original: file, duration });
+    this.#options.mediaHost.checkAvailable();
+    return this.#queue(message, {
+      type: 'audio',
+      original: { ...file, mime: file.mime },
+      duration,
+    });
   }
 
   sendImage(message: MediaUpload, signal: AbortSignal) {
@@ -529,16 +521,15 @@ export class LineAdapter implements PlatformAdapter {
       file.bytes.byteOffset,
       file.bytes.byteLength,
     );
+    const imageMime = type === 'image' ? sniffImageMime(bytes) : undefined;
     const mime =
       type === 'video'
         ? bytes.length >= 12 && bytes.toString('ascii', 4, 8) === 'ftyp'
           ? 'video/mp4'
           : undefined
-        : bytes.subarray(0, 8).equals(Buffer.from('89504e470d0a1a0a', 'hex'))
-          ? 'image/png'
-          : bytes.subarray(0, 3).equals(Buffer.from('ffd8ff', 'hex'))
-            ? 'image/jpeg'
-            : undefined;
+        : imageMime === 'image/png' || imageMime === 'image/jpeg'
+          ? imageMime
+          : undefined;
     const directUrl =
       type === 'image' &&
       mime &&
@@ -554,14 +545,9 @@ export class LineAdapter implements PlatformAdapter {
         preview: directUrl,
       });
 
-    this.#mediaBase();
+    this.#options.mediaHost.checkAvailable();
     const convertible =
-      !mime &&
-      type === 'image' &&
-      sourceUrl &&
-      (/^GIF8[79]a$/.test(bytes.toString('latin1', 0, 6)) ||
-        (bytes.toString('latin1', 0, 4) === 'RIFF' &&
-          bytes.toString('latin1', 8, 12) === 'WEBP'));
+      sourceUrl && (imageMime === 'image/gif' || imageMime === 'image/webp');
     if (!mime && !convertible)
       throw new ToolFailure(
         type === 'video'
@@ -580,10 +566,11 @@ export class LineAdapter implements PlatformAdapter {
       throw new ToolFailure('LINE requires a JPEG or PNG preview up to 1 MB');
     signal.throwIfAborted();
     // Use the converted JPEG or PNG for both LINE fields on web GIFs and WebPs.
+    const hostedPreview = { bytes: preview.bytes, mime: preview.mime };
     return this.#queue(message, {
       type,
-      original: directUrl ?? original ?? preview,
-      preview,
+      original: directUrl ?? original ?? hostedPreview,
+      preview: hostedPreview,
     });
   }
 
@@ -599,15 +586,6 @@ export class LineAdapter implements PlatformAdapter {
       destination: { chatId, replyTo, threadId },
     });
     return handle;
-  }
-
-  #mediaBase() {
-    const path = this.#options.ingress.url(webhookPath(this.id));
-    if (!parseWebhookBaseUrl(path))
-      throw new ToolFailure(
-        'LINE media requires healthy public HTTPS webhook ingress',
-      );
-    return path!.replace(/\/?$/, '/') + 'media/';
   }
 
   async send(
@@ -693,11 +671,13 @@ export class LineAdapter implements PlatformAdapter {
               continue;
             }
             signal.throwIfAborted();
-            let base: string | undefined;
-            const publish = async (content: AttachmentContent) => {
-              const media = await this.#mediaHost.publish(
-                (base ??= this.#mediaBase()),
-                content,
+            const publish = async (
+              content: AttachmentContent & { mime: string },
+            ) => {
+              const media = await this.#options.mediaHost.publish(
+                content.bytes,
+                { mime: content.mime },
+                signal,
               );
               releases.push(media.release);
               return media.url;
@@ -892,7 +872,13 @@ export class LineAdapter implements PlatformAdapter {
 
   typing({ chatId }: Pick<OutboundMessage, 'chatId'>, signal: AbortSignal) {
     const listener = this.#listener;
-    if (!listener || !this.#botIdentity || !/^U[0-9a-f]{32}$/.test(chatId))
+    if (
+      signal.aborted ||
+      !listener ||
+      listener.signal.aborted ||
+      !this.#botIdentity ||
+      !/^U[0-9a-f]{32}$/.test(chatId)
+    )
       return;
     void this.#api
       .loading(
@@ -911,11 +897,13 @@ const line: PlatformFactory = (config, ctx) => {
     throw new Error('LINE needs a channel secret and channel access token.');
   if (!ctx.webhookIngress)
     throw new Error('LINE needs gateway webhook ingress.');
+  if (!ctx.mediaHost) throw new Error('LINE needs gateway hosted media.');
   return new LineAdapter({ fetch: ctx.fetch }, config.id, {
     secret,
     token,
     ingress: ctx.webhookIngress,
-    mediaDirectory: join(
+    mediaHost: ctx.mediaHost,
+    postbackDirectory: join(
       ctx.workspace,
       'data',
       'platform-line',
@@ -924,7 +912,7 @@ const line: PlatformFactory = (config, ctx) => {
     replyTokenTtlMs: config.replyTokenTtlMs as number | undefined,
   });
 };
-line.requires = ['webhook'];
+line.requires = ['media-host'];
 
 export default definePlugin({
   name: 'platform-line',

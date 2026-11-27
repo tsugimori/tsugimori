@@ -1,10 +1,12 @@
 import type { Config, WorkspaceConfig } from '@tsugimori/config';
 import type {
+  AdapterContext,
   AgentConnector,
   AgentDefaults,
   PlatformAdapter,
   PlatformInboundEvent,
   PlatformInstanceConfig,
+  PluginFactoryContext,
   PluginInstanceConfig,
 } from '@tsugimori/plugin-sdk';
 import type { RemovalTarget, Store } from '@tsugimori/storage';
@@ -12,7 +14,8 @@ import type { Tracer } from '@tsugimori/trace';
 
 import { ConfigError, parseConfig } from '@tsugimori/config';
 import { PlatformStartError } from '@tsugimori/plugin-sdk';
-import { resolve } from 'node:path';
+import { HostedMedia } from '@tsugimori/plugin-sdk/hosted-media';
+import { join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { isDeepStrictEqual } from 'node:util';
 
@@ -53,6 +56,7 @@ type AdapterEntry = {
   failedAt?: number;
   failure?: CheckReport;
   inFlight?: Promise<void>;
+  mediaHost?: HostedMedia;
   notices: PlatformNotice[];
   presenceStop?: Promise<void>;
   retry?: NodeJS.Timeout;
@@ -457,14 +461,19 @@ export class Runtime {
         } else {
           if (!(await check('platform', entry))) continue;
           try {
-            const adapter = await registry.platform(entry.kind)(
-              entry,
-              checks.context(entry, env),
-            );
+            const context = checks.context(entry, env);
+            const mediaHost = registry.requiresMediaHost(entry.kind)
+              ? platformMediaHost(context, entry)
+              : undefined;
+            const adapter = await registry.platform(entry.kind)(entry, {
+              ...context,
+              mediaHost,
+            });
             checkIdentity(entry, adapter);
             nextAdapters.set(entry.id, {
               config: entry,
               adapter,
+              mediaHost,
               state: 'stopped',
               attempt: 0,
               notices: [],
@@ -652,7 +661,7 @@ export class Runtime {
     let activated = false;
     try {
       await trace.span('platform.start', attrs, async () => {
-        await adapter.start({
+        const context: AdapterContext = {
           emit: async (event) => {
             signal.throwIfAborted();
             if (activated) await this.#deps.receive(adapter, event);
@@ -684,7 +693,9 @@ export class Runtime {
               adapterId: adapter.id,
               ...(reason === undefined ? {} : { reason }),
             }),
-        });
+        };
+        await adapter.start(context);
+        await entry.mediaHost?.start(signal, context);
         signal.throwIfAborted();
       });
     } catch (error) {
@@ -731,7 +742,7 @@ export class Runtime {
       const controller = entry.controller;
       entry.controller = undefined;
       controller?.abort();
-      await this.#stop(() => adapter.stop());
+      await this.#stop(() => this.#stopPlatform(entry));
       if (entry.state === 'starting' && !this.#stopping) this.#schedule(entry);
       return;
     }
@@ -855,7 +866,15 @@ export class Runtime {
     entry.presenceStop = undefined;
     if (entry.controller) {
       entry.controller = undefined;
+      await this.#stopPlatform(entry);
+    }
+  }
+
+  async #stopPlatform(entry: AdapterEntry) {
+    try {
       await entry.adapter.stop();
+    } finally {
+      await entry.mediaHost?.stop();
     }
   }
 
@@ -919,4 +938,24 @@ function sandboxHomes(config: Config, excluded?: string) {
     .flatMap(({ options }) => [options?.codexHome, options?.claudeHome])
     .filter((value): value is string => typeof value === 'string')
     .sort();
+}
+
+function platformMediaHost(
+  { workspace, webhookIngress }: PluginFactoryContext,
+  { id, kind }: PlatformInstanceConfig,
+) {
+  if (!webhookIngress)
+    throw new Error('Hosted media needs gateway webhook ingress.');
+  const instance = encodeURIComponent(id);
+  // Preserve issued LINE URLs and their on-disk files across the upgrade.
+  const line = kind === 'line';
+  return new HostedMedia({
+    directory: line
+      ? join(workspace, 'data', 'platform-line', 'adapter-' + instance)
+      : join(workspace, 'data', 'hosted-media', 'adapter-' + instance),
+    eventPrefix: kind,
+    ingress: webhookIngress,
+    path: line ? `/line/${instance}/media/` : `/media/adapter-${instance}/`,
+    workspace,
+  });
 }

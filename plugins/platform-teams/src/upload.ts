@@ -1,6 +1,6 @@
 import type { MediaFile } from '@tsugimori/plugin-sdk';
 
-import { ToolFailure } from '@tsugimori/plugin-sdk';
+import { sniffImageMime, ToolFailure } from '@tsugimori/plugin-sdk';
 
 import type { teamsSession } from './auth.ts';
 
@@ -86,9 +86,10 @@ function webpSize(data: Buffer): Dimensions | undefined {
 }
 
 function imageSize(data: Buffer): Image | undefined {
+  const mime = sniffImageMime(data);
   if (
     data.length >= 24 &&
-    data.readBigUInt64BE(0) === 0x89504e470d0a1a0an &&
+    mime === 'image/png' &&
     data.readUInt32BE(8) === 13 &&
     data.toString('ascii', 12, 16) === 'IHDR'
   )
@@ -97,23 +98,17 @@ function imageSize(data: Buffer): Image | undefined {
       width: data.readUInt32BE(16),
       height: data.readUInt32BE(20),
     };
-  if (
-    data.length >= 10 &&
-    ['GIF87a', 'GIF89a'].includes(data.toString('ascii', 0, 6))
-  )
+  if (data.length >= 10 && mime === 'image/gif')
     return {
       subtype: 'gif',
       width: data.readUInt16LE(6),
       height: data.readUInt16LE(8),
     };
-  if (data.length >= 2 && data.readUInt16BE(0) === 0xffd8) {
+  if (mime === 'image/jpeg') {
     const size = jpegSize(data);
     if (size) return { ...size, subtype: 'jpeg' };
   }
-  if (
-    data.toString('ascii', 0, 4) === 'RIFF' &&
-    data.toString('ascii', 8, 12) === 'WEBP'
-  ) {
+  if (mime === 'image/webp') {
     const size = webpSize(data);
     if (size) return { ...size, subtype: 'webp' };
   }

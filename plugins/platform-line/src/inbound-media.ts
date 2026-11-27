@@ -1,5 +1,7 @@
 import type { InboundAttachment } from '@tsugimori/plugin-sdk';
 
+import { attachmentSize } from '@tsugimori/plugin-sdk';
+
 import { nonempty, record } from './api.ts';
 import { validStickerId } from './sticker-image.ts';
 
@@ -22,12 +24,7 @@ export function lineAttachments(
           fileId:
             provider === undefined || provider === 'line' ? id : undefined,
           name: nonempty(message.fileName),
-          size:
-            typeof message.fileSize === 'number' &&
-            Number.isSafeInteger(message.fileSize) &&
-            message.fileSize >= 0
-              ? message.fileSize
-              : undefined,
+          size: attachmentSize(message.fileSize),
         },
       ];
     }
