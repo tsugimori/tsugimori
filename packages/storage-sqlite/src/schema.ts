@@ -61,6 +61,7 @@ export const chats = sqliteTable(
     thinking: text('thinking'),
     sessionAgentId: text('session_agent_id'),
     sessionModel: text('session_model'),
+    privateSince: integer('private_since'),
   },
   (table) => [primaryKey({ columns: [table.adapterId, table.chatId] })],
 );

@@ -1270,11 +1270,18 @@ export class SqliteStore implements Store {
       serviceTier: current?.serviceTier ?? previous?.serviceTier ?? null,
       thinking: current?.thinking ?? previous?.thinking ?? null,
     };
+    const privateSince =
+      Math.max(previous?.privateSince ?? 0, current?.privateSince ?? 0) || null;
     const destination = {
       ...route,
-      sessionAgentId:
-        current?.sessionAgentId ?? previous?.sessionAgentId ?? null,
-      sessionModel: current?.sessionModel ?? previous?.sessionModel ?? null,
+      privateSince,
+      // A destination session might contain messages outside the merged boundary.
+      sessionAgentId: privateSince
+        ? null
+        : (current?.sessionAgentId ?? previous?.sessionAgentId ?? null),
+      sessionModel: privateSince
+        ? null
+        : (current?.sessionModel ?? previous?.sessionModel ?? null),
       kind: 'supergroup' as const,
       title: current?.title ?? title ?? previous?.title ?? null,
       allowlisted:
@@ -1298,6 +1305,7 @@ export class SqliteStore implements Store {
         target: [chats.adapterId, chats.chatId],
         set: {
           migratedToChatId: newChatId,
+          privateSince: null,
           sessionAgentId: null,
           sessionModel: null,
         },
@@ -2814,6 +2822,12 @@ export class SqliteStore implements Store {
       chatScope(messages, ref),
       eq(messages.deleted, false),
       lte(messages.seq, options.throughSeq),
+      options.privateSince === undefined
+        ? undefined
+        : and(
+            gt(messages.seq, options.privateSince),
+            sql`json_extract(${messages.metadata}, '$.sessionBoundary') is not 1`,
+          ),
       or(
         eq(messages.seq, options.throughSeq),
         sql`json_extract(${messages.metadata}, '$.sideQuestion') is not 1`,
@@ -2988,11 +3002,11 @@ export class SqliteStore implements Store {
     });
   }
 
-  clearSession(ref: ChatRef) {
+  clearSession(ref: ChatRef, privateSince?: number | null) {
     ref = this.resolveChat(ref);
     this.#db
       .update(chats)
-      .set({ sessionAgentId: null, sessionModel: null })
+      .set({ sessionAgentId: null, sessionModel: null, privateSince })
       .where(chatScope(chats, ref))
       .run();
   }

@@ -9,12 +9,17 @@ import { constants } from 'node:fs';
 import { mkdir, open, readdir, realpath } from 'node:fs/promises';
 import { join } from 'node:path';
 
-import { messageAlbumLookup, messageContext } from './message.ts';
+import {
+  messageAlbumLookup,
+  messageContext,
+  privateReplyVisible,
+} from './message.ts';
 
 export {
   albumAttachments,
   messageAlbumLookup,
   messageContext,
+  privateReplyVisible,
 } from './message.ts';
 
 export interface SummaryProvider {
@@ -40,6 +45,7 @@ export interface ContextRequest extends ChatRef {
   history?: 'none';
   kind: string;
   ownerId?: string;
+  privateSince?: number;
   recentMessages: number;
   richText?: boolean;
   skipSeq?: readonly number[];
@@ -47,7 +53,8 @@ export interface ContextRequest extends ChatRef {
 }
 
 interface ContextDependencies {
-  store: Pick<Store, 'recentMessages'> & Partial<Pick<Store, 'messageAlbum'>>;
+  store: Pick<Store, 'recentMessages'> &
+    Partial<Pick<Store, 'getMessage' | 'messageAlbum'>>;
   summary?: SummaryProvider;
   workspace: string;
 }
@@ -78,11 +85,18 @@ async function existsAtPath(path: string) {
   }
 }
 
-export const guidelineBlock: ContextBlock = {
+export const privateGuidelineBlock: ContextBlock = {
   source: 'system',
   trust: 'trusted',
   content:
-    'Older conversation history is available in storage. Workspace guideline files follow; AGENTS.md lists further guideline files that you can read with the guide.read tool when a task needs them. Apply rules in specificity order: workspace, platform, then conversation.\nAdd text after using a send tool only if it adds something to what you sent. If the latest message needs no reply or a send tool already delivered the whole reply, answer exactly `NO_REPLY: <short reason>` (one line, no other text).',
+    'Workspace guideline files follow; AGENTS.md lists further guideline files that you can read with the guide.read tool when a task needs them. Apply rules in specificity order: workspace, platform, then conversation.\nAdd text after using a send tool only if it adds something to what you sent. If the latest message needs no reply or a send tool already delivered the whole reply, answer exactly `NO_REPLY: <short reason>` (one line, no other text).',
+};
+
+export const guidelineBlock: ContextBlock = {
+  ...privateGuidelineBlock,
+  content:
+    'Older conversation history is available in storage. ' +
+    privateGuidelineBlock.content,
 };
 
 export const telegramTableBlocks = {
@@ -160,12 +174,14 @@ export class ContextAssembler {
 
   async assembleWithRefs(request: ContextRequest) {
     const entries: AssembledEntry[] = [];
+    const { privateSince } = request;
     let afterSummarySeq: number | undefined;
     if (request.afterSeq === undefined) {
       entries.push({
         kind: 'system',
-        name: 'guidelines',
-        block: guidelineBlock,
+        name: privateSince === undefined ? 'guidelines' : 'private-guidelines',
+        block:
+          privateSince === undefined ? guidelineBlock : privateGuidelineBlock,
       });
     }
     if (request.kind === 'telegram') {
@@ -177,7 +193,7 @@ export class ContextAssembler {
     if (request.afterSeq === undefined) {
       entries.push(...(await this.#loadRules(request)));
       const summary =
-        request.history === 'none'
+        request.history === 'none' || privateSince !== undefined
           ? undefined
           : await this.#summary.get(request);
       if (summary && summary.throughSeq < request.throughSeq) {
@@ -201,16 +217,25 @@ export class ContextAssembler {
       afterSeq:
         request.history === 'none' ? request.throughSeq - 1 : request.afterSeq,
       afterSummarySeq,
+      privateSince,
       skipSeq: request.skipSeq,
       includeRaw: false,
     });
     const album = this.#store.messageAlbum
-      ? messageAlbumLookup(
-          { messageAlbum: this.#store.messageAlbum.bind(this.#store) },
-          request,
-        )
+      ? messageAlbumLookup(this.#store, request, privateSince)
       : undefined;
     for (const message of messages) {
+      const replyId = message.metadata?.replyTo?.id ?? message.replyTo;
+      const hideReply =
+        privateSince !== undefined &&
+        replyId &&
+        !privateReplyVisible(
+          this.#store,
+          request,
+          replyId,
+          message.migratedFromChatId,
+          privateSince,
+        );
       entries.push({
         kind: message.seq === request.throughSeq ? 'new' : 'history',
         seq: message.seq,
@@ -223,7 +248,13 @@ export class ContextAssembler {
               : 'member',
           content: message.text,
           message: messageContext(
-            message,
+            hideReply
+              ? {
+                  ...message,
+                  replyTo: null,
+                  metadata: { ...message.metadata, replyTo: undefined },
+                }
+              : message,
             album,
             message.seq === request.throughSeq,
           ),

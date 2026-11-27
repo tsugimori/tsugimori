@@ -289,6 +289,7 @@ export interface PlatformCommand {
 
 export type PlatformCommandScope =
   | { type: 'default' | 'group-chats' | 'private-chats' }
+  | { chatId: string; type: 'chat' }
   | { type: 'private-chat'; userId: string }
   | { chatId: string; type: 'chat-member'; userId: string };
 

@@ -174,6 +174,7 @@ export type TaskContextRef =
       kind: 'system';
       name:
         | 'guidelines'
+        | 'private-guidelines'
         | 'schedule-style'
         | 'telegram-tables-bullets'
         | 'telegram-tables-rich';

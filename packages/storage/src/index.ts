@@ -26,6 +26,7 @@ export interface ChatRecord extends ChatRef {
   kind: 'dm' | 'group' | 'supergroup';
   migratedToChatId: string | null;
   model: string | null;
+  privateSince: number | null;
   serviceTier: string | null;
   sessionAgentId?: string | null;
   thinking: string | null;
@@ -48,7 +49,7 @@ export interface UserRecord extends PrincipalRef {
 export type MessageMetadata = Pick<
   InboundMessage,
   'at' | 'attachments' | 'replyTo' | 'sender' | 'userDisplay'
-> & { sideQuestion?: boolean };
+> & { sessionBoundary?: boolean; sideQuestion?: boolean };
 
 export interface MessageRecord extends ChatRef {
   albumId?: string | null;
@@ -429,7 +430,7 @@ export interface Store {
   ): boolean;
   claimSetupRun(run: SetupRun, now: number): SetupRun | undefined;
   clearAgentSessions(agentId: string): void;
-  clearSession(ref: ChatRef): void;
+  clearSession(ref: ChatRef, privateSince?: number | null): void;
   clearUnavailableCommandScopes(ref: CommandScopeChat): void;
   close(): void;
   closePreview(
@@ -607,6 +608,7 @@ export interface Store {
       afterSummarySeq?: number;
       includeRaw?: boolean;
       limit?: number;
+      privateSince?: number;
       skipSeq?: readonly number[];
       throughSeq: number;
     },

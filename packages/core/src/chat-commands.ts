@@ -10,6 +10,10 @@ const descriptions = {
     en: 'Allow members to use the bot here',
     'zh-TW': '允許成員在此使用機器人',
   },
+  ask: {
+    en: 'Ask a one-off question in a fresh session (<message>)',
+    'zh-TW': '在新的工作階段詢問單次問題（<訊息>）',
+  },
   btw: {
     en: 'Ask a side question about this conversation (<message>)',
     'zh-TW': '詢問目前對話的延伸問題（<訊息>）',
@@ -38,8 +42,12 @@ const descriptions = {
     'zh-TW': '查看或設定模型（default 還原）',
   },
   new: {
-    en: 'Start a new conversation ([clean] [message])',
-    'zh-TW': '開始新對話（[clean] [訊息]）',
+    en: 'Start a new conversation',
+    'zh-TW': '開始新對話',
+  },
+  newprivate: {
+    en: 'Start a private conversation without earlier history',
+    'zh-TW': '開始不含先前紀錄的私人對話',
   },
   pair: {
     en: 'Get a new pairing code in DM (/pair new <adapterId>)',
@@ -72,6 +80,18 @@ const descriptions = {
 
 export type Command = { args: string; name: keyof typeof descriptions };
 
+const memberCommands = new Set<Command['name']>([
+  'ask',
+  'btw',
+  'context',
+  'new',
+  'newprivate',
+]);
+
+export function isMemberCommand(name: Command['name']) {
+  return memberCommands.has(name);
+}
+
 export function parseCommand(
   text: string,
   botUsername?: string,
@@ -94,6 +114,10 @@ export function parseCommand(
 
 export function chatCommands(locale: Config['locale']) {
   return {
+    member: Array.from(memberCommands, (name) => ({
+      name,
+      description: descriptions[name][locale],
+    })),
     owner: Object.entries(descriptions).map(([name, localized]) => ({
       name,
       description: localized[locale],

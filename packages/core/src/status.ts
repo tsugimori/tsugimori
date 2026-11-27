@@ -43,6 +43,8 @@ const messages = {
     compaction: 'Last compaction',
     compactionCount: (count: number) => `${count} total`,
     session: 'Session',
+    privacy: 'Privacy',
+    privateSince: (seq: string) => `Private conversation since message #${seq}`,
     sessionAge: (age: string) => `active for ${age}`,
     modes: {
       manual: 'manual',
@@ -117,6 +119,8 @@ const messages = {
     compaction: '上次壓縮',
     compactionCount: (count: number) => `共 ${count} 次`,
     session: '對話',
+    privacy: '隱私',
+    privateSince: (seq: string) => `自訊息 #${seq} 起為私人對話`,
     sessionAge: (age: string) => `已持續 ${age}`,
     modes: {
       manual: '手動',
@@ -178,12 +182,21 @@ export function contextCard(
   },
   scope: string | undefined,
   locale: 'en' | 'zh-TW',
+  privateSince?: number,
 ) {
   const zh = locale === 'zh-TW';
+  const number = new Intl.NumberFormat(locale);
+  const lines =
+    privateSince === undefined
+      ? []
+      : [messages[locale].privateSince(number.format(privateSince))];
   if (!scope)
-    return zh
-      ? '此聊天室目前沒有使用中的代理程式工作階段。'
-      : 'There is no active agent session in this chat.';
+    return [
+      ...lines,
+      zh
+        ? '此聊天室目前沒有使用中的代理程式工作階段。'
+        : 'There is no active agent session in this chat.',
+    ].join('\n');
   const usage = trace.latestSessionSpan(scope, 'usage')?.attrs;
   const window = trace.latestSessionSpan(scope, 'contextWindow')?.attrs
     .contextWindow;
@@ -208,7 +221,6 @@ export function contextCard(
     return total;
   };
   const tasks = trace.sessionHistory(scope).tasks ?? 0;
-  const number = new Intl.NumberFormat(locale);
   const count = (value: unknown) =>
     typeof value === 'number' ? number.format(value) : messages[locale].unknown;
   const taskMode = taskRuns.at(0)?.attrs.sessionMode ?? run?.sessionMode;
@@ -228,8 +240,9 @@ export function contextCard(
   const blockChars = count(sumBlocks('contextChars'));
   const tools = count(run?.toolDefinitions);
   const toolChars = count(run?.toolDefinitionChars);
-  return (
-    zh
+  return [
+    ...lines,
+    ...(zh
       ? [
           `工作階段：${mode} · ${number.format(tasks)} 個任務`,
           `Token：上下文 ${context} · 輸入 ${input} · 模型上限 ${count(window)}`,
@@ -241,8 +254,8 @@ export function contextCard(
           `Tokens: ${context} context · ${input} input · ${count(window)} model window`,
           `Context blocks: ${blocks} · ${blockChars} chars`,
           `Tool definitions: ${tools} · ${toolChars} description and schema chars`,
-        ]
-  ).join('\n');
+        ]),
+  ].join('\n');
 }
 
 interface StatusDependencies {
@@ -251,7 +264,10 @@ interface StatusDependencies {
   sandboxEnabled: boolean;
   showRecentApproval?: boolean;
   startedAt: number;
-  store: Pick<Store, 'approvalStatus' | 'getSummaryStatus' | 'scheduleStatus'>;
+  store: Pick<
+    Store,
+    'approvalStatus' | 'getChat' | 'getSummaryStatus' | 'scheduleStatus'
+  >;
   tasks: Pick<Tasks, 'status'>;
   trace: Pick<Tracer, 'latestSessionSpan' | 'sessionHistory'>;
   webhook?: WebhookStatus;
@@ -345,6 +361,7 @@ export function statusCard(
   text += separator + m.uptime(elapsed(startedAt), date(startedAt));
 
   const work = tasks.status(chat);
+  const privateSince = store.getChat(chat)?.privateSince;
   const { agentId, defaults, quota, serviceTier, thinking } = work;
   if (agentId) {
     const agent = agents.find(({ id }) => id === agentId);
@@ -417,7 +434,13 @@ export function statusCard(
       );
     }
   }
-  const summary = store.getSummaryStatus(chat);
+  if (privateSince != null)
+    field(
+      m.privacy,
+      m.privateSince(new Intl.NumberFormat(locale).format(privateSince)),
+    );
+  const summary =
+    privateSince == null ? store.getSummaryStatus(chat) : undefined;
   if (summary)
     field(
       m.summary,
@@ -457,7 +480,7 @@ export function statusCard(
     field(
       m.lastApproval,
       m.decisions[latest.status],
-      latest.failureReason ?? '',
+      privateSince == null ? (latest.failureReason ?? '') : '',
     );
 
   const { count, next, failed } = store.scheduleStatus(chat.adapterId, target);
@@ -470,13 +493,13 @@ export function statusCard(
         30,
       );
       details += `${m.due(date(next.nextDueAt))} #${scheduleRef(next.id)}`;
-      if (content) details += ` ${content}`;
+      if (content && privateSince == null) details += ` ${content}`;
     }
     field(
       m.schedules,
       details,
       failed ? `#${scheduleRef(failed.id)} ${m.failed}` : '',
-      failed?.failureReason ?? '',
+      privateSince == null ? (failed?.failureReason ?? '') : '',
     );
   }
 

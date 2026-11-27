@@ -314,6 +314,7 @@ async function fixture(
     dbPath,
     logs,
     platform,
+    registry,
     store,
     trace,
     path,
@@ -475,7 +476,7 @@ test(
   },
 );
 
-test('/new clears the active session and rebuilds context with or without a prompt', async (t) => {
+test('/new clears the active session and ignores trailing text', async (t) => {
   const requests: AgentRequest[] = [];
   const { gateway, platform, store, trace } = await fixture(
     t,
@@ -516,28 +517,26 @@ test('/new clears the active session and rebuilds context with or without a prom
 
   await platform.emit(inbound('prompt', '/new Start here\nwith another line'));
   await gateway.idle();
-  assert.equal(requests.length, 3);
+  assert.equal(requests.length, 2);
+  assert.equal(store.getSession(chat, 'test'), undefined);
+  assert.equal(store.getMessage(chat, 'prompt')?.text, '/new');
+  assert.equal(platform.sent.at(-1)?.replyTo, 'prompt');
+  assert.equal(
+    platform.sent.at(-1)?.text,
+    platform.sent.find(({ replyTo }) => replyTo === 'reset')?.text,
+  );
+
+  await platform.emit(inbound('following', 'Following message'));
+  await gateway.idle();
   assert.equal(requests[2]?.resumeSessionId, undefined);
   assert.ok(
     requests[2]?.context.some(({ content }) => content === 'Next message'),
   );
-  assert.equal(
-    requests[2]?.context.at(-1)?.content,
-    'Start here\nwith another line',
-  );
-  assert.equal(
-    requests[2]?.context.at(-2)?.content,
-    'The next message was sent to you with the /new command. Reply to it.',
-  );
-  assert.equal(
-    store.getMessage(chat, 'prompt')?.text,
-    '/new Start here\nwith another line',
-  );
+  assert.doesNotMatch(JSON.stringify(requests[2]?.context), /Start here/);
   assert.equal(
     store.getSession(chat, 'test', 'second')?.sessionId,
     'backend-3',
   );
-  assert.equal(platform.sent.at(-1)?.replyTo, 'prompt');
   assert.deepEqual(
     trace.recent
       .filter(({ name }) => name === 'agent.run')
@@ -690,7 +689,7 @@ test('/btw forks the current session and keeps both messages out of agent histor
   );
 });
 
-test('/new clean skips stored history and summaries for the first task', async (t) => {
+test('/ask uses fresh-session context without forking or replacing the main session', async (t) => {
   const requests: AgentRequest[] = [];
   const { gateway, platform, store, trace } = await fixture(
     t,
@@ -698,12 +697,120 @@ test('/new clean skips stored history and summaries for the first task', async (
       requests.push(request);
       yield {
         type: 'sessionId',
+        sessionId: request.ephemeral ? 'ask-session' : 'main-session',
+      };
+      yield {
+        type: 'text.final',
+        text: request.ephemeral ? 'One-off answer' : 'Main reply',
+      };
+    },
+    true,
+    { supportsSessionFork: true },
+  );
+  await platform.emit(inbound('earlier', 'Earlier main message'));
+  await gateway.idle();
+  assert.ok(
+    store.saveSummary({
+      ...store.beginSummary(chat),
+      throughSeq: store.getMessage(chat, 'earlier')!.seq,
+      text: 'Main summary',
+    }),
+  );
+  await platform.emit(inbound('recent', 'Recent main message'));
+  await gateway.idle();
+  const main = store.getSession(chat, 'test');
+  assert.equal(main?.sessionId, 'main-session');
+
+  await platform.emit(inbound('ask', '/ask One-off question'));
+  await gateway.idle();
+  const ask = requests[2]!;
+  assert.equal(ask.ephemeral, true);
+  assert.equal(ask.forkSessionId, undefined);
+  assert.equal(ask.resumeSessionId, undefined);
+  assert.ok(
+    ask.context.some(
+      ({ source, content }) =>
+        source === 'summary' && content.includes('Main summary'),
+    ),
+  );
+  assert.ok(
+    ask.context.some(({ content }) => content === 'Recent main message'),
+  );
+  assert.deepEqual(
+    ask.context.slice(-2).map(({ content }) => content),
+    [
+      'The next message was sent to you with the /ask command. Reply to it.',
+      'One-off question',
+    ],
+  );
+  assert.equal(platform.sent.at(-1)?.text, 'One-off answer');
+  assert.deepEqual(store.getSession(chat, 'test'), main);
+  await platform.emit(inbound('resume', 'Back to the main conversation'));
+  await gateway.idle();
+  assert.equal(requests[3]?.resumeSessionId, 'main-session');
+  assert.doesNotMatch(JSON.stringify(requests[3]?.context), /One-off/);
+  assert.deepEqual(
+    trace.recent
+      .filter(({ name }) => name === 'agent.run')
+      .map(({ attrs }) => attrs.sessionMode),
+    ['new', 'resume', 'ephemeral', 'resume'],
+  );
+});
+
+test('/newprivate limits context and tools across turns, model changes, compaction, and restart', async (t) => {
+  const requests: AgentRequest[] = [];
+  const compacted: string[] = [];
+  const downloads: (string | undefined)[] = [];
+  const f = await fixture(
+    t,
+    async function* (request) {
+      requests.push(request);
+      if (request.context.at(-1)?.content === 'First private turn') {
+        const get = request.tools.find(({ name }) => name === 'attachment.get');
+        assert.ok(get);
+        await assert.rejects(
+          get.run({ messageId: 'previous', index: 0 }),
+          /Attachment not found/,
+        );
+        await assert.rejects(
+          get.run({ messageId: 'private-first', index: 0 }),
+          /Attachment not found/,
+        );
+        await get.run({ messageId: 'private-first', index: 1 });
+      }
+      yield {
+        type: 'sessionId',
         sessionId: request.resumeSessionId ?? `session-${requests.length}`,
       };
       yield { type: 'text.final', text: 'Ready' };
     },
+    true,
+    {
+      durable: true,
+      supportsSessionFork: true,
+      compact: async ({ sessionId }) => {
+        compacted.push(sessionId);
+        return { status: 'compacted' };
+      },
+      downloadAttachment: async ({ fileId }) => {
+        downloads.push(fileId);
+        return { bytes: Buffer.from('file'), mime: 'application/pdf' };
+      },
+    },
   );
-  await platform.emit(inbound('previous', 'Old conversation'));
+  const { gateway, platform, store, trace } = f;
+  const oldAttachment = {
+    kind: 'file',
+    index: 0,
+    fileId: 'old-file',
+    name: 'old-attachment.pdf',
+  } as const;
+  await platform.emit(
+    inbound('previous', 'Old conversation', {
+      albumId: 'spans-private-start',
+      attachments: [oldAttachment],
+    }),
+  );
   await gateway.idle();
   assert.ok(
     store.saveSummary({
@@ -713,44 +820,190 @@ test('/new clean skips stored history and summaries for the first task', async (
     }),
   );
 
-  await platform.emit(inbound('clean', '/new clean First clean message'));
+  await platform.emit(
+    inbound('private-start', '/newprivate Discarded argument'),
+  );
+  assert.equal(requests.length, 1);
+  assert.equal(store.getSession(chat, 'test'), undefined);
+  const start = store.getMessage(chat, 'private-start')!.seq;
+  assert.equal(store.getChat(chat)?.privateSince, start);
+  assert.equal(store.getMessage(chat, 'private-start')?.text, '/newprivate');
+  assert.match(
+    platform.sent.at(-1)?.text ?? '',
+    /private conversation.*until \/new/i,
+  );
+  await platform.emit(
+    inbound('private-first', 'First private turn', {
+      albumId: 'spans-private-start',
+      attachments: [
+        { ...oldAttachment, fileId: 'private-file', name: 'private.pdf' },
+      ],
+      replyTo: {
+        id: 'previous',
+        quote: 'Old quote',
+        attachments: [oldAttachment],
+      },
+    }),
+  );
   await gateway.idle();
-  await platform.emit(inbound('reset-clean', '/new clean'));
-  assert.match(platform.sent.at(-1)?.text ?? '', /without recent history/);
-  await platform.emit(inbound('clean-followup', 'Second clean message'));
-  await gateway.idle();
+  const first = requests[1]!;
+  assert.deepEqual(downloads, ['private-file']);
+  assert.equal(first.resumeSessionId, undefined);
+  assert.deepEqual(
+    first.context
+      .filter(({ source }) => source === 'message')
+      .map(({ content }) => content),
+    ['First private turn'],
+  );
+  assert.equal(first.context.at(-1)?.message?.replyTo, undefined);
+  assert.deepEqual(
+    first.context
+      .at(-1)
+      ?.message?.attachments.map(({ index, name }) => ({ index, name })),
+    [{ index: 1, name: 'private.pdf' }],
+  );
 
-  for (const [index, prompt] of [
-    'First clean message',
-    'Second clean message',
-  ].entries()) {
-    const request = requests[index + 1]!;
-    assert.equal(request.resumeSessionId, undefined);
+  await platform.emit(
+    inbound('private-second', 'Second private turn', {
+      replyTo: { id: 'private-first' },
+    }),
+  );
+  await gateway.idle();
+  const second = requests[2]!;
+  assert.equal(second.resumeSessionId, 'session-2');
+  assert.equal(
+    second.context.at(-1)?.message?.replyTo?.text,
+    'First private turn',
+  );
+
+  await platform.emit(inbound('private-btw', '/btw Private side question'));
+  await gateway.idle();
+  assert.equal(requests[3]?.forkSessionId, 'session-2');
+  await platform.emit(inbound('private-ask', '/ask Private one-off'));
+  await gateway.idle();
+  assert.equal(requests[4]?.forkSessionId, undefined);
+  assert.ok(
+    requests[4]?.context.some(
+      ({ content }) => content === 'First private turn',
+    ),
+  );
+  for (const request of requests.slice(1)) {
     assert.equal(
       request.context.some(({ source }) => source === 'summary'),
       false,
     );
-    assert.deepEqual(
-      request.context
-        .filter(({ source }) => source === 'message')
-        .map(({ content }) => content),
-      [prompt],
+    assert.doesNotMatch(
+      JSON.stringify(request.context),
+      /Old conversation|Old quote|old-attachment|Discarded argument/,
     );
+    assert.ok(request.tools.some(({ name }) => name === 'attachment.get'));
+    assert.ok(request.tools.every(({ name }) => !name.startsWith('history.')));
   }
-  await platform.emit(inbound('next', 'Continue'));
-  await gateway.idle();
-  assert.equal(requests[3]?.resumeSessionId, 'session-3');
   assert.deepEqual(
     trace.recent
       .filter(({ name }) => name === 'agent.run')
-      .map(({ attrs }) => [attrs.sessionMode, attrs.history]),
+      .map(({ attrs }) => [attrs.sessionMode, attrs.private]),
     [
       ['new', undefined],
-      ['new', 'none'],
-      ['new', 'none'],
-      ['resume', undefined],
+      ['new', true],
+      ['resume', true],
+      ['fork', true],
+      ['ephemeral', true],
     ],
   );
+  await platform.emit(inbound('context', '/context'));
+  assert.match(
+    platform.sent.at(-1)?.text ?? '',
+    new RegExp(`^Private conversation since message #${start}`),
+  );
+  await platform.emit(inbound('status', '/status'));
+  assert.match(
+    platform.sent.at(-1)?.text ?? '',
+    new RegExp(`Private conversation since message #${start}`),
+  );
+  await platform.emit(inbound('compact', '/compact'));
+  await gateway.idle();
+  assert.deepEqual(compacted, ['session-2']);
+  assert.equal(store.getChat(chat)?.privateSince, start);
+  await platform.emit(inbound('model', '/model second'));
+  assert.equal(store.getSession(chat, 'test'), undefined);
+  assert.equal(store.getChat(chat)?.privateSince, start);
+
+  await gateway.stop();
+  const reopened = new SqliteStore(f.dbPath);
+  const restarted = new Gateway({
+    registry: f.registry,
+    workspace: dirname(f.path),
+    store: reopened,
+    log: () => {},
+  });
+  try {
+    await restarted.start();
+    assert.equal(reopened.getChat(chat)?.privateSince, start);
+    await platform.emit(inbound('after-restart', 'Turn after restart'));
+    await restarted.idle();
+    const afterRestart = requests.at(-1)!;
+    assert.equal(afterRestart.model, 'second');
+    assert.equal(afterRestart.resumeSessionId, undefined);
+    assert.ok(
+      afterRestart.context.some(
+        ({ content }) => content === 'First private turn',
+      ),
+    );
+    assert.ok(
+      afterRestart.context.some(
+        ({ content }) => content === 'Second private turn',
+      ),
+    );
+    assert.doesNotMatch(
+      JSON.stringify(afterRestart.context),
+      /Old conversation|Old quote|Old summary|old-attachment/,
+    );
+    assert.ok(
+      afterRestart.tools.every(({ name }) => !name.startsWith('history.')),
+    );
+
+    await platform.emit(inbound('private-restart', '/newprivate'));
+    assert.equal(
+      reopened.getChat(chat)?.privateSince,
+      reopened.getMessage(chat, 'private-restart')?.seq,
+    );
+    await platform.emit(
+      inbound('private-restart-turn', 'First turn after private restart'),
+    );
+    await restarted.idle();
+    assert.deepEqual(
+      requests
+        .at(-1)
+        ?.context.filter(({ source }) => source === 'message')
+        .map(({ content }) => content),
+      ['First turn after private restart'],
+    );
+
+    const count = requests.length;
+    await platform.emit(inbound('end-private', '/new clean'));
+    assert.equal(reopened.getChat(chat)?.privateSince, null);
+    assert.equal(requests.length, count);
+    await platform.emit(inbound('regular', 'Ordinary turn'));
+    await restarted.idle();
+    assert.ok(
+      requests
+        .at(-1)
+        ?.context.some(
+          ({ source, content }) =>
+            source === 'summary' && content.includes('Old summary'),
+        ),
+    );
+    assert.ok(
+      requests.at(-1)?.tools.some(({ name }) => name === 'history.search'),
+    );
+    assert.ok(
+      requests.at(-1)?.tools.some(({ name }) => name === 'history.read'),
+    );
+  } finally {
+    await restarted.stop();
+    reopened.close();
+  }
 });
 
 test(
@@ -906,7 +1159,21 @@ test('/context shows usage and sizes for the current session in plain text', asy
   await gateway.idle();
   await platform.emit(inbound('second', 'private second prompt'));
   await gateway.idle();
-  await platform.emit(inbound('context', '/context'));
+  const member = { chatKind: 'group', userId: 'member' } as const;
+  const beforeContext = platform.sent.length;
+  await platform.emit(inbound('denied-context', '/context', member));
+  assert.equal(platform.sent.length, beforeContext);
+  await platform.emit(inbound('allow', '/allow', { chatKind: 'group' }));
+  await platform.emit(
+    inbound('other-first', 'Unrelated chat text', { chatId: 'other-room' }),
+  );
+  await gateway.idle();
+  const afterOtherTurn = platform.sent.length;
+  await platform.emit(
+    inbound('other-context', '/context', { ...member, chatId: 'other-room' }),
+  );
+  assert.equal(platform.sent.length, afterOtherTurn);
+  await platform.emit(inbound('context', '/context', member));
   const { context, tools } = requests[1]!;
   const format = new Intl.NumberFormat('en');
   assert.deepEqual(platform.sent.at(-1)?.text?.split('\n'), [
@@ -916,11 +1183,16 @@ test('/context shows usage and sizes for the current session in plain text', asy
     `Tool definitions: ${tools.length} · ${format.format(tools.reduce((sum, tool) => sum + tool.description.length + JSON.stringify(tool.schema).length, 0))} description and schema chars`,
   ]);
   assert.equal(platform.sent.at(-1)?.format, undefined);
-  assert.equal(requests.length, 2);
+  assert.equal(requests.length, 3);
   await platform.emit(inbound('help', '/help'));
   assert.match(platform.sent.at(-1)?.text ?? '', /^\/context · /m);
   assert.match(platform.sent.at(-1)?.text ?? '', /^\/stop · /m);
-  assert.match(platform.sent.at(-1)?.text ?? '', /^\/new · .*\[clean\]/m);
+  assert.match(
+    platform.sent.at(-1)?.text ?? '',
+    /^\/new · Start a new conversation$/m,
+  );
+  assert.match(platform.sent.at(-1)?.text ?? '', /^\/newprivate · /m);
+  assert.match(platform.sent.at(-1)?.text ?? '', /^\/ask · /m);
 });
 
 test(
@@ -942,7 +1214,9 @@ test(
     );
     const member = { chatKind: 'group', userId: 'member' } as const;
     await platform.emit(inbound('denied-new', '/new Disallowed', member));
+    await platform.emit(inbound('denied-private', '/newprivate', member));
     await platform.emit(inbound('denied-btw', '/btw', member));
+    await platform.emit(inbound('denied-ask', '/ask Disallowed', member));
     assert.equal(platform.sent.length, 0);
     assert.equal(store.listChatTasks(chat).length, 0);
     assert.equal(
@@ -951,6 +1225,8 @@ test(
     );
 
     await platform.emit(inbound('allow', '/allow', { chatKind: 'group' }));
+    await platform.emit(inbound('ask-usage', '/ask', member));
+    assert.equal(platform.sent.at(-1)?.text, '用法：/ask <訊息>');
     await platform.emit(inbound('usage', '/btw', member));
     assert.equal(platform.sent.at(-1)?.text, '用法：/btw <訊息>');
     await platform.emit(inbound('member-task', '/btw Question', member));
@@ -960,6 +1236,11 @@ test(
       assert.equal(
         platform.sent.at(-1)?.text,
         '此聊天室還有任務未完成，請等任務結束後再使用 /new。',
+      );
+      await platform.emit(inbound('busy-private', '/newprivate', member));
+      assert.equal(
+        platform.sent.at(-1)?.text,
+        '此聊天室還有任務未完成，請等任務結束後再使用 /newprivate。',
       );
       assert.equal(store.listChatTasks(chat).length, 1);
       assert.equal(
@@ -971,6 +1252,8 @@ test(
     }
     await gateway.idle();
     assert.equal(platform.sent.at(-1)?.replyTo, 'member-task');
+    await platform.emit(inbound('member-private', '/newprivate', member));
+    assert.match(platform.sent.at(-1)?.text ?? '', /已開始私人對話/);
     await platform.emit(inbound('member-reset', '/new', member));
     assert.equal(
       platform.sent.at(-1)?.text,
@@ -3111,7 +3394,7 @@ test(
 );
 
 test(
-  'a different DM requires linked native recipient approval and scheduled agents use the task pipeline',
+  'a different DM requires linked native recipient approval and scheduled agents use the private task pipeline',
   { timeout: 6000 },
   async (t) => {
     const seen: AgentRequest[] = [];
@@ -3187,6 +3470,7 @@ test(
       f.store.listSchedules(chat)[0]?.deliveryApprovedBy,
       recipient.userId,
     );
+    await f.platform.emit(inbound('private-schedule', '/newprivate'));
     await f.platform.emit(inbound('schedule-agent', 'Create agent run'));
     await f.gateway.idle();
     await until(
@@ -3220,6 +3504,21 @@ test(
     assert.equal(scheduled?.format, 'markdown');
     assert.equal(scheduled.allowTextMentions, false);
     assert.equal(seen.at(-1)?.model, 'scheduled-model');
+    const request = seen.at(-1)!;
+    assert.ok(request.tools.some(({ name }) => name === 'schedule.create'));
+    assert.ok(request.tools.every(({ name }) => !name.startsWith('history.')));
+    assert.doesNotMatch(
+      JSON.stringify(request.context),
+      /Create recipient reminder|Recipient reminder scheduled/,
+    );
+    assert.ok(
+      f.trace.recent.some(
+        ({ name, attrs }) =>
+          name === 'agent.run' &&
+          attrs.taskId === scheduledTask.id &&
+          attrs.private === true,
+      ),
+    );
     assert.ok(f.trace.recent.some(({ name }) => name === 'inbound.scheduled'));
   },
 );

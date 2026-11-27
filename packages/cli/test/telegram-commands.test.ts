@@ -214,6 +214,7 @@ test(
         'add',
         'agent',
         'allow',
+        'ask',
         'btw',
         'cancel',
         'compact',
@@ -224,6 +225,7 @@ test(
         'login',
         'model',
         'new',
+        'newprivate',
         'pair',
         'preview',
         'previews',
@@ -306,6 +308,19 @@ test(
     );
     assert.equal(requests.length, 0);
 
+    const allowlistedScope = { type: 'chat', chat_id: String(newGroup.id) };
+    await deliver(newGroup, owner, ['/allow'], 12);
+    assert.deepEqual(requests.splice(0), [
+      set(
+        allowlistedScope,
+        ownerCommands.filter(({ command }) =>
+          ['ask', 'btw', 'context', 'new', 'newprivate'].includes(command),
+        ),
+      ),
+    ]);
+    await deliver(newGroup, owner, ['/deny'], 12);
+    assert.deepEqual(requests.splice(0), [clear(allowlistedScope)]);
+
     const localized = await reload('zh-TW');
     const zh = localized[0]?.commands;
     assert.ok(zh);
@@ -323,7 +338,7 @@ test(
     );
     assert.equal(
       zh.find(({ command }) => command === 'new')?.description,
-      '開始新對話（[clean] [訊息]）',
+      '開始新對話',
     );
     assert.equal(
       zh.find(({ command }) => command === 'status')?.description,

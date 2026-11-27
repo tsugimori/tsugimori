@@ -10,7 +10,7 @@ export interface TaskInput {
     target: Omit<OutboundMessage, 'text'>;
   };
   seq: number;
-  sessionCommand?: { mode: 'btw' | 'new'; prompt: string };
+  sessionCommand?: { mode: 'ask' | 'btw'; prompt: string };
 }
 
 export class Supplements {

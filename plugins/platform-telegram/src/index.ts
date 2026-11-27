@@ -80,6 +80,8 @@ function commandScope(scope: PlatformCommandScope) {
       return { type: 'all_private_chats' };
     case 'private-chat':
       return { type: 'chat', chat_id: scope.userId };
+    case 'chat':
+      return { type: 'chat', chat_id: scope.chatId };
     case 'chat-member':
       return {
         type: 'chat_member',

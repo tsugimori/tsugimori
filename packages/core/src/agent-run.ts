@@ -25,9 +25,9 @@ import { describeStickerError, describeTaskError } from './errors.ts';
 
 interface AgentRunDependencies {
   approvalPending?: AbortSignal;
-  history?: 'none';
   log: Logger;
   onSession?(sessionId: string): void;
+  privateConversation?: boolean;
   recorder?: TaskRecorder;
   scopeChatId?: string | null;
   scopeModel?: string;
@@ -60,7 +60,7 @@ function isPendingApproval(result: unknown) {
 export async function runAgent(
   {
     approvalPending,
-    history,
+    privateConversation,
     trace,
     log,
     onSession,
@@ -129,7 +129,7 @@ export async function runAgent(
         : request.resumeSessionId
           ? 'resume'
           : 'new',
-    ...(history && { history }),
+    ...(privateConversation && { private: true }),
     contextBlocks: request.context.length,
     contextChars: request.context.reduce(
       (chars, { content }) => chars + content.length,

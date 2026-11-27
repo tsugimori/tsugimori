@@ -57,7 +57,11 @@ import { adminReader } from './admin.ts';
 import { acceptsServiceTier, formatServiceTier } from './agent-settings.ts';
 import { approvalDecisionText, approvalMessages } from './approval-messages.ts';
 import { ChatChoices, supportsChoices } from './chat-choices.ts';
-import { chatCommands, parseCommand } from './chat-commands.ts';
+import {
+  chatCommands,
+  isMemberCommand,
+  parseCommand,
+} from './chat-commands.ts';
 import { ChatRemoval } from './chat-removal.ts';
 import { ChatSetup } from './chat-setup.ts';
 import { EnvironmentChecks, failureText } from './checks.ts';
@@ -275,6 +279,9 @@ export class Gateway {
       log,
       onMigration: (adapter, chatId, newChatId) => {
         this.#tasks.migrateChat(adapter.id, chatId, newChatId);
+        const destination = { adapterId: adapter.id, chatId: newChatId };
+        if (store.getChat(destination)?.privateSince != null)
+          this.#summaries.cancelChat(destination);
         this.#restoreApprovalPrompts([adapter]);
       },
       owner: (id) => this.#auth.owner(id),
@@ -1070,8 +1077,9 @@ export class Gateway {
     }
     const privateCommand = command && hasPrivateArguments(command.name);
     const redactedText = redactPairingCodes(event.text);
-    const sideQuestion = command?.name === 'btw';
-    const privateRaw = privateCommand || redactedText !== event.text;
+    const sideQuestion = command?.name === 'btw' || command?.name === 'ask';
+    const reset = command?.name === 'new' || command?.name === 'newprivate';
+    const privateRaw = privateCommand || reset || redactedText !== event.text;
     const replyId = event.replyTo?.id;
     const { replyTo, sensitiveReply } = resolveReplyTarget(
       { store, bot: adapter.botIdentity },
@@ -1104,8 +1112,9 @@ export class Gateway {
             ...(sideQuestion && { sideQuestion }),
           },
           threadId: event.threadId ?? null,
-          text:
-            privateCommand && command?.args
+          text: reset
+            ? `/${command.name}`
+            : privateCommand && command?.args
               ? `/${command.name} [redacted]`
               : redactedText ||
                 (event.attachments?.length
@@ -1211,11 +1220,15 @@ export class Gateway {
       return;
     }
 
-    const priorAlbumItem =
-      event.albumId &&
-      event.chatKind === 'dm' &&
-      store.messageAlbum(chat, event.albumId, migratedFrom ?? '')[0]?.seq !==
-        stored.seq;
+    let priorAlbumItem = false;
+    if (event.albumId && event.chatKind === 'dm') {
+      const privateSince = store.getChat(chat)?.privateSince;
+      priorAlbumItem =
+        store
+          .messageAlbum(chat, event.albumId, migratedFrom ?? '')
+          .find(({ seq }) => privateSince == null || seq > privateSince)
+          ?.seq !== stored.seq;
+    }
     const { triggered, reason } = priorAlbumItem
       ? { triggered: false, reason: 'not-addressed' as const }
       : decideTrigger(event, owner, this.#auth.isAllowlisted(chat));
@@ -1983,8 +1996,8 @@ export class Gateway {
       }
       return;
     }
-    const sessionCommand = name === 'new' || name === 'btw';
-    if (!owner && !(sessionCommand && this.#auth.isAllowlisted(chat))) return;
+    if (!owner && !(isMemberCommand(name) && this.#auth.isAllowlisted(chat)))
+      return;
     const isCurrentOwner = () =>
       !this.#isStopping() &&
       this.#runtime.getAdapter(adapter.id) === adapter &&
@@ -2195,6 +2208,7 @@ export class Gateway {
       case 'allow':
       case 'deny':
         store.setAllowlisted(chat, name === 'allow');
+        this.#commandMenus.sync(adapter);
         if (name === 'deny') this.#tasks.cancelApprovals(chat);
         await send(name === 'allow' ? m.allowlisted : m.removedFromAllowlist);
         break;
@@ -2313,31 +2327,37 @@ export class Gateway {
               { store, trace: this.#trace },
               this.#tasks.status(chat).sessionScope,
               locale,
+              store.getChat(store.resolveChat(chat))?.privateSince ?? undefined,
             ),
           );
         }
         break;
       case 'new':
+      case 'newprivate':
+        if (
+          this.#removingPlatform(adapter.id) ||
+          this.#removingAgentRoute(chat)
+        )
+          break;
+        if (!this.#tasks.resetSession(chat, name === 'newprivate' ? seq : null))
+          await send(m.newBusy(name));
+        else if (name === 'newprivate') {
+          this.#summaries.cancelChat(store.resolveChat(chat));
+          await this.#outbound.send(
+            adapter,
+            reply(message, m.newPrivateSuccess),
+            { sessionBoundary: true },
+          );
+        } else await send(m.newSuccess);
+        break;
+      case 'ask':
       case 'btw': {
         if (
           this.#removingPlatform(adapter.id) ||
           this.#removingAgentRoute(chat)
         )
           break;
-        const clean = name === 'new' && /^clean(?:\s|$)/i.test(args);
-        const prompt = clean ? args.slice('clean'.length).trimStart() : args;
-        if (name === 'new' && !this.#tasks.resetSession(chat, clean)) {
-          await send(m.newBusy);
-          break;
-        }
-        if (!prompt)
-          await send(
-            name === 'btw'
-              ? m.btwUsage
-              : clean
-                ? m.newCleanSuccess
-                : m.newSuccess,
-          );
+        if (!args) await send(name === 'ask' ? m.askUsage : m.btwUsage);
         else
           this.#tasks.dispatch(
             adapter,
@@ -2347,7 +2367,7 @@ export class Gateway {
               seq,
               sessionCommand: {
                 mode: name,
-                prompt: redactPairingCodes(prompt),
+                prompt: redactPairingCodes(args),
               },
             },
             onTask,

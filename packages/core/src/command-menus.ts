@@ -31,6 +31,7 @@ interface MenuState {
   adapterId: string;
   applied: Map<string, string>;
   groups: Set<string>;
+  members: Set<string>;
   pending: Promise<void>;
   scoped: Map<string, Extract<PlatformCommandScope, { userId: string }>>;
   unavailable: Map<string, string[]>;
@@ -77,7 +78,7 @@ export class CommandMenus {
       return;
     const state = this.#menu(adapter);
     this.#queue(adapter.id, state, async () => {
-      const { owner, runtime } = this.#deps;
+      const { owner, runtime, store } = this.#deps;
       const userId = owner(adapter.id);
       const commands = chatCommands(runtime.config.locale);
       for (const [key, scope] of state.scoped) {
@@ -95,6 +96,29 @@ export class CommandMenus {
         { type: 'private-chats' },
         userId ? [] : commands.pair,
       );
+      const allowed = new Set(
+        store.listChats().flatMap((chat) => {
+          if (
+            !userId ||
+            chat.adapterId !== adapter.id ||
+            !chat.allowlisted ||
+            chat.migratedToChatId
+          )
+            return [];
+          const chatId = store.deliveryAddress(chat)?.chatId ?? chat.chatId;
+          return chatId === userId ? [] : [chatId];
+        }),
+      );
+      for (const chatId of new Set([...state.members, ...allowed])) {
+        const scope = { chatId, type: 'chat' } as const;
+        const enabled = allowed.has(chatId);
+        if (
+          await this.#set(adapter, state, scope, enabled ? commands.member : [])
+        ) {
+          if (enabled) state.members.add(chatId);
+          else state.members.delete(chatId);
+        }
+      }
       if (!userId) return;
       await this.#set(
         adapter,
@@ -195,6 +219,7 @@ export class CommandMenus {
       adapterId: id,
       applied: new Map(),
       groups: new Set(),
+      members: new Set(),
       pending: Promise.resolve(),
       scoped: new Map(),
       unavailable,
@@ -234,6 +259,7 @@ export class CommandMenus {
       const state = this.#menu(adapter);
       state.groups.delete(chatId);
       state.groups.add(newChatId);
+      state.members.delete(chatId);
       for (const [key, scope] of state.scoped) {
         if (scope.type !== 'chat-member' || scope.chatId !== chatId) continue;
         state.scoped.delete(key);
@@ -262,11 +288,11 @@ export class CommandMenus {
     const value = JSON.stringify(commands);
     if (state.applied.get(key) === value) return true;
     const ref =
-      'userId' in scope
+      'userId' in scope || scope.type === 'chat'
         ? {
             adapterId: adapter.id,
             botId: adapter.botIdentity?.id ?? '',
-            chatId: scope.type === 'chat-member' ? scope.chatId : scope.userId,
+            chatId: 'chatId' in scope ? scope.chatId : scope.userId,
           }
         : undefined;
     if (ref && state.unavailable.get(ref.chatId)?.includes(key)) return false;
@@ -294,7 +320,7 @@ export class CommandMenus {
       end('error');
       log({ level: 'error', event: 'platform.commands_failed', ...attrs });
       if (
-        scope.type === 'chat-member' &&
+        (scope.type === 'chat-member' || scope.type === 'chat') &&
         details?.code === 400 &&
         details.migratedToChatId
       ) {

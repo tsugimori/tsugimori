@@ -118,9 +118,11 @@ export function sendTools(
         };
         const chat = deps.store.resolveChat(task.chat);
         const target = deps.store.getMessage(chat, messageId, '');
+        const privateSince = deps.store.getChat(chat)?.privateSince;
         if (
           !target ||
           target.deleted ||
+          (privateSince != null && target.seq <= privateSince) ||
           target.threadId !== (address.threadId ?? null) ||
           deps.store.resolveChat({
             adapterId: adapter.id,

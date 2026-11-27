@@ -73,7 +73,9 @@ export function attachmentTool(
     },
     async run(args, { chat, signal }) {
       const { messageId, index } = args as { index: number; messageId: string };
-      const items = findAttachments(store, chat, messageId);
+      chat = store.resolveChat(chat);
+      const privateSince = store.getChat(chat)?.privateSince ?? undefined;
+      const items = findAttachments(store, chat, messageId, '', privateSince);
       const attachment = items.find(
         (item) => item.attachment.index === index,
       )?.attachment;
@@ -140,32 +142,50 @@ export function findAttachments(
   chat: Pick<MessageRecord, 'adapterId' | 'chatId'>,
   id: string,
   migratedFromChatId = '',
+  privateSince?: number,
 ) {
   const row =
     store.getMessage(chat, id, migratedFromChatId, false) ??
     (migratedFromChatId === ''
       ? store.getMessage(chat, id, undefined, false)
       : undefined);
-  if (row?.deleted || store.isSetupSecret(chat, id)) return [];
+  if (
+    row?.deleted ||
+    (privateSince !== undefined && (!row || row.seq <= privateSince)) ||
+    store.isSetupSecret(chat, id)
+  )
+    return [];
   const quoted = row?.metadata?.attachments?.length
     ? undefined
     : store.quotedAttachmentMessage(
         chat,
         id,
         row?.migratedFromChatId ?? migratedFromChatId,
-      )?.metadata?.replyTo;
+      );
   const albumId = row?.albumId;
   if (albumId) {
     const members = store.messageAlbum(chat, albumId, row.migratedFromChatId);
     if (members.length) {
-      return albumAttachments(members).map(({ attachment }) => ({
-        albumFirstSeq: members[0]!.seq,
-        attachment,
-        id,
-      }));
+      const visible = members.find(
+        (member) => privateSince === undefined || member.seq > privateSince,
+      );
+      return albumAttachments(members)
+        .filter(
+          ({ message }) =>
+            privateSince === undefined || message.seq > privateSince,
+        )
+        .map(({ attachment }) => ({
+          albumFirstSeq: visible?.seq,
+          attachment,
+          id,
+        }));
     }
   }
-  return (row?.metadata?.attachments ?? quoted?.attachments ?? []).map(
+  const quotedAttachments =
+    quoted && (privateSince === undefined || quoted.seq > privateSince)
+      ? quoted.metadata?.replyTo?.attachments
+      : undefined;
+  return (row?.metadata?.attachments ?? quotedAttachments ?? []).map(
     (attachment) => ({ attachment, id, albumFirstSeq: undefined }),
   );
 }
@@ -178,6 +198,7 @@ export function turnAttachments(
   migratedFromChatId: string,
   afterSeq: number | undefined,
   includeReplies: boolean,
+  privateSince?: number,
 ) {
   // Older LINE stickers have only a sticker ID. The adapter can still fetch them.
   const isVisual = (attachment: InboundAttachment) =>
@@ -200,7 +221,13 @@ export function turnAttachments(
   }
   const groups = new Set<number>();
   return [...ids].flatMap(([id, described]) => {
-    const items = findAttachments(store, chat, id, migratedFromChatId);
+    const items = findAttachments(
+      store,
+      chat,
+      id,
+      migratedFromChatId,
+      privateSince,
+    );
     const album = items[0]?.albumFirstSeq;
     const images = items.filter(
       ({ attachment }) =>

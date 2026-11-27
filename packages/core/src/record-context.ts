@@ -11,6 +11,7 @@ import {
   guidelineFileBlock,
   messageAlbumLookup,
   messageContext,
+  privateGuidelineBlock,
   telegramTableBlocks,
 } from '@tsugimori/context';
 import { scheduleReplyStyle } from '@tsugimori/scheduler';
@@ -118,6 +119,10 @@ export async function reconstructContext(
           guidelines: {
             title: 'System guidelines',
             text: guidelineBlock.content,
+          },
+          'private-guidelines': {
+            title: 'System guidelines',
+            text: privateGuidelineBlock.content,
           },
           'schedule-style': {
             title: 'Scheduled reply style',

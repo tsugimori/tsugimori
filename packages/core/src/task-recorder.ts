@@ -128,7 +128,10 @@ export class TaskRecorder {
     return { summary, workspace };
   }
 
-  async context(entries: readonly AssembledEntry[]) {
+  async context(
+    entries: readonly AssembledEntry[],
+    privateConversation = false,
+  ) {
     const { store, workspace } = this.#deps;
     const history: number[] = [];
     let index = 0;
@@ -160,7 +163,8 @@ export class TaskRecorder {
               // Album membership and cached descriptions can change independently
               // of this message's revision.
               ...(block.message &&
-                (block.message.albumId ||
+                (privateConversation ||
+                  block.message.albumId ||
                   block.message.replyTo?.albumId ||
                   block.message.attachments.some(
                     ({ description }) => description,

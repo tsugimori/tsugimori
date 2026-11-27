@@ -1,0 +1,1 @@
+ALTER TABLE `chats` ADD `private_since` integer;

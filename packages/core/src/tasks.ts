@@ -34,7 +34,7 @@ import type {
 import type { Tracer } from '@tsugimori/trace';
 
 import { approvalCallbackId } from '@tsugimori/auth';
-import { messageContext } from '@tsugimori/context';
+import { messageContext, privateReplyVisible } from '@tsugimori/context';
 import { pendingApprovalResult } from '@tsugimori/plugin-sdk';
 import { containsMention, scheduleReplyStyle } from '@tsugimori/scheduler';
 import { createHash, randomUUID } from 'node:crypto';
@@ -103,6 +103,7 @@ type Work = {
   mediaQueued?: { detail?: ToolDetail; handle: QueuedMedia }[];
   messageIds: Set<string>;
   pendingApprovalFallback?: string;
+  privateSince?: number;
   progress: { stage: TaskStage; startedAt: number };
   recorder?: TaskRecorder;
   route?: { agentId: string; model: string };
@@ -145,7 +146,6 @@ function chatKey({ adapterId, chatId }: ChatRef) {
 export class Tasks {
   readonly #deps: TaskDependencies;
   readonly #queues = new Map<string, Promise<void>>();
-  readonly #cleanSessions = new Set<string>();
   readonly #running = new Map<string, Work>();
   readonly #work = new Set<Work>();
   readonly #approvals = new Map<
@@ -306,16 +306,14 @@ export class Tasks {
     );
   }
 
-  resetSession(chat: ChatRef, clean: boolean) {
+  resetSession(chat: ChatRef, privateSince: number | null) {
     const { store, trace } = this.#deps;
     chat = store.resolveChat(chat);
     const key = chatKey(chat);
     if (this.#queues.has(key)) return false;
     const agentId = store.getChat(chat)?.sessionAgentId;
     const session = agentId ? store.getSession(chat, agentId) : undefined;
-    store.clearSession(chat);
-    if (clean) this.#cleanSessions.add(key);
-    else this.#cleanSessions.delete(key);
+    store.clearSession(chat, privateSince);
     trace.record('session.reset', {
       sessionScope: session
         ? sessionScope(
@@ -346,6 +344,8 @@ export class Tasks {
       !input.sessionCommand &&
       !input.message.migratedFromChatId &&
       running?.acceptsSupplements &&
+      (running.privateSince === undefined ||
+        input.seq > running.privateSince) &&
       !running.input.message.migratedFromChatId &&
       !running.abort.signal.aborted &&
       replyTo &&
@@ -429,8 +429,13 @@ export class Tasks {
 
   migrateChat(adapterId: string, chatId: string, newChatId: string) {
     const oldKey = chatKey({ adapterId, chatId });
-    const key = chatKey({ adapterId, chatId: newChatId });
-    if (this.#cleanSessions.delete(oldKey)) this.#cleanSessions.add(key);
+    const destination = { adapterId, chatId: newChatId };
+    const key = chatKey(destination);
+    const privateSince =
+      this.#deps.store.getChat(destination)?.privateSince ?? undefined;
+    for (const running of [this.#running.get(oldKey), this.#running.get(key)])
+      if (running && running.privateSince !== privateSince)
+        running.abort.abort();
     const previous = this.#queues.get(oldKey);
     if (!previous) return;
     const tail = Promise.all([previous, this.#queues.get(key)]).then(() => {
@@ -544,14 +549,17 @@ export class Tasks {
   ) {
     const call = approval.continuation;
     if (call?.kind !== 'tool') return false;
-    const tool = this.#toolDefinitions(adapter).find(
+    const { adapterId, chatId } = source;
+    const chat = this.#deps.store.resolveChat({ adapterId, chatId });
+    const privateConversation =
+      this.#deps.store.getChat(chat)?.privateSince != null;
+    const tool = this.#toolDefinitions(adapter, privateConversation).find(
       ({ name, permission }) =>
         name === call.name && permission?.action === approval.action,
     );
     if (!tool) return false;
-    const { adapterId, chatId } = source;
     const task: ToolContext = {
-      chat: { adapterId, chatId },
+      chat,
       principal: { adapterId, userId: approval.requester },
       signal: AbortSignal.timeout(120_000),
       taskId: source.id,
@@ -573,7 +581,10 @@ export class Tasks {
     const { store, auth, runtime, log, toolDetails, workspace } = this.#deps;
     const { adapter, input, abort, id } = work;
     const { message } = input;
-    const ephemeral = input.sessionCommand?.mode === 'btw';
+    const ephemeral = input.sessionCommand !== undefined;
+    const samePrivateBoundary = () =>
+      (store.getChat(store.resolveChat(work.chat))?.privateSince ??
+        undefined) === work.privateSince;
     const activity = new AbortController();
     const finish = (status: TaskRecord['status']) =>
       store.updateTask(id, { status, finishedAt: Date.now() });
@@ -602,6 +613,11 @@ export class Tasks {
         userId: message.userId,
       });
       const current = store.getChat(chat);
+      work.privateSince = current?.privateSince ?? undefined;
+      if (work.privateSince !== undefined && input.seq <= work.privateSince) {
+        finish('cancelled');
+        return;
+      }
       const allowlisted = current?.allowlisted ?? false;
       if (
         input.compact
@@ -742,7 +758,7 @@ export class Tasks {
         finish('completed');
       }
 
-      if (!ephemeral) {
+      if (!ephemeral && samePrivateBoundary()) {
         if (
           !input.scheduled &&
           !abort.signal.aborted &&
@@ -762,7 +778,11 @@ export class Tasks {
           store.clearSession(chat);
         }
       }
-      if (!ephemeral && !abort.signal.aborted)
+      if (
+        !ephemeral &&
+        work.privateSince === undefined &&
+        !abort.signal.aborted
+      )
         this.#deps.summarize({
           agentId: selected.agent.id,
           chat,
@@ -789,7 +809,7 @@ export class Tasks {
                 ? 'other'
                 : stage,
       );
-      if (ranAgent && !ephemeral && !work.stopExec)
+      if (ranAgent && !ephemeral && !work.stopExec && samePrivateBoundary())
         store.clearSession(work.chat);
       if (!delivered && !work.stopExec && !(error instanceof DeliveryError))
         finish(abort.signal.aborted ? 'cancelled' : 'failed');
@@ -880,7 +900,7 @@ export class Tasks {
       return await this.#deps.outbound.send(work.adapter, message, {
         taskId: work.id,
         scheduled: work.input.scheduled !== undefined,
-        sideQuestion: work.input.sessionCommand?.mode === 'btw',
+        sideQuestion: work.input.sessionCommand !== undefined,
         signal: work.abort.signal,
         media: work.mediaQueued?.map(({ handle }) => handle),
         onParts: (parts, error) => this.#settleMedia(work, parts, error),
@@ -897,7 +917,11 @@ export class Tasks {
     }
   }
 
-  #toolDefinitions(adapter: PlatformAdapter, work?: Work) {
+  #toolDefinitions(
+    adapter: PlatformAdapter,
+    privateConversation: boolean,
+    work?: Work,
+  ) {
     const { store, context, toolDetails } = this.#deps;
     const scheduled = work?.input.scheduled;
     const message = work?.input.message;
@@ -908,7 +932,8 @@ export class Tasks {
     return [
       ...this.#deps.tools.filter(
         ({ name }) =>
-          !name.startsWith('exec.') || Boolean(this.#deps.backend()),
+          (!privateConversation || !name.startsWith('history.')) &&
+          (!name.startsWith('exec.') || Boolean(this.#deps.backend())),
       ),
       ...(adapter.tools?.() ?? []),
       ...this.#deps.stickers.tools(adapter),
@@ -920,7 +945,7 @@ export class Tasks {
               ? {
                   address: scheduled?.target ?? reply(message, ''),
                   source: message.messageId,
-                  sideQuestion: work.input.sessionCommand?.mode === 'btw',
+                  sideQuestion: work.input.sessionCommand !== undefined,
                   onDelivery: (ids, error) => {
                     work.recorder?.delivery(adapter.id, ids, error);
                     work.mediaDelivered ||= ids.length > 0;
@@ -948,7 +973,7 @@ export class Tasks {
   }
 
   async #compact(
-    { abort, adapter, chat, id, recorder }: Work,
+    { abort, adapter, chat, id, privateSince, recorder }: Work,
     agent: AgentConnector,
     settings: Pick<AgentRequest, 'model' | 'serviceTier' | 'thinking'>,
   ) {
@@ -965,7 +990,7 @@ export class Tasks {
       !session ||
       agent.acceptsSession?.(
         session.sessionId,
-        this.#toolDefinitions(adapter),
+        this.#toolDefinitions(adapter, privateSince !== undefined),
       ) === false
     )
       return m.compactNoSession;
@@ -1049,16 +1074,33 @@ export class Tasks {
   ) {
     const { store, auth, context, runtime, trace, hooks, stickers } =
       this.#deps;
-    const { chat, input, id, abort, supplements, adapter } = work;
-    const ephemeral = input.sessionCommand?.mode === 'btw';
+    const { chat, input, id, abort, supplements, adapter, privateSince } = work;
+    const ephemeral = input.sessionCommand !== undefined;
+    const btw = input.sessionCommand?.mode === 'btw';
     const { signal } = abort;
     const approvalPending = work.endForApproval.signal;
     const { model } = settings;
+    const visibleReply = (message: InboundMessage) => {
+      const { replyTo } = message;
+      if (
+        privateSince !== undefined &&
+        replyTo &&
+        !privateReplyVisible(
+          store,
+          chat,
+          replyTo.id,
+          input.message.migratedFromChatId ?? '',
+          privateSince,
+        )
+      )
+        return;
+      return replyTo;
+    };
     const collectStickers = (message: InboundMessage) => {
       if (input.scheduled || !adapter.downloadAttachment) return;
       for (const attachments of [
         message.attachments,
-        message.replyTo?.attachments,
+        visibleReply(message)?.attachments,
       ])
         for (const attachment of attachments ?? [])
           if (attachment.kind === 'sticker')
@@ -1075,7 +1117,11 @@ export class Tasks {
       principal: { adapterId: chat.adapterId, userId: input.message.userId },
     };
     const attrs = { ...chat, taskId: id };
-    const definitions = this.#toolDefinitions(adapter, work);
+    const definitions = this.#toolDefinitions(
+      adapter,
+      privateSince !== undefined,
+      work,
+    );
     const previousSession = store.getSession(
       chat,
       store.getChat(chat)?.sessionAgentId ?? agent.id,
@@ -1093,17 +1139,13 @@ export class Tasks {
         ? storedSession
         : undefined;
     const forkSessionId =
-      ephemeral && agent.supportsSessionFork
+      btw && agent.supportsSessionFork
         ? compatibleSession?.sessionId
         : undefined;
     const session = ephemeral ? undefined : compatibleSession;
-    const clean =
-      !ephemeral &&
-      !input.scheduled &&
-      this.#cleanSessions.delete(chatKey(chat));
     if (ephemeral) {
       recorder.session({ mode: forkSessionId ? 'fork' : 'ephemeral' });
-      work.sideQuestionFallback = !forkSessionId;
+      work.sideQuestionFallback = btw && !forkSessionId;
     } else
       recorder.session(
         session
@@ -1148,7 +1190,8 @@ export class Tasks {
           ownerId: auth.owner(chat.adapterId),
           recentMessages: runtime.config.context.recentMessages,
           throughSeq: input.seq,
-          ...((ephemeral || clean) && { history: 'none' }),
+          ...(btw && { history: 'none' }),
+          privateSince,
           afterSeq: (forkSessionId ? compatibleSession : session)?.throughSeq,
           skipSeq: session?.seenAfter,
         });
@@ -1186,7 +1229,7 @@ export class Tasks {
             },
           });
         }
-        if (ephemeral)
+        if (btw)
           entries.unshift({
             kind: 'new',
             block: {
@@ -1207,11 +1250,10 @@ export class Tasks {
           const { message } = block;
           if (!message) continue;
           message.attachments = describe(message.attachments);
-          if (clean) delete message.replyTo;
-          else if (message.replyTo)
+          if (message.replyTo)
             message.replyTo.attachments = describe(message.replyTo.attachments);
         }
-        await recorder.context(entries);
+        await recorder.context(entries, privateSince !== undefined);
         const workdir = await context.workdir(chat);
         await prepareWorkspace(workdir, !runtime.disabled('workspace.record'));
         work.workdir = workdir;
@@ -1233,14 +1275,14 @@ export class Tasks {
     const answers: string[] = [];
     const describeSupplement = (message: InboundMessage) => {
       collectStickers(message);
+      const replyTo = visibleReply(message);
       return {
         ...message,
+        ...(privateSince !== undefined && { raw: undefined }),
         attachments: message.attachments && describe(message.attachments),
-        replyTo: message.replyTo && {
-          ...message.replyTo,
-          attachments:
-            message.replyTo.attachments &&
-            describe(message.replyTo.attachments),
+        replyTo: replyTo && {
+          ...replyTo,
+          attachments: replyTo.attachments && describe(replyTo.attachments),
         },
       };
     };
@@ -1319,7 +1361,7 @@ export class Tasks {
         agent,
         media,
         session?.throughSeq,
-        !clean && sessionId === undefined,
+        sessionId === undefined,
         seenImages,
       );
       const endAgent = recorder.timing('agentMs');
@@ -1331,7 +1373,7 @@ export class Tasks {
             task,
             recorder,
             approvalPending,
-            ...(clean && { history: 'none' }),
+            privateConversation: privateSince !== undefined,
             waitForClose: () => work.stopExec !== undefined,
             scopeChatId:
               sessionId === session?.sessionId
@@ -1428,7 +1470,7 @@ export class Tasks {
   }
 
   async #images(
-    { abort, adapter, chat, id, input }: Work,
+    { abort, adapter, chat, id, input, privateSince }: Work,
     { imageLimits }: AgentConnector,
     blocks: readonly ContextBlock[],
     afterSeq: number | undefined,
@@ -1446,6 +1488,7 @@ export class Tasks {
       input.message.migratedFromChatId ?? '',
       afterSeq,
       includeReplies,
+      privateSince,
     );
     if (!attachments.length) return [];
     const { signal } = abort;
@@ -1708,7 +1751,7 @@ export class Tasks {
           },
           {
             signal,
-            sideQuestion: input.sessionCommand?.mode === 'btw',
+            sideQuestion: input.sessionCommand !== undefined,
             onDelivery: (ids, error) =>
               work.recorder?.delivery(adapter.id, ids, error),
             onReceipt: ({ messageId, parts, approvalEntities }) => {

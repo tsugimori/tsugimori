@@ -113,12 +113,14 @@ const messages = {
     stopUsage: 'Usage: /stop',
     stopIdle: 'No task is running in this chat.',
     stopped: (queued: number) => `Stopped the running task. ${queued} queued.`,
-    newBusy: 'This chat has pending work. Try /new when it finishes.',
-    newCleanSuccess:
-      'Started a clean conversation. Your next message will use a new session without recent history.',
+    newBusy: (command: string) =>
+      `This chat has pending work. Try /${command} when it finishes.`,
+    newPrivateSuccess:
+      'Started a private conversation. Earlier messages are hidden from the agent until /new.',
     newSuccess:
       'Started a new conversation. Your next message will use a new session.',
     btwUsage: 'Usage: /btw <message>',
+    askUsage: 'Usage: /ask <message>',
     btwFresh: 'Answering in a fresh session without conversation history.',
     noPreviews: 'No open previews.',
     preview: (id: string, url: string, port: number, expires: string) =>
@@ -315,11 +317,13 @@ const messages = {
     stopIdle: '此聊天室目前沒有執行中的任務。',
     stopped: (queued: number) =>
       `已停止目前的任務。還有 ${queued} 個任務在佇列中。`,
-    newBusy: '此聊天室還有任務未完成，請等任務結束後再使用 /new。',
-    newCleanSuccess:
-      '已開始新對話。下一則訊息將使用新的工作階段，略過近期對話紀錄。',
+    newBusy: (command: string) =>
+      `此聊天室還有任務未完成，請等任務結束後再使用 /${command}。`,
+    newPrivateSuccess:
+      '已開始私人對話。使用 /new 前，代理程式看不到先前的訊息。',
     newSuccess: '已開始新對話，下一則訊息會用新的 session。',
     btwUsage: '用法：/btw <訊息>',
+    askUsage: '用法：/ask <訊息>',
     btwFresh: '將在不含對話紀錄的新工作階段回答。',
     noPreviews: '目前沒有開啟的預覽。',
     preview: (id: string, url: string, port: number, expires: string) =>

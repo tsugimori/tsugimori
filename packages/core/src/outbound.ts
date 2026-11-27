@@ -140,8 +140,13 @@ export class Outbound {
     attrs: Parameters<Tracer['span']>[1],
     {
       completedTaskId,
+      sessionBoundary,
       sideQuestion,
-    }: { completedTaskId?: string; sideQuestion?: boolean } = {},
+    }: {
+      completedTaskId?: string;
+      sessionBoundary?: boolean;
+      sideQuestion?: boolean;
+    } = {},
   ) {
     const { store, trace } = this.#deps;
     trace.span('outbound.record', attrs, () => {
@@ -159,7 +164,9 @@ export class Outbound {
             threadId: address.threadId ?? null,
             text: part.text,
             raw: part.raw ?? null,
-            ...(sideQuestion && { metadata: { sideQuestion } }),
+            ...((sessionBoundary || sideQuestion) && {
+              metadata: { sessionBoundary, sideQuestion },
+            }),
           },
           index === parts.length - 1 ? completedTaskId : undefined,
         );
@@ -237,6 +244,7 @@ export class Outbound {
       onParts?(parts: readonly SendPart[], error?: unknown): void;
       onReceipt?(receipt: SendReceipt): void;
       scheduled?: boolean;
+      sessionBoundary?: boolean;
       sideQuestion?: boolean;
       signal?: AbortSignal;
       taskId?: string;
@@ -281,6 +289,7 @@ export class Outbound {
         options.onParts?.(sent, error);
         if (sent.length)
           this.#recordParts(adapter.id, message, sent, attrs, {
+            sessionBoundary: options.sessionBoundary,
             sideQuestion: options.sideQuestion,
           });
         throw error;
@@ -292,6 +301,7 @@ export class Outbound {
       options.onParts?.(parts);
       this.#recordParts(adapter.id, message, parts, attrs, {
         completedTaskId: taskId,
+        sessionBoundary: options.sessionBoundary,
         sideQuestion: options.sideQuestion,
       });
       options.onReceipt?.(receipt);

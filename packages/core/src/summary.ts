@@ -105,6 +105,19 @@ export class BackgroundSummaries implements SummaryProvider {
     await this.#drain;
   }
 
+  cancelChat(chat: ChatRef) {
+    const key = chatKey(chat);
+    clearTimeout(this.#delayed.get(key));
+    this.#delayed.delete(key);
+    this.#pending.delete(key);
+    const active = this.#active;
+    if (
+      active &&
+      chatKey(this.#deps.store.resolveChat(active.job.chat)) === key
+    )
+      active.abort.abort();
+  }
+
   async interrupt({ category, id }: RemovalTarget) {
     const matches = (job: SummaryJob) =>
       (category === 'agent' ? job.agentId : job.chat.adapterId) === id;
@@ -158,7 +171,8 @@ export class BackgroundSummaries implements SummaryProvider {
     clearTimeout(this.#delayed.get(key));
     this.#delayed.delete(key);
     const { recentMessages, summary } = runtime.config.context;
-    if (summary?.enabled === false) return;
+    if (summary?.enabled === false || store.getChat(chat)?.privateSince != null)
+      return;
     const selected = runtime.getAgent(job.agentId);
     if (!selected) return;
     const recent = store.recentMessages(chat, {

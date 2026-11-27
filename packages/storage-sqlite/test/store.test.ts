@@ -47,6 +47,7 @@ test('upgrades old chat rows and carries settings through group migration', asyn
   const store = new SqliteStore(path);
   try {
     assert.equal(store.getChat(chat)?.model, 'chosen');
+    assert.equal(store.getChat(chat)?.privateSince, null);
     assert.equal(store.getChat(chat)?.serviceTier, null);
     assert.equal(store.getChat(chat)?.thinking, null);
     store.setChatRoute(chat, { serviceTier: 'fast', thinking: 'xhigh' });
@@ -78,6 +79,46 @@ test('upgrades old chat rows and carries settings through group migration', asyn
   } finally {
     reopened.close();
   }
+});
+
+test('group migration retains the private boundary and clears the active session', (t) => {
+  const store = new SqliteStore(':memory:');
+  t.after(() => store.close());
+  const previous = { adapterId: 'a', chatId: 'old' };
+  const current = { ...previous, chatId: 'new' };
+  const user = { adapterId: 'a', userId: 'owner', display: null };
+  const add = (chat: typeof previous, messageId: string) =>
+    store.recordInbound({ ...chat, kind: 'group', title: null }, user, {
+      ...chat,
+      userId: user.userId,
+      messageId,
+      text: messageId,
+      direction: 'inbound',
+      raw: null,
+      replyTo: null,
+      threadId: null,
+    })!.seq;
+  const before = add(current, 'destination-before-private');
+  store.setSession({
+    ...current,
+    agentId: 'agent',
+    model: 'model',
+    seenAfter: [],
+    sessionId: 'unrestricted',
+    throughSeq: before,
+  });
+  const start = add(previous, 'private-start');
+  store.clearSession(previous, start);
+  const latest = add(previous, 'visible');
+  assert.equal(store.migrateChat(previous, current.chatId), true);
+  assert.equal(store.getChat(current)?.privateSince, start);
+  assert.equal(store.getSession(current, 'agent'), undefined);
+  assert.deepEqual(
+    store
+      .recentMessages(current, { throughSeq: latest, privateSince: start })
+      .map(({ text }) => text),
+    ['visible'],
+  );
 });
 
 test('applies generated migrations, enables WAL, and reopens existing data', async (t) => {

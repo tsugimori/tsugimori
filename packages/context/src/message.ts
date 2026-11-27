@@ -7,7 +7,7 @@ import type { MessageRecord, Store } from '@tsugimori/storage';
 
 import { attachmentMetadata } from '@tsugimori/plugin-sdk';
 
-type AlbumSource = Pick<Store, 'messageAlbum'>;
+type AlbumSource = Partial<Pick<Store, 'messageAlbum'>>;
 type Row = Pick<
   MessageRecord,
   | 'albumId'
@@ -96,6 +96,7 @@ export function messageContext(
 export function messageAlbumLookup(
   store: AlbumSource,
   chat: Pick<MessageRecord, 'adapterId' | 'chatId'>,
+  privateSince?: number,
 ) {
   const cache = new Map<string, ReturnType<typeof albumAttachments>>();
   return (albumId: string, migratedFromChatId: string) => {
@@ -103,10 +104,24 @@ export function messageAlbumLookup(
     let album = cache.get(key);
     if (!album) {
       album = albumAttachments(
-        store.messageAlbum(chat, albumId, migratedFromChatId),
+        store.messageAlbum?.(chat, albumId, migratedFromChatId) ?? [],
+      ).filter(
+        ({ message }) =>
+          privateSince === undefined || message.seq > privateSince,
       );
       cache.set(key, album);
     }
     return album;
   };
+}
+
+export function privateReplyVisible(
+  store: Partial<Pick<Store, 'getMessage'>>,
+  chat: Pick<MessageRecord, 'adapterId' | 'chatId'>,
+  id: string,
+  migratedFromChatId: string,
+  privateSince: number,
+) {
+  const target = store.getMessage?.(chat, id, migratedFromChatId, false);
+  return target !== undefined && !target.deleted && target.seq > privateSince;
 }
