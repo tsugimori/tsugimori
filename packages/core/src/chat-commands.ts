@@ -11,13 +11,17 @@ const descriptions = {
     'zh-TW': '允許成員在此使用機器人',
   },
   btw: {
-    en: 'Ask a one-off question (<message>)',
-    'zh-TW': '問一個臨時問題（<訊息>）',
+    en: 'Ask a side question about this conversation (<message>)',
+    'zh-TW': '詢問目前對話的延伸問題（<訊息>）',
   },
   cancel: { en: 'Cancel guided setup', 'zh-TW': '取消引導設定' },
   compact: {
     en: 'Compact this chat’s context',
     'zh-TW': '壓縮目前對話的上下文',
+  },
+  context: {
+    en: 'Show session context and token usage',
+    'zh-TW': '查看工作階段的上下文與 token 用量',
   },
   deny: {
     en: 'Remove this chat from the allowlist',
@@ -34,8 +38,8 @@ const descriptions = {
     'zh-TW': '查看或設定模型（default 還原）',
   },
   new: {
-    en: 'Start a new conversation ([message])',
-    'zh-TW': '開始新對話（[訊息]）',
+    en: 'Start a new conversation ([clean] [message])',
+    'zh-TW': '開始新對話（[clean] [訊息]）',
   },
   pair: {
     en: 'Get a new pairing code in DM (/pair new <adapterId>)',
@@ -51,6 +55,10 @@ const descriptions = {
   sticker: {
     en: 'List, block or unblock sticker sets',
     'zh-TW': '查看、封鎖或解除封鎖貼圖集',
+  },
+  stop: {
+    en: 'Stop the running task in this chat',
+    'zh-TW': '停止此聊天室正在執行的任務',
   },
   thinking: {
     en: 'Show or set reasoning effort (default to reset)',

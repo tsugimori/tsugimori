@@ -168,6 +168,83 @@ const messages = {
 const separator = ' · ';
 const maxStatusLength = 4_096;
 
+export function contextCard(
+  {
+    store,
+    trace,
+  }: {
+    store: Pick<Store, 'taskTrace'>;
+    trace: Pick<Tracer, 'latestSessionSpan' | 'sessionHistory'>;
+  },
+  scope: string | undefined,
+  locale: 'en' | 'zh-TW',
+) {
+  const zh = locale === 'zh-TW';
+  if (!scope)
+    return zh
+      ? '此聊天室目前沒有使用中的代理程式工作階段。'
+      : 'There is no active agent session in this chat.';
+  const usage = trace.latestSessionSpan(scope, 'usage')?.attrs;
+  const window = trace.latestSessionSpan(scope, 'contextWindow')?.attrs
+    .contextWindow;
+  const run = trace.latestSessionSpan(scope, 'run')?.attrs;
+  const taskRuns =
+    typeof run?.taskId === 'string'
+      ? store
+          .taskTrace(run.taskId)
+          .filter(
+            ({ name, attrs }) =>
+              name === 'agent.run' && attrs.sessionScope === scope,
+          )
+      : [];
+  const sumBlocks = (key: 'contextBlocks' | 'contextChars') => {
+    if (!taskRuns.length) return run?.[key];
+    let total = 0;
+    for (const { attrs } of taskRuns) {
+      const value = attrs[key];
+      if (typeof value !== 'number') return;
+      total += value;
+    }
+    return total;
+  };
+  const tasks = trace.sessionHistory(scope).tasks ?? 0;
+  const number = new Intl.NumberFormat(locale);
+  const count = (value: unknown) =>
+    typeof value === 'number' ? number.format(value) : messages[locale].unknown;
+  const taskMode = taskRuns.at(0)?.attrs.sessionMode ?? run?.sessionMode;
+  const mode =
+    taskMode === 'new'
+      ? zh
+        ? '新工作階段'
+        : 'new'
+      : taskMode === 'resume'
+        ? zh
+          ? '延續'
+          : 'resume'
+        : messages[locale].unknown;
+  const context = count(usage?.contextTokens);
+  const input = count(usage?.inputTokens);
+  const blocks = count(sumBlocks('contextBlocks'));
+  const blockChars = count(sumBlocks('contextChars'));
+  const tools = count(run?.toolDefinitions);
+  const toolChars = count(run?.toolDefinitionChars);
+  return (
+    zh
+      ? [
+          `工作階段：${mode} · ${number.format(tasks)} 個任務`,
+          `Token：上下文 ${context} · 輸入 ${input} · 模型上限 ${count(window)}`,
+          `上下文區塊：${blocks} 個 · ${blockChars} 字元`,
+          `工具定義：${tools} 個 · ${toolChars} 字元（說明與結構描述）`,
+        ]
+      : [
+          `Session: ${mode} · ${number.format(tasks)} ${tasks === 1 ? 'task' : 'tasks'}`,
+          `Tokens: ${context} context · ${input} input · ${count(window)} model window`,
+          `Context blocks: ${blocks} · ${blockChars} chars`,
+          `Tool definitions: ${tools} · ${toolChars} description and schema chars`,
+        ]
+  ).join('\n');
+}
+
 interface StatusDependencies {
   build?: { revision?: string; version: string };
   runtime: Pick<Runtime, 'attachments' | 'config' | 'environmentReports'>;

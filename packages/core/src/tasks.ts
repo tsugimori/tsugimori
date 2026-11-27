@@ -37,7 +37,7 @@ import { approvalCallbackId } from '@tsugimori/auth';
 import { messageContext } from '@tsugimori/context';
 import { pendingApprovalResult } from '@tsugimori/plugin-sdk';
 import { containsMention, scheduleReplyStyle } from '@tsugimori/scheduler';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { rm } from 'node:fs/promises';
 import { setTimeout as delay } from 'node:timers/promises';
 import { isDeepStrictEqual } from 'node:util';
@@ -80,6 +80,7 @@ interface TaskDependencies {
   runtime: Runtime;
   scope(workdir: string): ExecScope;
   stickers: StickerIndex;
+  stopExec(chat: ChatRef, taskId: string): Promise<void>;
   store: Store;
   summarize: BackgroundSummaries['enqueue'];
   toolDetails: ToolDetails;
@@ -109,7 +110,9 @@ type Work = {
   sessionScopeChatId?: string | null;
   sessionScopeModel?: string;
   sessionValid: boolean;
+  sideQuestionFallback?: boolean;
   stickerCandidates?: InboundAttachment[];
+  stopExec?: Promise<void>;
   supplements: Supplements;
   temporaryAttachments: Set<string>;
   workdir?: string;
@@ -142,6 +145,7 @@ function chatKey({ adapterId, chatId }: ChatRef) {
 export class Tasks {
   readonly #deps: TaskDependencies;
   readonly #queues = new Map<string, Promise<void>>();
+  readonly #cleanSessions = new Set<string>();
   readonly #running = new Map<string, Work>();
   readonly #work = new Set<Work>();
   readonly #approvals = new Map<
@@ -302,13 +306,16 @@ export class Tasks {
     );
   }
 
-  resetSession(chat: ChatRef) {
+  resetSession(chat: ChatRef, clean: boolean) {
     const { store, trace } = this.#deps;
     chat = store.resolveChat(chat);
-    if (this.#queues.has(chatKey(chat))) return false;
+    const key = chatKey(chat);
+    if (this.#queues.has(key)) return false;
     const agentId = store.getChat(chat)?.sessionAgentId;
     const session = agentId ? store.getSession(chat, agentId) : undefined;
     store.clearSession(chat);
+    if (clean) this.#cleanSessions.add(key);
+    else this.#cleanSessions.delete(key);
     trace.record('session.reset', {
       sessionScope: session
         ? sessionScope(
@@ -421,13 +428,50 @@ export class Tasks {
   }
 
   migrateChat(adapterId: string, chatId: string, newChatId: string) {
-    const previous = this.#queues.get(chatKey({ adapterId, chatId }));
-    if (!previous) return;
+    const oldKey = chatKey({ adapterId, chatId });
     const key = chatKey({ adapterId, chatId: newChatId });
+    if (this.#cleanSessions.delete(oldKey)) this.#cleanSessions.add(key);
+    const previous = this.#queues.get(oldKey);
+    if (!previous) return;
     const tail = Promise.all([previous, this.#queues.get(key)]).then(() => {
       if (this.#queues.get(key) === tail) this.#queues.delete(key);
     });
     this.#queues.set(key, tail);
+  }
+
+  stop(chat: ChatRef, userId: string) {
+    const { log, store, trace } = this.#deps;
+    const key = chatKey(store.resolveChat(chat));
+    const running =
+      this.#running.get(key) ??
+      [...this.#running.values()].find(
+        (work) => chatKey(store.resolveChat(work.chat)) === key,
+      );
+    if (!running || running.abort.signal.aborted) return;
+    const status = store.getTask(running.id)?.status;
+    if (status !== 'queued' && status !== 'running') return;
+    for (const [id, approval] of this.#approvals)
+      if (approval.work === running) store.cancelApproval(id, Date.now());
+    running.abort.abort();
+    store.updateTask(running.id, {
+      status: 'cancelled',
+      finishedAt: Date.now(),
+    });
+    running.stopExec = this.#deps.stopExec(running.chat, running.id).catch(() =>
+      log({
+        level: 'error',
+        event: 'task.exec_stop_failed',
+        taskId: running.id,
+      }),
+    );
+    trace.record('task.stopped', {
+      taskId: running.id,
+      userIdHash: createHash('sha256').update(userId).digest('hex'),
+    });
+    return [...this.#work].filter(
+      (work) =>
+        work !== running && chatKey(store.resolveChat(work.chat)) === key,
+    ).length;
   }
 
   cancelSource(chat: ChatRef, messageId: string, sourceChatId?: string) {
@@ -529,7 +573,7 @@ export class Tasks {
     const { store, auth, runtime, log, toolDetails, workspace } = this.#deps;
     const { adapter, input, abort, id } = work;
     const { message } = input;
-    const ephemeral = input.sessionCommand?.mode === 'ephemeral';
+    const ephemeral = input.sessionCommand?.mode === 'btw';
     const activity = new AbortController();
     const finish = (status: TaskRecord['status']) =>
       store.updateTask(id, { status, finishedAt: Date.now() });
@@ -539,7 +583,6 @@ export class Tasks {
       Math.max(0, work.progress.startedAt - work.createdAt),
     );
     work.recorder = recorder;
-    if (ephemeral) recorder.session({ mode: 'ephemeral' });
     let outcome: TaskOutcome = { kind: 'cancelled' };
     let ranAgent = false;
     let delivered = false;
@@ -652,7 +695,13 @@ export class Tasks {
       const silent = reason !== undefined;
       // The approval notice still matters after a sticker or other media.
       const fallback = work.pendingApprovalFallback;
-      const text = [silent ? '' : result.text, fallback]
+      const text = [
+        work.sideQuestionFallback
+          ? systemMessages(runtime.config.locale).btwFresh
+          : '',
+        silent ? '' : result.text,
+        fallback,
+      ]
         .filter(Boolean)
         .join('\n\n');
       if (silent) outcome.silentReason = reason;
@@ -689,6 +738,7 @@ export class Tasks {
         await this.#deps.trace.flush().catch(() => {
           log({ level: 'error', event: 'trace.flush_failed', taskId: id });
         });
+        abort.signal.throwIfAborted();
         finish('completed');
       }
 
@@ -712,7 +762,7 @@ export class Tasks {
           store.clearSession(chat);
         }
       }
-      if (!abort.signal.aborted)
+      if (!ephemeral && !abort.signal.aborted)
         this.#deps.summarize({
           agentId: selected.agent.id,
           chat,
@@ -739,8 +789,9 @@ export class Tasks {
                 ? 'other'
                 : stage,
       );
-      if (ranAgent && !ephemeral) store.clearSession(work.chat);
-      if (!delivered && !(error instanceof DeliveryError))
+      if (ranAgent && !ephemeral && !work.stopExec)
+        store.clearSession(work.chat);
+      if (!delivered && !work.stopExec && !(error instanceof DeliveryError))
         finish(abort.signal.aborted ? 'cancelled' : 'failed');
       if (!abort.signal.aborted || error instanceof DeliveryError) {
         this.#deps.trace.record(
@@ -764,6 +815,7 @@ export class Tasks {
       }
     } finally {
       activity.abort();
+      if (work.stopExec) await work.stopExec;
       this.#settleMedia(
         work,
         [],
@@ -828,6 +880,7 @@ export class Tasks {
       return await this.#deps.outbound.send(work.adapter, message, {
         taskId: work.id,
         scheduled: work.input.scheduled !== undefined,
+        sideQuestion: work.input.sessionCommand?.mode === 'btw',
         signal: work.abort.signal,
         media: work.mediaQueued?.map(({ handle }) => handle),
         onParts: (parts, error) => this.#settleMedia(work, parts, error),
@@ -867,6 +920,7 @@ export class Tasks {
               ? {
                   address: scheduled?.target ?? reply(message, ''),
                   source: message.messageId,
+                  sideQuestion: work.input.sessionCommand?.mode === 'btw',
                   onDelivery: (ids, error) => {
                     work.recorder?.delivery(adapter.id, ids, error);
                     work.mediaDelivered ||= ids.length > 0;
@@ -996,7 +1050,7 @@ export class Tasks {
     const { store, auth, context, runtime, trace, hooks, stickers } =
       this.#deps;
     const { chat, input, id, abort, supplements, adapter } = work;
-    const ephemeral = input.sessionCommand?.mode === 'ephemeral';
+    const ephemeral = input.sessionCommand?.mode === 'btw';
     const { signal } = abort;
     const approvalPending = work.endForApproval.signal;
     const { model } = settings;
@@ -1022,9 +1076,10 @@ export class Tasks {
     };
     const attrs = { ...chat, taskId: id };
     const definitions = this.#toolDefinitions(adapter, work);
-    const previousSession = ephemeral
-      ? undefined
-      : store.getSession(chat, store.getChat(chat)?.sessionAgentId ?? agent.id);
+    const previousSession = store.getSession(
+      chat,
+      store.getChat(chat)?.sessionAgentId ?? agent.id,
+    );
     const storedSession =
       !input.scheduled &&
       previousSession?.agentId === agent.id &&
@@ -1032,12 +1087,24 @@ export class Tasks {
         previousSession.model === model)
         ? previousSession
         : undefined;
-    const session =
+    const compatibleSession =
       storedSession &&
       agent.acceptsSession?.(storedSession.sessionId, definitions) !== false
         ? storedSession
         : undefined;
-    if (!ephemeral)
+    const forkSessionId =
+      ephemeral && agent.supportsSessionFork
+        ? compatibleSession?.sessionId
+        : undefined;
+    const session = ephemeral ? undefined : compatibleSession;
+    const clean =
+      !ephemeral &&
+      !input.scheduled &&
+      this.#cleanSessions.delete(chatKey(chat));
+    if (ephemeral) {
+      recorder.session({ mode: forkSessionId ? 'fork' : 'ephemeral' });
+      work.sideQuestionFallback = !forkSessionId;
+    } else
       recorder.session(
         session
           ? {
@@ -1081,7 +1148,8 @@ export class Tasks {
           ownerId: auth.owner(chat.adapterId),
           recentMessages: runtime.config.context.recentMessages,
           throughSeq: input.seq,
-          afterSeq: session?.throughSeq,
+          ...((ephemeral || clean) && { history: 'none' }),
+          afterSeq: (forkSessionId ? compatibleSession : session)?.throughSeq,
           skipSeq: session?.seenAfter,
         });
         if (definitions.some(({ name }) => name === 'schedule.create'))
@@ -1104,6 +1172,16 @@ export class Tasks {
                 'Return the scheduled response without textual mentions. The platform adds any approved recipients separately.',
             },
           });
+        if (ephemeral)
+          entries.unshift({
+            kind: 'new',
+            block: {
+              source: 'system',
+              trust: 'trusted',
+              content:
+                'Answer only this side question. Earlier conversation is reference only. Do not continue or change earlier tasks.',
+            },
+          });
         for (const entry of entries) {
           const { block } = entry;
           if (
@@ -1115,7 +1193,8 @@ export class Tasks {
           const { message } = block;
           if (!message) continue;
           message.attachments = describe(message.attachments);
-          if (message.replyTo)
+          if (clean) delete message.replyTo;
+          else if (message.replyTo)
             message.replyTo.attachments = describe(message.replyTo.attachments);
         }
         await recorder.context(entries);
@@ -1226,7 +1305,7 @@ export class Tasks {
         agent,
         media,
         session?.throughSeq,
-        sessionId === undefined,
+        !clean && sessionId === undefined,
         seenImages,
       );
       const endAgent = recorder.timing('agentMs');
@@ -1238,6 +1317,8 @@ export class Tasks {
             task,
             recorder,
             approvalPending,
+            ...(clean && { history: 'none' }),
+            waitForClose: () => work.stopExec !== undefined,
             scopeChatId:
               sessionId === session?.sessionId
                 ? session?.scopeChatId
@@ -1265,6 +1346,7 @@ export class Tasks {
             sandbox: this.#deps.scope(assembled.workdir),
             context: blocks,
             ...(ephemeral && { ephemeral }),
+            ...(forkSessionId && { forkSessionId }),
             ...(images.length && { images }),
             resumeSessionId: sessionId,
             signal: passSignal,
@@ -1612,6 +1694,7 @@ export class Tasks {
           },
           {
             signal,
+            sideQuestion: input.sessionCommand?.mode === 'btw',
             onDelivery: (ids, error) =>
               work.recorder?.delivery(adapter.id, ids, error),
             onReceipt: ({ messageId, parts, approvalEntities }) => {

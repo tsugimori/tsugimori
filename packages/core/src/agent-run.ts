@@ -25,6 +25,7 @@ import { describeStickerError, describeTaskError } from './errors.ts';
 
 interface AgentRunDependencies {
   approvalPending?: AbortSignal;
+  history?: 'none';
   log: Logger;
   onSession?(sessionId: string): void;
   recorder?: TaskRecorder;
@@ -33,6 +34,7 @@ interface AgentRunDependencies {
   task: ToolContext;
   toolDetails?: ToolDetails;
   trace: Tracer;
+  waitForClose?(): boolean;
 }
 
 export function sessionScope(
@@ -58,6 +60,7 @@ function isPendingApproval(result: unknown) {
 export async function runAgent(
   {
     approvalPending,
+    history,
     trace,
     log,
     onSession,
@@ -66,6 +69,7 @@ export async function runAgent(
     scopeChatId,
     scopeModel,
     toolDetails,
+    waitForClose,
   }: AgentRunDependencies,
   agent: AgentConnector,
   request: AgentRequest,
@@ -89,9 +93,11 @@ export async function runAgent(
         : request.model,
       id,
     );
-  let activeScope = request.resumeSessionId
-    ? scope(request.resumeSessionId)
-    : null;
+  const ephemeral = request.ephemeral || request.forkSessionId !== undefined;
+  let activeScope =
+    !ephemeral && request.resumeSessionId
+      ? scope(request.resumeSessionId)
+      : null;
   const reportCompaction = (event: AgentCompactionEvent) => {
     trace.record(
       'agent.compaction',
@@ -116,11 +122,25 @@ export async function runAgent(
   };
   const runAttrs: TraceSpan['attrs'] = {
     ...attrs,
-    sessionMode: request.ephemeral
-      ? 'ephemeral'
-      : request.resumeSessionId
-        ? 'resume'
-        : 'new',
+    sessionMode: request.forkSessionId
+      ? 'fork'
+      : ephemeral
+        ? 'ephemeral'
+        : request.resumeSessionId
+          ? 'resume'
+          : 'new',
+    ...(history && { history }),
+    contextBlocks: request.context.length,
+    contextChars: request.context.reduce(
+      (chars, { content }) => chars + content.length,
+      0,
+    ),
+    toolDefinitions: request.tools.length,
+    toolDefinitionChars: request.tools.reduce(
+      (chars, { description, schema }) =>
+        chars + description.length + JSON.stringify(schema).length,
+      0,
+    ),
   };
   return trace.span('agent.run', runAttrs, async () => {
     const tools = new Map<
@@ -269,7 +289,7 @@ export async function runAgent(
             break;
           case 'sessionId': {
             sessionId = event.sessionId;
-            const nextScope = request.ephemeral ? null : scope(sessionId);
+            const nextScope = ephemeral ? null : scope(sessionId);
             if (!request.purpose && nextScope !== activeScope)
               trace.record('agent.session.created', {
                 ...attrs,
@@ -325,7 +345,9 @@ export async function runAgent(
               ...attrs,
               sessionScope:
                 request.purpose ||
-                (contextTokens === null && contextWindow === undefined)
+                (contextTokens === null &&
+                  event.inputTokens === undefined &&
+                  contextWindow === undefined)
                   ? null
                   : activeScope,
               ...usage,
@@ -353,7 +375,11 @@ export async function runAgent(
         else if (outcome === 'error') {
           const redactSecrets = toolDetails?.redactor();
           const redact = (text: string) => {
-            for (const id of [sessionId, request.resumeSessionId])
+            for (const id of [
+              sessionId,
+              request.resumeSessionId,
+              request.forkSessionId,
+            ])
               if (id) text = text.replaceAll(id, '[redacted session]');
             return redactSecrets?.(text) ?? text;
           };
@@ -385,7 +411,7 @@ export async function runAgent(
             : outcome,
       });
       if (!complete && iterator) {
-        void Promise.resolve()
+        const closed = Promise.resolve()
           .then(() => iterator?.return?.())
           .catch(() => {
             log({
@@ -394,6 +420,16 @@ export async function runAgent(
               taskId,
             });
           });
+        if (waitForClose?.()) {
+          await untilAborted(AbortSignal.timeout(5_000), () => closed).catch(
+            () =>
+              log({
+                level: 'warn',
+                event: 'agent.iterator_close_timeout',
+                taskId,
+              }),
+          );
+        }
       }
     }
     return { text: final ?? deltas };

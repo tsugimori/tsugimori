@@ -2077,21 +2077,21 @@ export class SqliteStore implements Store {
   }
 
   latestSessionSpan(scope: string, metric: SessionMetric) {
+    const { name, status, attrs } = traceSpans;
+    const matches = {
+      compaction: and(eq(name, 'agent.compaction'), eq(status, 'ok')),
+      context: and(
+        ne(name, 'agent.run'),
+        sql`json_extract(${attrs}, '$.contextTokens') is not null`,
+      ),
+      contextWindow: sql`json_extract(${attrs}, '$.contextWindow') is not null`,
+      run: eq(name, 'agent.run'),
+      usage: eq(name, 'agent.usage'),
+    };
     return this.#db
       .select()
       .from(traceSpans)
-      .where(
-        and(
-          ne(traceSpans.name, 'agent.run'),
-          eq(sessionScope(traceSpans.attrs), scope),
-          metric === 'compaction'
-            ? and(
-                eq(traceSpans.name, 'agent.compaction'),
-                eq(traceSpans.status, 'ok'),
-              )
-            : sql`json_extract(${traceSpans.attrs}, ${metric === 'contextWindow' ? '$.contextWindow' : '$.contextTokens'}) is not null`,
-        ),
-      )
+      .where(and(eq(sessionScope(attrs), scope), matches[metric]))
       .orderBy(desc(traceSpans.id))
       .get();
   }
@@ -2105,6 +2105,7 @@ export class SqliteStore implements Store {
           number | null
         >`min(${startedAt}) filter (where ${name} = 'agent.session.created')`,
         firstActivityAt: min(startedAt),
+        tasks: sql<number>`count(distinct json_extract(${attrs}, '$.taskId')) filter (where ${name} = 'agent.run')`,
       })
       .from(traceSpans)
       .where(eq(sessionScope(attrs), scope))
@@ -2113,6 +2114,7 @@ export class SqliteStore implements Store {
       compactions: row.compactions,
       createdAt: row.createdAt ?? undefined,
       firstActivityAt: row.firstActivityAt ?? undefined,
+      tasks: row.tasks,
     };
   }
 
@@ -2789,6 +2791,7 @@ export class SqliteStore implements Store {
         and(
           chatScope(messages, ref),
           eq(messages.deleted, false),
+          sql`json_extract(${messages.metadata}, '$.sideQuestion') is not 1`,
           gt(messages.seq, afterSeq),
           lte(messages.seq, throughSeq),
         ),
@@ -2811,6 +2814,10 @@ export class SqliteStore implements Store {
       chatScope(messages, ref),
       eq(messages.deleted, false),
       lte(messages.seq, options.throughSeq),
+      or(
+        eq(messages.seq, options.throughSeq),
+        sql`json_extract(${messages.metadata}, '$.sideQuestion') is not 1`,
+      ),
       resumed ? gt(messages.seq, afterSeq) : undefined,
       options.afterSummarySeq === undefined
         ? undefined
@@ -2905,6 +2912,7 @@ export class SqliteStore implements Store {
         and(
           chatScope(messages, this.resolveChat(ref)),
           eq(messages.deleted, false),
+          sql`json_extract(${messages.metadata}, '$.sideQuestion') is not 1`,
           filter,
         ),
       )

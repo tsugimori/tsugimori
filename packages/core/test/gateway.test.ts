@@ -21,6 +21,7 @@ import { SqliteStore } from '@tsugimori/storage-sqlite';
 import { Tracer } from '@tsugimori/trace';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import {
   mkdir,
   mkdtemp,
@@ -150,6 +151,7 @@ async function fixture(
     previews?: { named?: TunnelProvider; quick: TunnelProvider };
     reactions?: true | PlatformAdapter['setApprovalReaction'];
     stickers?: Config['stickers'];
+    supportsSessionFork?: boolean;
     thinkingLevels?: AgentConnector['thinkingLevels'];
     web?: Config['web'];
   } = {},
@@ -185,6 +187,7 @@ async function fixture(
           describeQuota: options.describeQuota,
           describeSession: options.describeSession,
           run,
+          supportsSessionFork: options.supportsSessionFork,
           settings: options.agentSettings?.(id),
           thinkingLevels: options.thinkingLevels,
           start() {
@@ -539,7 +542,7 @@ test('/new clears the active session and rebuilds context with or without a prom
   );
 });
 
-test('/btw uses one-off tasks and preserves the active session after success or failure', async (t) => {
+test('/btw uses a fresh session without a parent or fork support', async (t) => {
   const requests: AgentRequest[] = [];
   const { gateway, platform, store, trace } = await fixture(
     t,
@@ -554,23 +557,34 @@ test('/btw uses one-off tasks and preserves the active session after success or 
       yield { type: 'text.final', text: 'reply' };
     },
   );
+  await platform.emit(inbound('no-session', '/btw First question'));
+  await gateway.idle();
+  assert.equal(requests[0]?.ephemeral, true);
+  assert.equal(requests[0]?.forkSessionId, undefined);
+  assert.equal(store.getSession(chat, 'test'), undefined);
+  assert.match(platform.sent.at(-1)?.text ?? '', /fresh session/);
+
   await platform.emit(inbound('original', 'Earlier context'));
   await gateway.idle();
   const original = store.getSession(chat, 'test', 'first');
   assert.equal(original?.sessionId, 'ongoing');
   await platform.emit(inbound('btw', '/btw Side question'));
   await gateway.idle();
-  assert.equal(requests[1]?.resumeSessionId, undefined);
-  assert.equal(requests[1]?.ephemeral, true);
-  assert.ok(
-    requests[1]?.context.some(({ content }) => content === 'Earlier context'),
-  );
-  assert.equal(requests[1]?.context.at(-1)?.content, 'Side question');
+  assert.equal(requests[2]?.resumeSessionId, undefined);
+  assert.equal(requests[2]?.forkSessionId, undefined);
+  assert.equal(requests[2]?.ephemeral, true);
   assert.deepEqual(
+    requests[2]?.context
+      .filter(({ source }) => source === 'message')
+      .map(({ content }) => content),
+    ['Side question'],
+  );
+  assert.deepEqual(
+    requests[2]?.tools.map(({ name }) => name),
     requests[1]?.tools.map(({ name }) => name),
-    requests[0]?.tools.map(({ name }) => name),
   );
   assert.equal(platform.sent.at(-1)?.replyTo, 'btw');
+  assert.match(platform.sent.at(-1)?.text ?? '', /fresh session/);
   assert.deepEqual(store.getSession(chat, 'test'), original);
   const task = store
     .listChatTasks(chat)
@@ -591,13 +605,318 @@ test('/btw uses one-off tasks and preserves the active session after success or 
 
   await platform.emit(inbound('resume', 'Resume the conversation'));
   await gateway.idle();
-  assert.equal(requests[3]?.resumeSessionId, 'ongoing');
+  assert.equal(requests[4]?.resumeSessionId, 'ongoing');
   assert.deepEqual(
     trace.recent
       .filter(({ name }) => name === 'agent.run')
       .map(({ attrs }) => attrs.sessionMode),
-    ['new', 'ephemeral', 'ephemeral', 'resume'],
+    ['ephemeral', 'new', 'ephemeral', 'ephemeral', 'resume'],
   );
+});
+
+test('/btw forks the current session and keeps both messages out of agent history', async (t) => {
+  const requests: AgentRequest[] = [];
+  const { gateway, platform, store, trace } = await fixture(
+    t,
+    async function* (request) {
+      requests.push(request);
+      yield {
+        type: 'sessionId',
+        sessionId: request.forkSessionId ? 'child' : 'parent',
+      };
+      yield {
+        type: 'text.final',
+        text: request.forkSessionId ? 'Side answer' : 'Main answer',
+      };
+    },
+    true,
+    { supportsSessionFork: true },
+  );
+  await platform.emit(inbound('first', 'Parent conversation'));
+  await gateway.idle();
+  const parent = store.getSession(chat, 'test');
+  assert.equal(parent?.sessionId, 'parent');
+  await platform.emit(inbound('side', '/btw Side question'));
+  await gateway.idle();
+  assert.equal(requests[1]?.forkSessionId, 'parent');
+  assert.equal(requests[1]?.resumeSessionId, undefined);
+  assert.match(
+    requests[1]?.context[0]?.content ?? '',
+    /Earlier conversation is reference only/,
+  );
+  assert.deepEqual(store.getSession(chat, 'test'), parent);
+  assert.equal(platform.sent.at(-1)?.text, 'Side answer');
+  const sideReply = platform.sent.at(-1)!.messageId;
+  assert.equal(store.getMessage(chat, sideReply)?.metadata?.sideQuestion, true);
+  const sideTask = store
+    .listChatTasks(chat)
+    .find(({ sourceMessageId }) => sourceMessageId === 'side')!;
+  assert.deepEqual((await gateway.admin.task(sideTask.id))?.refs?.session, {
+    mode: 'fork',
+  });
+
+  await platform.emit(
+    inbound('next', 'Continue the original', {
+      replyTo: { id: sideReply, text: 'Side answer', quote: 'Side answer' },
+    }),
+  );
+  await gateway.idle();
+  assert.equal(requests[2]?.resumeSessionId, 'parent');
+  assert.deepEqual(
+    requests[2]?.context
+      .filter(({ source }) => source === 'message')
+      .map(({ content }) => content),
+    ['Continue the original'],
+  );
+  assert.doesNotMatch(JSON.stringify(requests[2]?.context), /Side answer/);
+  assert.deepEqual(
+    store.historyMessages(chat, { query: 'Side', limit: 10 }),
+    [],
+  );
+  assert.ok(
+    store
+      .summaryMessages(chat, 0, Number.MAX_SAFE_INTEGER, 20)
+      .every(({ metadata }) => !metadata?.sideQuestion),
+  );
+  assert.deepEqual(
+    trace.recent
+      .filter(({ name }) => name === 'agent.run')
+      .map(({ attrs }) => attrs.sessionMode),
+    ['new', 'fork', 'resume'],
+  );
+});
+
+test('/new clean skips stored history and summaries for the first task', async (t) => {
+  const requests: AgentRequest[] = [];
+  const { gateway, platform, store, trace } = await fixture(
+    t,
+    async function* (request) {
+      requests.push(request);
+      yield {
+        type: 'sessionId',
+        sessionId: request.resumeSessionId ?? `session-${requests.length}`,
+      };
+      yield { type: 'text.final', text: 'Ready' };
+    },
+  );
+  await platform.emit(inbound('previous', 'Old conversation'));
+  await gateway.idle();
+  assert.ok(
+    store.saveSummary({
+      ...store.beginSummary(chat),
+      throughSeq: store.getMessage(chat, 'previous')!.seq,
+      text: 'Old summary',
+    }),
+  );
+
+  await platform.emit(inbound('clean', '/new clean First clean message'));
+  await gateway.idle();
+  await platform.emit(inbound('reset-clean', '/new clean'));
+  assert.match(platform.sent.at(-1)?.text ?? '', /without recent history/);
+  await platform.emit(inbound('clean-followup', 'Second clean message'));
+  await gateway.idle();
+
+  for (const [index, prompt] of [
+    'First clean message',
+    'Second clean message',
+  ].entries()) {
+    const request = requests[index + 1]!;
+    assert.equal(request.resumeSessionId, undefined);
+    assert.equal(
+      request.context.some(({ source }) => source === 'summary'),
+      false,
+    );
+    assert.deepEqual(
+      request.context
+        .filter(({ source }) => source === 'message')
+        .map(({ content }) => content),
+      [prompt],
+    );
+  }
+  await platform.emit(inbound('next', 'Continue'));
+  await gateway.idle();
+  assert.equal(requests[3]?.resumeSessionId, 'session-3');
+  assert.deepEqual(
+    trace.recent
+      .filter(({ name }) => name === 'agent.run')
+      .map(({ attrs }) => [attrs.sessionMode, attrs.history]),
+    [
+      ['new', undefined],
+      ['new', 'none'],
+      ['new', 'none'],
+      ['resume', undefined],
+    ],
+  );
+});
+
+test(
+  '/stop cancels the active agent and its exec work and lets queued tasks run',
+  { timeout: 5_000 },
+  async (t) => {
+    const started = Promise.withResolvers<void>();
+    const toolEnded = Promise.withResolvers<void>();
+    const stopped: string[] = [];
+    let agentSignal: AbortSignal | undefined;
+    const f = await fixture(
+      t,
+      async function* (request) {
+        const prompt = request.context.at(-1)?.content;
+        yield { type: 'sessionId', sessionId: 'main-session' };
+        if (prompt === 'Block here') {
+          agentSignal = request.signal;
+          yield { type: 'text.delta', text: 'unfinished draft' };
+          await request.tools
+            .find(({ name }) => name === 'exec.run')!
+            .run({ cmd: ['wait'] });
+          assert.fail('The run should be aborted');
+        }
+        yield {
+          type: 'text.final',
+          text: prompt === 'Queue here' ? 'Queued complete' : 'Main answer',
+        };
+      },
+      true,
+      {
+        plugins: [
+          {
+            name: 'fake-exec',
+            execBackends: [
+              {
+                id: 'local-sandbox',
+                async start() {
+                  return {
+                    async exposePort() {
+                      throw new Error('Unexpected exposePort');
+                    },
+                    async readFile() {
+                      throw new Error('Unexpected readFile');
+                    },
+                    async run(_cmd, { signal, taskId }) {
+                      assert.ok(signal && taskId);
+                      started.resolve();
+                      try {
+                        await delay(60_000, undefined, { signal });
+                        throw new Error('Expected cancellation');
+                      } finally {
+                        toolEnded.resolve();
+                      }
+                    },
+                    async stop() {},
+                    async stopTask(taskId) {
+                      stopped.push(taskId);
+                      await toolEnded.promise;
+                    },
+                    async writeFile() {
+                      throw new Error('Unexpected writeFile');
+                    },
+                  };
+                },
+              },
+            ],
+          },
+        ],
+      },
+    );
+    const { gateway, platform, store, trace } = f;
+    await platform.emit(
+      inbound('first', 'Establish session', {
+        chatKind: 'group',
+        mentionsBot: true,
+      }),
+    );
+    await gateway.idle();
+    await platform.emit(inbound('allow', '/allow', { chatKind: 'group' }));
+    await platform.emit(
+      inbound('block', 'Block here', { chatKind: 'group', mentionsBot: true }),
+    );
+    await started.promise;
+    await platform.emit(
+      inbound('queued', 'Queue here', { chatKind: 'group', mentionsBot: true }),
+    );
+    await platform.emit(
+      inbound('denied', '/stop', {
+        chatKind: 'group',
+        userId: 'member',
+        mentionsBot: true,
+      }),
+    );
+    assert.equal(agentSignal?.aborted, false);
+    await platform.emit(inbound('stop', '/stop', { chatKind: 'group' }));
+    await gateway.idle();
+    assert.equal(agentSignal?.aborted, true);
+    const task = store
+      .listChatTasks(chat)
+      .find(({ sourceMessageId }) => sourceMessageId === 'block')!;
+    assert.equal(task.status, 'cancelled');
+    assert.deepEqual(stopped, [task.id]);
+    assert.equal(
+      (await gateway.admin.task(task.id))?.outcome?.kind,
+      'cancelled',
+    );
+    assert.equal(
+      platform.sent.some(({ replyTo }) => replyTo === 'block'),
+      false,
+    );
+    assert.equal(
+      platform.sent.find(({ replyTo }) => replyTo === 'stop')?.text,
+      'Stopped the running task. 1 queued.',
+    );
+    assert.equal(
+      platform.sent.find(({ replyTo }) => replyTo === 'queued')?.text,
+      'Queued complete',
+    );
+    assert.deepEqual(
+      trace.recent.find(({ name }) => name === 'task.stopped')?.attrs,
+      {
+        taskId: task.id,
+        userIdHash: createHash('sha256').update('owner').digest('hex'),
+      },
+    );
+    await platform.emit(inbound('idle', '/stop'));
+    assert.equal(
+      platform.sent.at(-1)?.text,
+      'No task is running in this chat.',
+    );
+  },
+);
+
+test('/context shows usage and sizes for the current session in plain text', async (t) => {
+  const requests: AgentRequest[] = [];
+  const { gateway, platform } = await fixture(t, async function* (request) {
+    requests.push(request);
+    yield { type: 'sessionId', sessionId: 'private-session' };
+    yield {
+      type: 'usage',
+      contextTokens: requests.length * 600,
+      inputTokens: requests.length * 550,
+      contextWindow: 100_000,
+    };
+    yield { type: 'text.final', text: 'Reply' };
+  });
+  await platform.emit(inbound('empty', '/context'));
+  assert.equal(
+    platform.sent.at(-1)?.text,
+    'There is no active agent session in this chat.',
+  );
+  await platform.emit(inbound('first', 'private first prompt'));
+  await gateway.idle();
+  await platform.emit(inbound('second', 'private second prompt'));
+  await gateway.idle();
+  await platform.emit(inbound('context', '/context'));
+  const { context, tools } = requests[1]!;
+  const format = new Intl.NumberFormat('en');
+  assert.deepEqual(platform.sent.at(-1)?.text?.split('\n'), [
+    'Session: resume · 2 tasks',
+    'Tokens: 1,200 context · 1,100 input · 100,000 model window',
+    `Context blocks: ${context.length} · ${context.reduce((sum, block) => sum + block.content.length, 0)} chars`,
+    `Tool definitions: ${tools.length} · ${format.format(tools.reduce((sum, tool) => sum + tool.description.length + JSON.stringify(tool.schema).length, 0))} description and schema chars`,
+  ]);
+  assert.equal(platform.sent.at(-1)?.format, undefined);
+  assert.equal(requests.length, 2);
+  await platform.emit(inbound('help', '/help'));
+  assert.match(platform.sent.at(-1)?.text ?? '', /^\/context · /m);
+  assert.match(platform.sent.at(-1)?.text ?? '', /^\/stop · /m);
+  assert.match(platform.sent.at(-1)?.text ?? '', /^\/new · .*\[clean\]/m);
 });
 
 test(
@@ -4510,7 +4829,9 @@ test(
 );
 
 test('agent run spans summarize the last usage, native and framework tools, and returned text', async (t) => {
+  let observed: AgentRequest | undefined;
   const f = await fixture(t, async function* (request) {
+    observed = request;
     yield { type: 'sessionId', sessionId: 'private-session' };
     yield { type: 'model', model: 'resolved-model', reasoning: 'high' };
     yield { type: 'usage', inputTokens: 9, outputTokens: 3 };
@@ -4569,12 +4890,24 @@ test('agent run spans summarize the last usage, native and framework tools, and 
   const run = spans.find(({ name }) => name === 'agent.run');
   const scope = sessionScope(chat, 'test', 'default', 'private-session');
   assert.equal(run?.status, 'ok');
+  assert.ok(observed);
   assert.deepEqual(run?.attrs, {
     ...attrs,
     resolvedModel: 'resolved-model',
     reasoning: 'high',
     sessionScope: scope,
     sessionMode: 'new',
+    contextBlocks: observed.context.length,
+    contextChars: observed.context.reduce(
+      (sum, block) => sum + block.content.length,
+      0,
+    ),
+    toolDefinitions: observed.tools.length,
+    toolDefinitionChars: observed.tools.reduce(
+      (sum, tool) =>
+        sum + tool.description.length + JSON.stringify(tool.schema).length,
+      0,
+    ),
     toolCalls: 3,
     toolErrors: 1,
     inputTokens: 42,

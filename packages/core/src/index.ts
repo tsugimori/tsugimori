@@ -80,7 +80,7 @@ import { removalMessages } from './removal-messages.ts';
 import { defaultAgent, Removal } from './removal.ts';
 import { Runtime } from './runtime.ts';
 import { GuidedSetup } from './setup.ts';
-import { statusCard } from './status.ts';
+import { contextCard, statusCard } from './status.ts';
 import { StickerIndex } from './stickers.ts';
 import { BackgroundSummaries } from './summary.ts';
 import { systemMessages } from './system-messages.ts';
@@ -453,6 +453,7 @@ export class Gateway {
       outbound: this.#outbound,
       runtime: this.#runtime,
       stickers: this.#stickers,
+      stopExec: (chat, taskId) => this.#execution.stopTask(chat, taskId),
       log,
       tools: [
         ...registry.plugins.flatMap((plugin) => [...(plugin.tools ?? [])]),
@@ -1069,6 +1070,7 @@ export class Gateway {
     }
     const privateCommand = command && hasPrivateArguments(command.name);
     const redactedText = redactPairingCodes(event.text);
+    const sideQuestion = command?.name === 'btw';
     const privateRaw = privateCommand || redactedText !== event.text;
     const replyId = event.replyTo?.id;
     const { replyTo, sensitiveReply } = resolveReplyTarget(
@@ -1099,6 +1101,7 @@ export class Gateway {
             replyTo,
             sender: event.sender,
             userDisplay: event.userDisplay,
+            ...(sideQuestion && { sideQuestion }),
           },
           threadId: event.threadId ?? null,
           text:
@@ -2289,18 +2292,52 @@ export class Gateway {
             onTask,
           );
         break;
-      case 'new':
-      case 'btw':
+      case 'stop':
+      case 'context':
         if (
           this.#removingPlatform(adapter.id) ||
           this.#removingAgentRoute(chat)
         )
           break;
-        if (name === 'new' && !this.#tasks.resetSession(chat)) {
+        if (name === 'stop') {
+          if (args) await send(m.stopUsage);
+          else {
+            const queued = this.#tasks.stop(chat, message.userId);
+            await send(queued === undefined ? m.stopIdle : m.stopped(queued));
+          }
+        } else if (args) await send(m.contextUsage);
+        else {
+          await this.#trace.flush();
+          await send(
+            contextCard(
+              { store, trace: this.#trace },
+              this.#tasks.status(chat).sessionScope,
+              locale,
+            ),
+          );
+        }
+        break;
+      case 'new':
+      case 'btw': {
+        if (
+          this.#removingPlatform(adapter.id) ||
+          this.#removingAgentRoute(chat)
+        )
+          break;
+        const clean = name === 'new' && /^clean(?:\s|$)/i.test(args);
+        const prompt = clean ? args.slice('clean'.length).trimStart() : args;
+        if (name === 'new' && !this.#tasks.resetSession(chat, clean)) {
           await send(m.newBusy);
           break;
         }
-        if (!args) await send(name === 'new' ? m.newSuccess : m.btwUsage);
+        if (!prompt)
+          await send(
+            name === 'btw'
+              ? m.btwUsage
+              : clean
+                ? m.newCleanSuccess
+                : m.newSuccess,
+          );
         else
           this.#tasks.dispatch(
             adapter,
@@ -2309,13 +2346,14 @@ export class Gateway {
               message,
               seq,
               sessionCommand: {
-                mode: name === 'new' ? 'new' : 'ephemeral',
-                prompt: redactPairingCodes(args),
+                mode: name,
+                prompt: redactPairingCodes(prompt),
               },
             },
             onTask,
           );
         break;
+      }
       case 'previews': {
         const open = this.#previews?.list(chat.adapterId) ?? [];
         await send(

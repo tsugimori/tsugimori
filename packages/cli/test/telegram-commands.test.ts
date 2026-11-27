@@ -217,6 +217,7 @@ test(
         'btw',
         'cancel',
         'compact',
+        'context',
         'deny',
         'fast',
         'help',
@@ -229,6 +230,7 @@ test(
         'remove',
         'status',
         'sticker',
+        'stop',
         'thinking',
         'webhook',
       ],
@@ -317,15 +319,23 @@ test(
     );
     assert.equal(
       zh.find(({ command }) => command === 'btw')?.description,
-      '問一個臨時問題（<訊息>）',
+      '詢問目前對話的延伸問題（<訊息>）',
     );
     assert.equal(
       zh.find(({ command }) => command === 'new')?.description,
-      '開始新對話（[訊息]）',
+      '開始新對話（[clean] [訊息]）',
     );
     assert.equal(
       zh.find(({ command }) => command === 'status')?.description,
       '查看狀態',
+    );
+    assert.equal(
+      zh.find(({ command }) => command === 'context')?.description,
+      '查看工作階段的上下文與 token 用量',
+    );
+    assert.equal(
+      zh.find(({ command }) => command === 'stop')?.description,
+      '停止此聊天室正在執行的任務',
     );
     assert.deepEqual(localized, [
       set(dmScope, zh),

@@ -460,6 +460,8 @@ export interface ExecScope {
 export interface RunOptions {
   backgroundPort?: number;
   signal?: AbortSignal;
+  /** Identifies the task that started the process. */
+  taskId?: string;
   timeoutMs?: number;
 }
 
@@ -477,10 +479,19 @@ export interface LocalEndpoint {
 
 export interface ExecSession {
   exposePort(port: number): Promise<LocalEndpoint>;
-  readFile(path: string): Promise<Uint8Array>;
+  readFile(
+    path: string,
+    opts?: Pick<RunOptions, 'signal' | 'taskId'>,
+  ): Promise<Uint8Array>;
   run(cmd: string[], opts: RunOptions): Promise<RunResult>;
   stop(): Promise<void>;
-  writeFile(path: string, data: Uint8Array): Promise<void>;
+  /** Stop this task's background processes and wait for its aborted commands. */
+  stopTask?(taskId: string): Promise<void>;
+  writeFile(
+    path: string,
+    data: Uint8Array,
+    opts?: Pick<RunOptions, 'signal' | 'taskId'>,
+  ): Promise<void>;
 }
 
 export interface ExecBackend {
@@ -506,6 +517,8 @@ export interface AgentRequest {
   /** Run without retaining a session for later use. */
   ephemeral?: boolean;
   exec?: ExecBackend;
+  /** Start an ephemeral child of this session, leaving the parent intact. */
+  forkSessionId?: string;
   images?: readonly AgentImage[];
   model: string;
   purpose?: 'summary' | 'sticker-index';
@@ -663,6 +676,7 @@ export interface AgentConnector {
   settings?: AgentSettings;
   start?(): Promise<void>;
   stop?(): Promise<void>;
+  supportsSessionFork?: boolean;
   /** Supported efforts in ascending order, or undefined when the catalog has no data. */
   thinkingLevels?(model?: string): Promise<readonly string[] | undefined>;
 }

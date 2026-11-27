@@ -562,11 +562,12 @@ useHead({
               ><dt>{{ t('Session', '工作階段') }}</dt>
               <dd>
                 {{
-                  data.refs.session.mode === 'new'
-                    ? m.sessionNew
-                    : data.refs.session.mode === 'ephemeral'
-                      ? m.sessionEphemeral
-                      : m.sessionResumed
+                  {
+                    new: m.sessionNew,
+                    ephemeral: m.sessionEphemeral,
+                    fork: m.sessionFork,
+                    resumed: m.sessionResumed,
+                  }[data.refs.session.mode]
                 }}<small v-if="data.refs.session.sessionId"
                   ><code>{{ data.refs.session.sessionId }}</code></small
                 ><small v-if="data.refs.session.previousSessionId"

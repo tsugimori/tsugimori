@@ -33,6 +33,7 @@ export function resolveReplyTarget(
     : undefined;
   if (
     quoted?.deleted ||
+    quoted?.metadata?.sideQuestion ||
     store.isSetupSecret(chat, reply.id) ||
     (reply.text !== undefined &&
       redactPairingCodes(reply.text) !== reply.text) ||

@@ -39,14 +39,23 @@ export class Tracer {
   }
 
   latestSessionSpan(scope: string, metric: SessionMetric) {
-    const matches = (span: TraceSpan) =>
-      span.name !== 'agent.run' &&
-      span.attrs.sessionScope === scope &&
-      (metric === 'compaction'
-        ? span.name === 'agent.compaction' && span.status === 'ok'
-        : metric === 'contextWindow'
-          ? typeof span.attrs.contextWindow === 'number'
-          : typeof span.attrs.contextTokens === 'number');
+    const matches = ({ attrs, name, status }: TraceSpan) => {
+      if (attrs.sessionScope !== scope) return false;
+      switch (metric) {
+        case 'compaction':
+          return name === 'agent.compaction' && status === 'ok';
+        case 'context':
+          return (
+            name !== 'agent.run' && typeof attrs.contextTokens === 'number'
+          );
+        case 'contextWindow':
+          return typeof attrs.contextWindow === 'number';
+        case 'run':
+          return name === 'agent.run';
+        case 'usage':
+          return name === 'agent.usage';
+      }
+    };
     return (
       this.#pending.findLast(matches) ??
       this.#writing?.findLast(matches) ??
@@ -74,6 +83,7 @@ export class Tracer {
       firstActivityAt: Number.isFinite(firstActivityAt)
         ? firstActivityAt
         : undefined,
+      tasks: history?.tasks ?? 0,
     };
   }
 

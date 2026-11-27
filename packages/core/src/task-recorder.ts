@@ -204,7 +204,7 @@ export class TaskRecorder {
 
   sessionId(id: string) {
     const previous = this.#refs.session;
-    if (previous.mode === 'ephemeral') {
+    if (previous.mode === 'ephemeral' || previous.mode === 'fork') {
       this.#ephemeralSessionId = id;
       return;
     }

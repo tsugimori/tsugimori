@@ -37,6 +37,7 @@ const noSummary: SummaryProvider = {
 
 export interface ContextRequest extends ChatRef {
   afterSeq?: number;
+  history?: 'none';
   kind: string;
   ownerId?: string;
   recentMessages: number;
@@ -175,7 +176,10 @@ export class ContextAssembler {
     }
     if (request.afterSeq === undefined) {
       entries.push(...(await this.#loadRules(request)));
-      const summary = await this.#summary.get(request);
+      const summary =
+        request.history === 'none'
+          ? undefined
+          : await this.#summary.get(request);
       if (summary && summary.throughSeq < request.throughSeq) {
         if (summary.block)
           entries.push({
@@ -194,7 +198,8 @@ export class ContextAssembler {
           ? request.recentMessages
           : request.recentMessages + summaryBacklogLimit,
       throughSeq: request.throughSeq,
-      afterSeq: request.afterSeq,
+      afterSeq:
+        request.history === 'none' ? request.throughSeq - 1 : request.afterSeq,
       afterSummarySeq,
       skipSeq: request.skipSeq,
       includeRaw: false,

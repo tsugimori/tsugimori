@@ -138,7 +138,10 @@ export class Outbound {
     message: MediaDestination,
     parts: readonly SendPart[],
     attrs: Parameters<Tracer['span']>[1],
-    completedTaskId?: string,
+    {
+      completedTaskId,
+      sideQuestion,
+    }: { completedTaskId?: string; sideQuestion?: boolean } = {},
   ) {
     const { store, trace } = this.#deps;
     trace.span('outbound.record', attrs, () => {
@@ -156,6 +159,7 @@ export class Outbound {
             threadId: address.threadId ?? null,
             text: part.text,
             raw: part.raw ?? null,
+            ...(sideQuestion && { metadata: { sideQuestion } }),
           },
           index === parts.length - 1 ? completedTaskId : undefined,
         );
@@ -170,6 +174,7 @@ export class Outbound {
     taskId: string,
     run: (address: MediaDestination) => Promise<MediaReceipt>,
     onDelivery: (ids: readonly string[], error?: unknown) => void,
+    sideQuestion?: boolean,
   ) {
     const { hooks, trace } = this.#deps;
     message = this.#address(adapter, message);
@@ -188,7 +193,8 @@ export class Outbound {
         sent.map(({ messageId }) => messageId),
         error,
       );
-      if (sent.length) this.#recordParts(adapter.id, message, sent, attrs);
+      if (sent.length)
+        this.#recordParts(adapter.id, message, sent, attrs, { sideQuestion });
       if (error instanceof SendFailure && error.cause instanceof Error)
         throw new ToolFailure(
           error.deliveryUnknown
@@ -202,7 +208,7 @@ export class Outbound {
       ? receipt.parts
       : [{ ...receipt, text: message.text }];
     onDelivery(parts.map(({ messageId }) => messageId));
-    this.#recordParts(adapter.id, message, parts, attrs);
+    this.#recordParts(adapter.id, message, parts, attrs, { sideQuestion });
     const delivered = parts[0]!.chatId;
     if (delivered !== undefined)
       message = {
@@ -231,6 +237,7 @@ export class Outbound {
       onParts?(parts: readonly SendPart[], error?: unknown): void;
       onReceipt?(receipt: SendReceipt): void;
       scheduled?: boolean;
+      sideQuestion?: boolean;
       signal?: AbortSignal;
       taskId?: string;
     } = {},
@@ -272,7 +279,10 @@ export class Outbound {
           error,
         );
         options.onParts?.(sent, error);
-        if (sent.length) this.#recordParts(adapter.id, message, sent, attrs);
+        if (sent.length)
+          this.#recordParts(adapter.id, message, sent, attrs, {
+            sideQuestion: options.sideQuestion,
+          });
         throw error;
       }
       const parts = receipt.parts?.length
@@ -280,7 +290,10 @@ export class Outbound {
         : [{ ...receipt, text: message.text }];
       options.onDelivery?.(parts.map(({ messageId }) => messageId));
       options.onParts?.(parts);
-      this.#recordParts(adapter.id, message, parts, attrs, taskId);
+      this.#recordParts(adapter.id, message, parts, attrs, {
+        completedTaskId: taskId,
+        sideQuestion: options.sideQuestion,
+      });
       options.onReceipt?.(receipt);
     } catch (error) {
       if (!taskId || (error instanceof SendFailure && !error.deliveryUnknown))

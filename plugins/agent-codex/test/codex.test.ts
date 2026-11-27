@@ -154,6 +154,17 @@ for await (const line of createInterface({ input: process.stdin })) {
       thread: { id: threadId },
       serviceTier: method === 'thread/start' ? 'fast' : params.threadId === 'thread-null' ? null : 'default',
     });
+  } else if (method === 'thread/fork') {
+    const parent = threads.get(params.threadId);
+    assert.ok(parent?.scoped);
+    assert.equal(parent.ephemeral, undefined);
+    assert.equal(params.ephemeral, true);
+    assert.equal(params.excludeTurns, true);
+    assert.equal(params.sandbox, 'read-only');
+    assert.equal(params.environments, undefined);
+    const threadId = 'fork-' + ++next;
+    threads.set(threadId, { scoped: true, ephemeral: true, fork: true });
+    answer({ thread: { id: threadId } });
   } else if (method === 'thread/unsubscribe') {
     assert.equal(threads.get(params.threadId)?.ephemeral, true);
     threads.delete(params.threadId);
@@ -195,7 +206,8 @@ for await (const line of createInterface({ input: process.stdin })) {
       assert.equal(params.effort, 'low');
     }
     const blocks = params.input[0].text.split('\n').map((line) => JSON.parse(line));
-    assert.deepEqual(blocks.map(({ source }) => source), thread.resumed ? ['message'] : ['rule', 'message']);
+    assert.deepEqual(blocks.map(({ source }) => source), thread.fork ? ['system', 'message'] : thread.resumed ? ['message'] : ['rule', 'message']);
+    if (thread.fork) assert.match(blocks[0].content, /Answer only this side question/);
     const input = blocks.at(-1).content;
     if (input === 'photo') assert.deepEqual(params.input.slice(1), [
       { type: 'text', text: '{"messageId":"photo","index":0}', text_elements: [] },
@@ -253,8 +265,8 @@ for await (const line of createInterface({ input: process.stdin })) {
     if (input === 'auto compact') compact(800);
     if (input === 'async compact') compact(260000);
     if (input === 'native compact') compact(405000);
-    if (input === 'scheduled tools' || input === 'ephemeral tools') {
-      assert.equal(thread.ephemeral ?? false, input === 'ephemeral tools');
+    if (input === 'scheduled tools' || input === 'ephemeral tools' || input === 'fork tools') {
+      assert.equal(thread.ephemeral ?? false, input !== 'scheduled tools');
       answer({ turn: { id: turnId, status: 'inProgress' } });
       approvals.set('dynamic-1', (result) => {
         assert.deepEqual(result, { success: true, contentItems: [{ type: 'inputText', text: '["cached"]' }] });
@@ -880,7 +892,7 @@ test(
 );
 
 test(
-  'scoped Codex threads expose framework tools, unload one-off threads and resume durable threads',
+  'scoped Codex threads expose framework tools, unload ephemeral forks and resume the parent',
   { timeout: 5000 },
   async (t) => {
     const agent = new CodexAgent(
@@ -940,11 +952,32 @@ test(
     assert.ok(temporary);
     assert.notEqual(temporary.sessionId, first.sessionId);
     assert.equal(agent.describeSession(temporary.sessionId), undefined);
+    const fork = await collect(
+      agent.run(
+        {
+          ...scoped,
+          forkSessionId: first.sessionId,
+          ephemeral: true,
+          context: [
+            {
+              source: 'system',
+              trust: 'trusted',
+              content: 'Answer only this side question.',
+            },
+            { source: 'message', trust: 'owner', content: 'fork tools' },
+          ],
+        },
+        io,
+      ),
+    );
+    const child = fork.find((event) => event.type === 'sessionId');
+    assert.match(child?.sessionId ?? '', /fork-\d+$/);
+    assert.equal(agent.describeSession(child!.sessionId), undefined);
     const resumed = await collect(
       agent.run({ ...scoped, resumeSessionId: first.sessionId }, io),
     );
     assert.deepEqual(resumed.at(0), first);
-    assert.equal(calls, 3);
+    assert.equal(calls, 4);
   },
 );
 

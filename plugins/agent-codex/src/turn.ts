@@ -12,6 +12,7 @@ import { createHash } from 'node:crypto';
 import type { AppServer, ServerFrame } from './app-server.ts';
 
 import { asRecord } from './app-server.ts';
+import { contextWindow } from './compaction.ts';
 
 export const approvalPolicy = 'on-request';
 export const approvalsReviewer = 'user';
@@ -161,7 +162,7 @@ export class TurnOutput {
     return this.#final !== undefined || this.#fallback !== undefined;
   }
 
-  events({ method, params }: ServerFrame): AgentEvent[] {
+  events({ method, params }: ServerFrame, knownWindow?: number): AgentEvent[] {
     if (
       method === 'item/agentMessage/delta' &&
       typeof params.delta === 'string'
@@ -186,10 +187,14 @@ export class TurnOutput {
     if (method === 'thread/tokenUsage/updated') {
       const usage = lastUsage(params);
       const costUsd = usage.costUsd;
+      const window =
+        contextWindow(asRecord(params.tokenUsage).modelContextWindow) ??
+        knownWindow;
       return [
         {
           type: 'usage',
           ...(typeof costUsd === 'number' && { costUsd }),
+          ...(window !== undefined && { contextWindow: window }),
           contextTokens:
             typeof usage.totalTokens === 'number' ? usage.totalTokens : null,
           inputTokens:

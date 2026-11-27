@@ -48,7 +48,7 @@ export interface UserRecord extends PrincipalRef {
 export type MessageMetadata = Pick<
   InboundMessage,
   'at' | 'attachments' | 'replyTo' | 'sender' | 'userDisplay'
->;
+> & { sideQuestion?: boolean };
 
 export interface MessageRecord extends ChatRef {
   albumId?: string | null;
@@ -100,12 +100,14 @@ export interface ChatSummary extends ChatRef {
   updatedAt: number | null;
 }
 
-export type SessionMetric = 'context' | 'compaction' | 'contextWindow';
+export type SessionMetric =
+  'context' | 'compaction' | 'contextWindow' | 'run' | 'usage';
 
 export interface SessionHistory {
   compactions: number;
   createdAt?: number;
   firstActivityAt?: number;
+  tasks?: number;
 }
 
 export interface AgentSession extends ChatRef {

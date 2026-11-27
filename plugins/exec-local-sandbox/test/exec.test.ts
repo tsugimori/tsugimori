@@ -66,3 +66,36 @@ test('execution fails closed when bubblewrap is unavailable and cannot expose an
   await assert.rejects(session.readFile('../other-chat'), /outside/);
   await assert.rejects(session.run(['true'], {}), /bubblewrap.*required/);
 });
+
+test(
+  'stopping a task closes its background service and leaves earlier services running',
+  { timeout: 5000 },
+  async (t) => {
+    const workdir = await realpath(
+      await mkdtemp(join(tmpdir(), 'tsugimori-exec-test-')),
+    );
+    t.after(() => rm(workdir, { recursive: true, force: true }));
+    const session = await new LocalSandbox({
+      platform: 'linux',
+      spawn() {
+        return spawn(
+          process.execPath,
+          ['-e', 'console.log("ready"); setInterval(() => {}, 1000)'],
+          {
+            stdio: 'pipe',
+          },
+        );
+      },
+    }).start({ workdir, writable: [workdir], denyRead: [], network: 'none' });
+    t.after(() => session.stop());
+    await session.run(['serve'], { backgroundPort: 8000, taskId: 'previous' });
+    await session.run(['serve'], { backgroundPort: 8001, taskId: 'active' });
+    const previous = await session.exposePort(8000);
+    const active = await session.exposePort(8001);
+
+    await session.stopTask('active');
+    assert.equal(active.closed?.aborted, true);
+    assert.equal(previous.closed?.aborted, false);
+    await assert.rejects(session.exposePort(8001), /no running service/);
+  },
+);

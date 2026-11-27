@@ -109,10 +109,17 @@ const messages = {
       'The agent did not compact the session. It may need more conversation history.',
     compactFailed: 'The agent could not compact the session.',
     compactSuccess: 'Agent session compacted.',
+    contextUsage: 'Usage: /context',
+    stopUsage: 'Usage: /stop',
+    stopIdle: 'No task is running in this chat.',
+    stopped: (queued: number) => `Stopped the running task. ${queued} queued.`,
     newBusy: 'This chat has pending work. Try /new when it finishes.',
+    newCleanSuccess:
+      'Started a clean conversation. Your next message will use a new session without recent history.',
     newSuccess:
       'Started a new conversation. Your next message will use a new session.',
     btwUsage: 'Usage: /btw <message>',
+    btwFresh: 'Answering in a fresh session without conversation history.',
     noPreviews: 'No open previews.',
     preview: (id: string, url: string, port: number, expires: string) =>
       `${id} · ${url} · port ${port} · expires ${expires}`,
@@ -303,9 +310,17 @@ const messages = {
     compactSkipped: '代理程式未壓縮工作階段，可能需要更多對話紀錄。',
     compactFailed: '代理程式無法壓縮工作階段。',
     compactSuccess: '已壓縮代理程式的工作階段。',
+    contextUsage: '用法：/context',
+    stopUsage: '用法：/stop',
+    stopIdle: '此聊天室目前沒有執行中的任務。',
+    stopped: (queued: number) =>
+      `已停止目前的任務。還有 ${queued} 個任務在佇列中。`,
     newBusy: '此聊天室還有任務未完成，請等任務結束後再使用 /new。',
+    newCleanSuccess:
+      '已開始新對話。下一則訊息將使用新的工作階段，略過近期對話紀錄。',
     newSuccess: '已開始新對話，下一則訊息會用新的 session。',
     btwUsage: '用法：/btw <訊息>',
+    btwFresh: '將在不含對話紀錄的新工作階段回答。',
     noPreviews: '目前沒有開啟的預覽。',
     preview: (id: string, url: string, port: number, expires: string) =>
       `${id} · ${url} · 連接埠 ${port} · 到期時間 ${expires}`,

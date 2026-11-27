@@ -96,13 +96,14 @@ class Session implements ExecSession {
   readonly #scope: ExecScope;
   readonly #deps: BackendDependencies;
   readonly #closed = new AbortController();
-  readonly #children = new Set<Promise<unknown>>();
+  readonly #children = new Map<Promise<unknown>, string | undefined>();
   readonly #ports = new Map<
     number,
     {
       child: ChildProcessWithoutNullStreams;
       closed: AbortController;
       relay: Relay;
+      taskId?: string;
     }
   >();
   readonly #opening = new Set<number>();
@@ -114,7 +115,17 @@ class Session implements ExecSession {
 
   async stop() {
     this.#closed.abort();
-    await Promise.allSettled(this.#children);
+    await Promise.allSettled(this.#children.keys());
+  }
+
+  async stopTask(taskId: string) {
+    for (const job of this.#ports.values())
+      if (job.taskId === taskId) job.child.kill('SIGKILL');
+    await Promise.allSettled(
+      [...this.#children].flatMap(([child, owner]) =>
+        owner === taskId ? [child] : [],
+      ),
+    );
   }
 
   async exposePort(port: number) {
@@ -130,29 +141,45 @@ class Session implements ExecSession {
     if (!cmd.length || cmd.some((part) => part.includes('\0')))
       throw new ToolFailure('Expected a command and arguments');
     if (opts.backgroundPort !== undefined) {
-      await this.#serve(cmd, opts as RunOptions & { backgroundPort: number });
+      const starting = this.#serve(cmd, {
+        ...opts,
+        backgroundPort: opts.backgroundPort,
+      });
+      this.#children.set(starting, opts.taskId);
+      try {
+        await starting;
+      } finally {
+        this.#children.delete(starting);
+      }
       return { exitCode: null, stdout: 'Sandbox service started', stderr: '' };
     }
     const result = await this.#run(cmd, opts);
     return { ...result, stdout: result.stdout.toString('utf8') };
   }
 
-  async readFile(path: string) {
+  async readFile(
+    path: string,
+    opts: Pick<RunOptions, 'signal' | 'taskId'> = {},
+  ) {
     const result = await this.#run(
       [node, worker, 'read', this.#path(path)],
-      {},
+      opts,
     );
     if (result.exitCode !== 0)
       throw new ToolFailure('Could not read the chat file');
     return result.stdout;
   }
 
-  async writeFile(path: string, data: Uint8Array) {
+  async writeFile(
+    path: string,
+    data: Uint8Array,
+    opts: Pick<RunOptions, 'signal' | 'taskId'> = {},
+  ) {
     if (data.byteLength > maxOutput)
       throw new ToolFailure('Chat file exceeds 1 MiB');
     const result = await this.#run(
       [node, worker, 'write', this.#path(path)],
-      {},
+      opts,
       data,
     );
     if (result.exitCode !== 0)
@@ -280,7 +307,7 @@ class Session implements ExecSession {
     });
     child.once('close', (code) => done.resolve(code));
     const completion = done.promise.finally(cleanup);
-    this.#children.add(completion);
+    this.#children.set(completion, opts.taskId);
     void completion.then(
       () => this.#children.delete(completion),
       () => this.#children.delete(completion),
@@ -293,7 +320,10 @@ class Session implements ExecSession {
     const signal = opts.signal
       ? AbortSignal.any([timeout, opts.signal])
       : timeout;
-    const { child, completion } = await this.#launch(cmd, { signal });
+    const { child, completion } = await this.#launch(cmd, {
+      signal,
+      taskId: opts.taskId,
+    });
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
     let size = 0;
@@ -355,9 +385,10 @@ class Session implements ExecSession {
     let started = false;
     try {
       relay = await createRelay();
+      starting.throwIfAborted();
       const { child, completion } = await this.#launch(
         [node, worker, 'serve', String(port), ...cmd],
-        {},
+        { taskId: opts.taskId },
         relay,
       );
       const closed = new AbortController();
@@ -383,7 +414,7 @@ class Session implements ExecSession {
           await liveRelay.stop();
         },
       );
-      this.#children.add(cleanup);
+      this.#children.set(cleanup, opts.taskId);
       void cleanup.then(
         () => this.#children.delete(cleanup),
         () => this.#children.delete(cleanup),
@@ -394,7 +425,7 @@ class Session implements ExecSession {
       try {
         await ready.promise;
         starting.throwIfAborted();
-        this.#ports.set(port, { child, relay, closed });
+        this.#ports.set(port, { child, relay, closed, taskId: opts.taskId });
         started = true;
       } finally {
         starting.removeEventListener('abort', stop);

@@ -139,6 +139,25 @@ export class Executions {
     );
   }
 
+  async stopChat({ adapterId, chatId }: ChatRef) {
+    const key = JSON.stringify([adapterId, chatId]);
+    const entry = this.#sessions.get(key);
+    if (!entry) return false;
+    await this.#stopEntry(key, entry);
+    return true;
+  }
+
+  async stopTask({ adapterId, chatId }: ChatRef, taskId: string) {
+    const key = JSON.stringify([adapterId, chatId]);
+    const entry = this.#sessions.get(key);
+    if (!entry) return;
+    const [session] = await Promise.allSettled([entry.session]);
+    if (session.status === 'fulfilled') {
+      if (session.value.stopTask) await session.value.stopTask(taskId);
+      else await this.#stopEntry(key, entry);
+    }
+  }
+
   async #stopEntry(key: string, entry: SessionEntry) {
     if (this.#sessions.get(key) !== entry) return;
     this.#sessions.delete(key);
@@ -216,6 +235,7 @@ export class Executions {
             timeoutMs,
             backgroundPort,
             signal: task.signal,
+            taskId: task.taskId,
           });
         },
       },
@@ -228,7 +248,7 @@ export class Executions {
           Buffer.from(
             await (
               await session(task)
-            ).readFile((args as { path: string }).path),
+            ).readFile((args as { path: string }).path, task),
           ).toString('utf8'),
       },
       {
@@ -241,7 +261,7 @@ export class Executions {
         ),
         run: async (args, task) => {
           const { path, text } = args as { path: string; text: string };
-          await (await session(task)).writeFile(path, Buffer.from(text));
+          await (await session(task)).writeFile(path, Buffer.from(text), task);
           return { path };
         },
       },
@@ -250,12 +270,9 @@ export class Executions {
         description:
           'Stop this chat’s execution session and its background services.',
         schema: object({}, []),
-        run: async (_args, task) => {
-          const key = JSON.stringify([task.chat.adapterId, task.chat.chatId]);
-          const entry = this.#sessions.get(key);
-          if (entry) await this.#stopEntry(key, entry);
-          return { stopped: !!entry };
-        },
+        run: async (_args, task) => ({
+          stopped: await this.stopChat(task.chat),
+        }),
       },
     ];
   }

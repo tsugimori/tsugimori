@@ -108,6 +108,7 @@ export class CodexAgent implements AgentConnector {
   readonly implementation = implementation;
   readonly kind = 'codex';
   readonly loop = 'external';
+  readonly supportsSessionFork = true;
   readonly settings: AgentSettings = {
     perTurn: ['model', 'thinking', 'serviceTier'],
     serviceTiers: true,
@@ -545,6 +546,7 @@ export class CodexAgent implements AgentConnector {
     request: Pick<
       AgentRequest,
       | 'ephemeral'
+      | 'forkSessionId'
       | 'model'
       | 'purpose'
       | 'sandbox'
@@ -562,10 +564,14 @@ export class CodexAgent implements AgentConnector {
     const signal = AbortSignal.any([request.signal, server.signal]);
     signal.throwIfAborted();
     const { workdir } = request;
+    const forkThreadId = request.forkSessionId
+      ? nativeSessionId(request.forkSessionId)
+      : undefined;
+    const baseThreadId = forkThreadId ?? resumeSessionId;
     const { model, effort, serviceTier } = await this.#turnSettings(
       server,
       request,
-      resumeSessionId,
+      baseThreadId,
     );
     const summarize = request.purpose !== undefined;
     const scope = request.sandbox;
@@ -575,7 +581,7 @@ export class CodexAgent implements AgentConnector {
       windows,
       model,
       workdir,
-      resumeSessionId,
+      baseThreadId,
     );
     signal.throwIfAborted();
     const compaction = codexCompactionConfig(
@@ -590,7 +596,6 @@ export class CodexAgent implements AgentConnector {
       ? {
           sandbox: 'read-only',
           runtimeWorkspaceRoots: [workdir],
-          environments: [],
         }
       : undefined;
     const threadOptions = {
@@ -622,24 +627,34 @@ export class CodexAgent implements AgentConnector {
         },
       },
     };
-    const result = resumeSessionId
-      ? await server.request('thread/resume', {
+    const result = forkThreadId
+      ? await server.request('thread/fork', {
           ...threadOptions,
-          threadId: resumeSessionId,
+          threadId: forkThreadId,
+          ephemeral: true,
           excludeTurns: true,
         })
-      : await server.request('thread/start', {
-          ...threadOptions,
-          ephemeral: request.ephemeral || summarize || undefined,
-          dynamicTools: dynamicTools?.length ? dynamicTools : undefined,
-        });
+      : resumeSessionId
+        ? await server.request('thread/resume', {
+            ...threadOptions,
+            ...(scope && { environments: [] }),
+            threadId: resumeSessionId,
+            excludeTurns: true,
+          })
+        : await server.request('thread/start', {
+            ...threadOptions,
+            ...(scope && { environments: [] }),
+            ephemeral: request.ephemeral || summarize || undefined,
+            dynamicTools: dynamicTools?.length ? dynamicTools : undefined,
+          });
     const threadId = asRecord(result.thread).id;
     if (
       typeof threadId !== 'string' ||
+      threadId === forkThreadId ||
       (resumeSessionId && threadId !== resumeSessionId)
     )
       throw new Error('Codex returned an invalid thread ID');
-    if (!request.ephemeral) signal.throwIfAborted();
+    if (!request.ephemeral && !forkThreadId) signal.throwIfAborted();
     const reportedTier = result.serviceTier;
     const resolvedModel =
       typeof result.model === 'string' ? result.model : model;
@@ -740,6 +755,7 @@ export class CodexAgent implements AgentConnector {
     const dynamicTools = describeTools(request.tools);
     const stamp = sessionPrefix(dynamicTools);
     const resumeSessionId =
+      !request.forkSessionId &&
       request.resumeSessionId &&
       this.acceptsSession(request.resumeSessionId, request.tools)
         ? request.resumeSessionId.slice(stamp.length)
@@ -948,7 +964,10 @@ export class CodexAgent implements AgentConnector {
                   : 'native';
             yield { ...details, trigger, type: 'compaction' };
           }
-          yield* output.events(frame);
+          yield* output.events(
+            frame,
+            this.#threadContexts.get(server)?.get(threadId)?.window ?? window,
+          );
         }
       }
     } finally {
@@ -956,7 +975,7 @@ export class CodexAgent implements AgentConnector {
       interrupt();
       listeners.delete(threadId);
       await interruption;
-      if (request.ephemeral) {
+      if (request.ephemeral || request.forkSessionId) {
         if (!server.signal.aborted) {
           try {
             await server.request('thread/unsubscribe', { threadId }, 5_000, {

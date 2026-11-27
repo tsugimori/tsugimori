@@ -63,6 +63,7 @@ interface Round {
   address: MediaDestination;
   onDelivery(ids: readonly string[], error?: unknown): void;
   onQueued(handle: QueuedMedia, task: ToolContext): void;
+  sideQuestion?: boolean;
   source: string;
 }
 
@@ -82,7 +83,7 @@ export function sendTools(
     text: string,
     run: Parameters<Outbound['sendMedia']>[4],
   ) => {
-    const { address, onDelivery, onQueued } = current();
+    const { address, onDelivery, onQueued, sideQuestion } = current();
     const result = await deps.outbound.sendMedia(
       adapter,
       { ...address, text },
@@ -90,6 +91,7 @@ export function sendTools(
       task.taskId,
       run,
       onDelivery,
+      sideQuestion,
     );
     if ('queued' in result) {
       onQueued(result, task);
