@@ -274,9 +274,10 @@ useHead({
                 context.ref
               }}</code>
             </summary>
-            <pre v-if="context.text !== undefined" class="code-block">{{
-              context.text
-            }}</pre>
+            <pre
+              v-if="context.text !== undefined"
+              class="code-block prose-block"
+              >{{ context.text }}</pre>
             <p v-else class="detail-inset muted">
               {{ m.unavailable }} · {{ context.ref }}
             </p>
@@ -370,7 +371,7 @@ useHead({
                 class="reasoning"
               >
                 <summary>{{ m.reasoning }}</summary>
-                <pre class="code-block">{{ event.data.text }}</pre>
+                <pre class="code-block prose-block">{{ event.data.text }}</pre>
               </details>
               <div v-else-if="event.kind === 'text'" class="transcript-text">
                 <NuxtLink
@@ -379,7 +380,9 @@ useHead({
                   :to="{ hash: '#output' }"
                   >{{ t('See final output', '查看最終輸出') }} ↓</NuxtLink
                 >
-                <pre v-else class="code-block">{{ event.data.text }}</pre>
+                <pre v-else class="code-block prose-block">{{
+                  event.data.text
+                }}</pre>
               </div>
               <p v-else-if="event.kind === 'compaction'">
                 <strong>{{ m.compaction }}</strong> · {{ event.data.trigger
@@ -431,7 +434,9 @@ useHead({
             {{ data.output === '' ? m.emptyOutput : m.unavailable }}
           </p>
           <div v-else class="detail-inset">
-            <pre v-if="raw" class="code-block">{{ data.output }}</pre>
+            <pre v-if="raw" class="code-block prose-block">{{
+              data.output
+            }}</pre>
             <div v-else class="markdown" v-html="rendered"></div>
           </div>
         </ConsolePanel>

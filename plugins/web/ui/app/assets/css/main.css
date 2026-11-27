@@ -498,6 +498,9 @@ progress::-moz-progress-bar {
   padding: 0;
   min-width: 0;
 }
+.task-layout .p-panel-content-wrapper {
+  min-width: 0;
+}
 .panel-title {
   display: flex;
   align-items: center;
@@ -525,6 +528,9 @@ progress::-moz-progress-bar {
   grid-template-columns: minmax(0, 1fr);
   gap: 14px;
   align-items: start;
+}
+.task-layout .panel-stack {
+  grid-template-columns: minmax(0, 1fr);
 }
 .overview-split {
   margin-bottom: 14px;
@@ -888,6 +894,7 @@ input[type='date'],
 }
 .execution-event {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 3px;
   font-size: 12px;
 }
@@ -1024,6 +1031,10 @@ input[type='date'],
 .code-block code {
   font-size: inherit;
 }
+.prose-block {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 .code-error {
   color: var(--red);
   background: var(--state-err-bg);
@@ -1051,6 +1062,7 @@ input[type='date'],
 }
 .markdown {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 7px;
   min-width: 0;
   font-size: 13px;
