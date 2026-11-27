@@ -16,7 +16,12 @@ export async function telegramIdentity(
   const id = nativeId(bot?.id);
   if (!id || typeof bot?.username !== 'string')
     throw new Error('Telegram getMe returned an invalid bot identity');
-  return { id, username: bot.username.toLowerCase() };
+  const displayName = bot.first_name;
+  return {
+    id,
+    username: bot.username.toLowerCase(),
+    ...(typeof displayName === 'string' && { displayName }),
+  };
 }
 
 const identity = {

@@ -127,6 +127,7 @@ export class TelegramAdapter implements PlatformAdapter {
       stickers: true,
       inlineButtons: true,
       outboundPush: 'free',
+      ownerReplyTriggers: true,
       richText: richMessages,
     };
     this.#api = new BotApi(fetch, token);

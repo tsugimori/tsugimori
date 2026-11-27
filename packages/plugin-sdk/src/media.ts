@@ -117,6 +117,8 @@ export interface ContextMessage {
   at: number | null;
   attachments: AttachmentMetadata[];
   id: string;
+  mentionsYou?: true;
+  repliesToYou?: true;
   replyTo?: Omit<ReplyTarget, 'attachments'> & {
     attachments: AttachmentMetadata[];
   };

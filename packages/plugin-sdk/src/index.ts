@@ -105,6 +105,8 @@ export interface PlatformCapabilities {
   inlineButtons?: boolean;
   /** Defaults to `free`. `metered` uses quota for sends outside a current inbound reply. `none` supports only replies to a current inbound. */
   outboundPush?: 'free' | 'metered' | 'none';
+  /** Accept owner replies to the bot even in chats outside the allowlist. */
+  ownerReplyTriggers?: boolean;
   poll?: boolean;
   reactions?: boolean;
   richText?: boolean;
@@ -302,7 +304,11 @@ export interface PlatformCommandErrorDetails {
 
 export interface PlatformAdapter {
   /** The bot's native identity. The username excludes the @ prefix. */
-  readonly botIdentity?: { id?: string; username: string };
+  readonly botIdentity?: {
+    displayName?: string;
+    id?: string;
+    username: string;
+  };
   capabilities: PlatformCapabilities;
   /** A public link for opening a direct chat with the bot, when available. */
   contactLink?(): Promise<string | undefined>;

@@ -7,6 +7,7 @@ import { nativeId, record } from './api.ts';
 import { telegramAttachments, telegramText } from './inbound-media.ts';
 
 export interface BotIdentity {
+  displayName?: string;
   id: string;
   username: string;
 }
@@ -143,8 +144,9 @@ function mapMessage(
   const quote = record(message.quote)?.text;
   const date = message.date;
   const repliesToBot = nativeId(record(reply?.from)?.id) === bot.id;
-  const mentionsBot = repliesToBot || mentions(entities, text, bot);
-  const addressedToOther = !mentionsBot && replySender?.is_bot === true;
+  const mentionsBot = mentions(entities, text, bot);
+  const addressedToOther =
+    !mentionsBot && !repliesToBot && replySender?.is_bot === true;
   const userDisplay = displayName(sender);
   const senderChat = record(message.sender_chat);
   const senderChatId = nativeId(senderChat?.id);

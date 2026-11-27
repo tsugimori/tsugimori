@@ -48,7 +48,13 @@ export interface UserRecord extends PrincipalRef {
 
 export type MessageMetadata = Pick<
   InboundMessage,
-  'at' | 'attachments' | 'replyTo' | 'sender' | 'userDisplay'
+  | 'at'
+  | 'attachments'
+  | 'mentionsBot'
+  | 'repliesToBot'
+  | 'replyTo'
+  | 'sender'
+  | 'userDisplay'
 > & { sessionBoundary?: boolean; sideQuestion?: boolean };
 
 export interface MessageRecord extends ChatRef {

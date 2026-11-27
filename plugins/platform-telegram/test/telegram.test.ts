@@ -24,7 +24,7 @@ function longPoll(init?: RequestInit): Promise<Response> {
 
 const chat = { id: -1001, title: 'forum', type: 'supergroup' };
 const address = { chat, is_topic_message: true, message_thread_id: 17 };
-const me = { id: 42, username: 'ExampleBot' };
+const me = { id: 42, username: 'ExampleBot', first_name: 'Example Bot' };
 const from = { id: 79, first_name: 'Example sender' };
 
 test(
@@ -108,6 +108,11 @@ test(
     };
     const ready = Promise.withResolvers<void>();
     await adapter.start({ ...context, ready: ready.promise });
+    assert.deepEqual(adapter.botIdentity, {
+      id: '42',
+      username: 'examplebot',
+      displayName: 'Example Bot',
+    });
     assert.equal(await adapter.contactLink(), 'https://t.me/examplebot');
     assert.equal(polls.length, 0);
     ready.resolve();
@@ -148,6 +153,7 @@ test(
     assert.equal(reply?.type, 'message');
     assert.equal(reply.chatKind, 'dm');
     assert.equal(reply.repliesToBot, true);
+    assert.equal(reply.mentionsBot, false);
     assert.equal(callback?.type, 'callback');
     assert.equal(callback.callbackId, 'approval:once:test-id');
     assert.equal(callback.queryId, 'query-1');

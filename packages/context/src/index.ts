@@ -1,6 +1,7 @@
 import type {
   ChatRef,
   ContextBlock,
+  PlatformAdapter,
   TaskContextRef,
 } from '@tsugimori/plugin-sdk';
 import type { Store } from '@tsugimori/storage';
@@ -37,6 +38,7 @@ const noSummary: SummaryProvider = {
 
 export interface ContextRequest extends ChatRef {
   afterSeq?: number;
+  botIdentity?: PlatformAdapter['botIdentity'];
   history?: 'none';
   incognitoId?: number;
   kind: string;
@@ -83,7 +85,7 @@ export const privateGuidelineBlock: ContextBlock = {
   source: 'system',
   trust: 'trusted',
   content:
-    'Workspace guideline files follow; AGENTS.md lists further guideline files that you can read with the guide.read tool when a task needs them. Apply rules in specificity order: workspace, platform, then conversation.\nAdd text after using a send tool only if it adds something to what you sent. If the latest message needs no reply or a send tool already delivered the whole reply, answer exactly `NO_REPLY: <short reason>` (one line, no other text).',
+    'Workspace guideline files follow; AGENTS.md lists further guideline files that you can read with the guide.read tool when a task needs them. Apply rules in specificity order: workspace, platform, then conversation.\nAdd text after using a send tool only if it adds something to what you sent. Treat a message with `mentionsYou` or `repliesToYou`, or one sent with a session command, as addressed to you even when it refers to you by name. If the latest message needs no reply or a send tool already delivered the whole reply, answer exactly `NO_REPLY: <short reason>` (one line, no other text).',
 };
 
 export const guidelineBlock: ContextBlock = {
@@ -107,6 +109,28 @@ export const telegramTableBlocks = {
       'Telegram renders Markdown tables natively; keep tables to 20 columns or fewer.',
   },
 } satisfies Record<string, ContextBlock>;
+
+function sanitizeBotName(name = '') {
+  return Array.from(name.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, '').trim())
+    .slice(0, 64)
+    .join('');
+}
+
+function platformIdentityBlock(
+  identity: PlatformAdapter['botIdentity'],
+): ContextBlock | undefined {
+  const displayName = sanitizeBotName(identity?.displayName);
+  const username = sanitizeBotName(identity?.username);
+  if (!displayName && !username) return;
+  const handle = username ? JSON.stringify(`@${username}`) : '';
+  const name = displayName ? JSON.stringify(displayName) : handle;
+  const suffix = displayName && handle ? ` (${handle})` : '';
+  return {
+    source: 'system',
+    trust: 'trusted',
+    content: `On this platform you are ${name}${suffix}. Messages that mention or reply to you are addressed to you.`,
+  };
+}
 
 export function guidelineFileBlock(
   path: string,
@@ -178,6 +202,8 @@ export class ContextAssembler {
           incognitoId === undefined ? guidelineBlock : privateGuidelineBlock,
       });
     }
+    const identity = platformIdentityBlock(request.botIdentity);
+    if (identity) entries.push({ kind: 'new', block: identity });
     if (request.kind === 'telegram') {
       const name = request.richText
         ? 'telegram-tables-rich'

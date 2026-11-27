@@ -1113,6 +1113,8 @@ export class Gateway {
             replyTo,
             sender: event.sender,
             userDisplay: event.userDisplay,
+            ...(event.mentionsBot === true && { mentionsBot: true }),
+            ...(event.repliesToBot === true && { repliesToBot: true }),
             ...(sideQuestion && { sideQuestion }),
           },
           threadId: event.threadId ?? null,
@@ -1261,7 +1263,12 @@ export class Gateway {
     }
     const { triggered, reason } = priorAlbumItem
       ? { triggered: false, reason: 'not-addressed' as const }
-      : decideTrigger(event, owner, this.#auth.isAllowlisted(chat));
+      : decideTrigger(
+          event,
+          owner,
+          this.#auth.isAllowlisted(chat),
+          adapter.capabilities.ownerReplyTriggers,
+        );
     await this.#hooks.emit('trigger.decided', {
       chat,
       message,

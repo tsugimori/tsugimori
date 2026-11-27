@@ -75,6 +75,10 @@ test('assembles ordered rules, marked recent messages, and scoped resume context
   assert.match(blocks[0]!.content, /with the guide\.read tool/);
   assert.match(
     blocks[0]!.content,
+    /`mentionsYou` or `repliesToYou`, or one sent with a session command, as addressed to you/,
+  );
+  assert.match(
+    blocks[0]!.content,
     /answer exactly `NO_REPLY: <short reason>` \(one line, no other text\)\.$/,
   );
   assert.deepEqual(
@@ -120,6 +124,42 @@ test('assembles ordered rules, marked recent messages, and scoped resume context
       (block) => block.content,
     ),
     ['owner message', 'member message'],
+  );
+});
+
+test('uses a single quoted platform identity line with bounded names', async (t) => {
+  const workspace = await mkdtemp(join(tmpdir(), 'tsugimori-context-'));
+  t.after(() => rm(workspace, { recursive: true, force: true }));
+  const context = new ContextAssembler({
+    store: { recentMessages: () => [] },
+    workspace,
+  });
+  const resumed = {
+    adapterId: 'line',
+    chatId: 'group',
+    kind: 'line',
+    afterSeq: 1,
+    throughSeq: 2,
+    recentMessages: 2,
+  };
+  const displayName = '日太"\\' + '😀'.repeat(60);
+  const username = '@' + 'u'.repeat(64);
+  const [line] = await context.assemble({
+    ...resumed,
+    botIdentity: {
+      displayName: ' \n日\x00太\u202E"\\\u2028' + '😀'.repeat(100),
+      username: 'u\r' + 'u'.repeat(80),
+    },
+  });
+  assert.deepEqual(line, {
+    source: 'system',
+    trust: 'trusted',
+    content: `On this platform you are ${JSON.stringify(displayName)} (${JSON.stringify(username)}). Messages that mention or reply to you are addressed to you.`,
+  });
+  assert.deepEqual(await context.assemble(resumed), []);
+  assert.deepEqual(
+    await context.assemble({ ...resumed, botIdentity: { username: '\n' } }),
+    [],
   );
 });
 

@@ -40,6 +40,7 @@ import type { Logger } from '../src/index.ts';
 import { LineApi } from '../../../plugins/platform-line/src/api.ts';
 import { mapEvent } from '../../../plugins/platform-line/src/updates.ts';
 import { telegramAttachments } from '../../../plugins/platform-telegram/src/inbound-media.ts';
+import { mapUpdate } from '../../../plugins/platform-telegram/src/updates.ts';
 import { sessionScope } from '../src/agent-run.ts';
 import {
   decideTrigger,
@@ -4717,6 +4718,117 @@ test('commands addressed to another bot are recorded without running an agent', 
   assert.equal(f.store.getMessage(chat, event.messageId)?.text, event.text);
   assert.equal(runs, 0);
   assert.deepEqual(f.platform.sent, []);
+});
+
+test('LINE isSelf mentions and the bot identity reach the agent and the mention survives in history', async (t) => {
+  const requests: AgentRequest[] = [];
+  const f = await fixture(
+    t,
+    async function* (request) {
+      requests.push(request);
+      yield { type: 'text.final', text: 'Done' };
+    },
+    true,
+    {
+      context: { recentMessages: 10, summary: { enabled: false } },
+      platformKind: 'line',
+    },
+  );
+  const api = new LineApi(
+    async () =>
+      Response.json({
+        userId: 'bot',
+        basicId: '@test-bot',
+        displayName: '日太０２',
+      }),
+    'fixture',
+  );
+  Object.assign(f.platform.platform, {
+    botIdentity: await api.identity(AbortSignal.timeout(1000)),
+  });
+  await f.platform.emit(inbound('allow', '/allow', { chatKind: 'group' }));
+  for (const id of ['mention', 'follow-up']) {
+    const mapped = mapEvent(
+      {
+        type: 'message',
+        source: { type: 'group', groupId: chat.chatId, userId: 'member' },
+        message: {
+          id,
+          type: 'text',
+          text: '@日太０２ 來張海綿寶寶梗圖看看實力。',
+          mention: { mentionees: [{ type: 'user', isSelf: true }] },
+        },
+      },
+      { emit: f.platform.emit },
+    );
+    assert.ok(mapped);
+    await f.platform.emit(mapped.inbound);
+    await f.gateway.idle();
+  }
+  const [first, second] = requests;
+  assert.ok(first && second);
+  assert.ok(
+    first.context.some(
+      ({ source, trust, content }) =>
+        source === 'system' &&
+        trust === 'trusted' &&
+        content.includes('"日太０２" ("@test-bot")'),
+    ),
+  );
+  const current = first.context.find(
+    ({ message }) => message?.id === 'mention',
+  );
+  assert.ok(current?.message);
+  assert.equal(JSON.parse(renderContextLine(current)).mentionsYou, true);
+  assert.equal('repliesToYou' in current.message, false);
+  const historical = second.context.find(
+    ({ message }) => message?.id === 'mention',
+  );
+  assert.equal(historical?.message?.mentionsYou, true);
+  const task = f.store
+    .listChatTasks(chat)
+    .find(({ sourceMessageId }) => sourceMessageId === 'follow-up');
+  assert.ok(task);
+  const execution = await f.gateway.admin.task(task.id);
+  assert.equal(
+    execution?.context.find(({ message }) => message?.id === 'mention')?.kind,
+    'history',
+  );
+  assert.equal(
+    f.store.getMessage(chat, 'mention')?.metadata?.mentionsBot,
+    true,
+  );
+});
+
+test('a Telegram owner reply carries repliesToYou without a mention', async (t) => {
+  const requests: AgentRequest[] = [];
+  const f = await fixture(t, async function* (request) {
+    requests.push(request);
+    yield { type: 'text.final', text: 'Done' };
+  });
+  f.platform.platform.capabilities.ownerReplyTriggers = true;
+  const bot = { id: '42', username: 'testbot', displayName: 'Test Bot' };
+  const update = mapUpdate(
+    {
+      message: {
+        chat: { id: -1001, type: 'group' },
+        from: { id: 79 },
+        message_id: 2,
+        reply_to_message: { message_id: 1, from: { id: 42, is_bot: true } },
+        text: 'Follow-up reply',
+      },
+    },
+    bot,
+  );
+  assert.equal(update?.type, 'message');
+  await f.platform.emit({ ...update, userId: 'owner' });
+  await f.gateway.idle();
+  const current = requests[0]?.context.find(
+    ({ message }) => message?.id === '2',
+  );
+  assert.ok(current?.message);
+  assert.equal(JSON.parse(renderContextLine(current)).repliesToYou, true);
+  assert.equal('mentionsYou' in current.message, false);
 });
 
 test('records and redacts framework and external tool details without changing agent history', async (t) => {

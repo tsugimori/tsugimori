@@ -626,7 +626,12 @@ export class Tasks {
           ? !owner
           : input.scheduled || input.sessionCommand
             ? !owner && !allowlisted
-            : !canTrigger(message, owner, allowlisted)
+            : !canTrigger(
+                message,
+                owner,
+                allowlisted,
+                adapter.capabilities.ownerReplyTriggers,
+              )
       ) {
         finish('cancelled');
         return;
@@ -1182,6 +1187,7 @@ export class Tasks {
       .span('context.assembled', attrs, async () => {
         const entries = await context.assembleWithRefs({
           ...chat,
+          botIdentity: adapter.botIdentity,
           kind: adapter.kind,
           richText: adapter.capabilities.richText,
           ownerId: auth.owner(chat.adapterId),

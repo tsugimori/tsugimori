@@ -91,6 +91,8 @@ export function messageContext(
     },
     replyTo: reply && publicReply(reply, replyAttachments),
     attachments: publicAttachments(attachments),
+    ...(metadata?.mentionsBot === true && { mentionsYou: true }),
+    ...(metadata?.repliesToBot === true && { repliesToYou: true }),
   };
 }
 
