@@ -52,8 +52,10 @@ test('setup shows only the verification URL and user code and saves a confirmed 
         return Response.json({
           device_code: 'private-device',
           user_code: 'FIXTURE',
-          verification_url: 'https://www.microsoft.com/link',
-          interval: 5,
+          // Shape Microsoft returned on 2026-11-28: string timings, login.microsoft.com.
+          verification_url: 'https://login.microsoft.com/device',
+          expires_in: '900',
+          interval: '5',
         });
       }
       if (url.pathname === '/common/oauth2/token') {
@@ -153,8 +155,8 @@ test('setup shows only the verification URL and user code and saves a confirmed 
     /Teams Fixture \(8:live:\.cid\.fixture\).*from 8:old/,
   );
   assert.deepEqual(shown, [
-    'Open https://www.microsoft.com/link and enter code FIXTURE.',
-    'Open https://www.microsoft.com/link and enter code FIXTURE.',
+    'Open https://login.microsoft.com/device and enter code FIXTURE.',
+    'Open https://login.microsoft.com/device and enter code FIXTURE.',
   ]);
   assert.deepEqual(waits, [5000, 5000, 10000, 5000, 5000, 10000]);
   assert.deepEqual(recorded, [credentialName]);

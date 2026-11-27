@@ -228,6 +228,7 @@ export function microsoftAuth(
         ![
           'microsoft.com',
           'www.microsoft.com',
+          'login.microsoft.com',
           'microsoftonline.com',
           'login.microsoftonline.com',
           'login.live.com',
