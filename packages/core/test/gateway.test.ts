@@ -526,6 +526,10 @@ test('/new clears the active session and rebuilds context with or without a prom
     'Start here\nwith another line',
   );
   assert.equal(
+    requests[2]?.context.at(-2)?.content,
+    'The next message was sent to you with the /new command. Reply to it.',
+  );
+  assert.equal(
     store.getMessage(chat, 'prompt')?.text,
     '/new Start here\nwith another line',
   );

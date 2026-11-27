@@ -1172,6 +1172,20 @@ export class Tasks {
                 'Return the scheduled response without textual mentions. The platform adds any approved recipients separately.',
             },
           });
+        if (input.sessionCommand) {
+          // The command prompt has no mention, so say who it is for.
+          const at = entries.findIndex(
+            (entry) => entry.kind === 'new' && entry.seq === input.seq,
+          );
+          entries.splice(at < 0 ? entries.length : at, 0, {
+            kind: 'new',
+            block: {
+              source: 'system',
+              trust: 'trusted',
+              content: `The next message was sent to you with the /${input.sessionCommand.mode} command. Reply to it.`,
+            },
+          });
+        }
         if (ephemeral)
           entries.unshift({
             kind: 'new',
