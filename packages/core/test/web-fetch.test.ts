@@ -23,7 +23,9 @@ function network(reply: ReturnType<typeof response>): PublicWebNetwork {
 
 test('web.fetch renders HTML as untrusted text and returns final response metadata', async () => {
   const page = response(
-    '<head><title>ignored</title></head><p>Hello &amp; welcome.</p><script>ignored</script><p>Next.</p>',
+    '<head><!-- <title>ignored</title> --><script>"<title>ignored</title>"</script>' +
+      '<meta content="<title>ignored</title>"><TITLE>  Example&nbsp;&amp;\n  &#68;omain  </TITLE></head>' +
+      '<p title="<title>hint">Hello &amp; welcome.</p><script>ignored</script><p>Next.</p>',
     'text/html; charset=utf-8',
   );
   const result = await fetchWebPage(url, signal, {
@@ -42,6 +44,11 @@ test('web.fetch renders HTML as untrusted text and returns final response metada
     url: url + 'article',
     status: 200,
     contentType: 'text/html',
+    title: JSON.stringify({
+      source: 'external',
+      trust: 'untrusted',
+      content: 'Example & Domain',
+    }),
     truncated: false,
     content: JSON.stringify({
       source: 'external',
@@ -52,6 +59,26 @@ test('web.fetch renders HTML as untrusted text and returns final response metada
   assert.equal(page.destroyed, true);
 });
 
+test('web.fetch caps XHTML titles and preserves whole characters', async () => {
+  const prefix = 'a'.repeat(511);
+  const result = await fetchWebPage(
+    url,
+    signal,
+    network(
+      response(
+        `<html><head><title>${prefix}&#x1f331;xyz</title></head><body>Example</body></html>`,
+        'application/xhtml+xml',
+      ),
+    ),
+  );
+  assert.equal(result.truncated, true);
+  assert.deepEqual('title' in result && JSON.parse(result.title!), {
+    source: 'external',
+    trust: 'untrusted',
+    content: prefix,
+  });
+});
+
 test('web.fetch limits bytes and characters and skips binary bodies', async () => {
   const long = await fetchWebPage(
     url,
@@ -59,6 +86,7 @@ test('web.fetch limits bytes and characters and skips binary bodies', async () =
     network(response('界'.repeat(12_001), 'text/plain')),
   );
   assert.ok('content' in long);
+  assert.equal('title' in long, false);
   assert.equal(JSON.parse(long.content).content.length, 12_000);
   assert.equal(long.truncated, true);
 
@@ -68,6 +96,7 @@ test('web.fetch limits bytes and characters and skips binary bodies', async () =
     network(response('<script>' + ' '.repeat(512 * 1024), 'text/html')),
   );
   assert.equal(large.truncated, true);
+  assert.equal('title' in large, false);
   assert.ok('content' in large);
   assert.equal(JSON.parse(large.content).content, '');
 
