@@ -182,19 +182,30 @@ export function turnAttachments(
   // Older LINE stickers have only a sticker ID. The adapter can still fetch them.
   const isVisual = (attachment: InboundAttachment) =>
     visual(attachment) || hasLineStickerId(platformKind, attachment);
-  const ids = new Set<string>();
+  const ids = new Map<string, Set<number>>();
   for (const { message } of blocks) {
-    if (message?.attachments.some(isVisual)) ids.add(message.id);
-    if (includeReplies && message?.replyTo?.attachments.some(isVisual))
-      ids.add(message.replyTo.id);
+    for (const part of [
+      message,
+      includeReplies ? message?.replyTo : undefined,
+    ]) {
+      if (!part) continue;
+      for (const attachment of part.attachments) {
+        if (!isVisual(attachment)) continue;
+        let described = ids.get(part.id);
+        if (!described) ids.set(part.id, (described = new Set()));
+        if (attachment.kind === 'sticker' && attachment.description)
+          described.add(attachment.index);
+      }
+    }
   }
   const groups = new Set<number>();
-  return [...ids].flatMap((id) => {
+  return [...ids].flatMap(([id, described]) => {
     const items = findAttachments(store, chat, id, migratedFromChatId);
     const album = items[0]?.albumFirstSeq;
     const images = items.filter(
       ({ attachment }) =>
         isVisual(attachment) &&
+        !described.has(attachment.index) &&
         (attachment.fileId || hasLineStickerId(platformKind, attachment)),
     );
     if (album === undefined) return images;

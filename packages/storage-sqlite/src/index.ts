@@ -32,6 +32,7 @@ import type {
   SessionHistory,
   SessionMetric,
   SetupRun,
+  StickerDescription,
   Store,
   StoredGrant,
   StoredPreview,
@@ -98,6 +99,7 @@ import {
   sessionScope,
   setupRuns,
   setupSecrets,
+  stickerDescriptions,
   stickerFiles,
   stickerSets,
   taskEvents,
@@ -988,6 +990,56 @@ export class SqliteStore implements Store {
       .from(indexedStickers)
       .where(eq(indexedStickers.setName, name))
       .all();
+  }
+
+  getIndexedSticker(name: string, uniqueId: string) {
+    return this.#db
+      .select({
+        description: indexedStickers.description,
+        emoji: indexedStickers.emoji,
+      })
+      .from(indexedStickers)
+      .innerJoin(stickerSets, eq(stickerSets.name, indexedStickers.setName))
+      .where(
+        and(
+          eq(indexedStickers.setName, name),
+          eq(indexedStickers.uniqueId, uniqueId),
+          eq(stickerSets.blocked, false),
+        ),
+      )
+      .get();
+  }
+
+  getStickerDescription(platformKind: string, stickerId: string) {
+    const row = this.#db
+      .select()
+      .from(stickerDescriptions)
+      .where(
+        and(
+          eq(stickerDescriptions.platformKind, platformKind),
+          eq(stickerDescriptions.stickerId, stickerId),
+        ),
+      )
+      .get();
+    if (row)
+      return {
+        ...row,
+        emoji: row.emoji ?? undefined,
+        keywords: row.keywords ?? undefined,
+      };
+  }
+
+  saveStickerDescription(sticker: StickerDescription) {
+    this.#db
+      .insert(stickerDescriptions)
+      .values(sticker)
+      .onConflictDoNothing()
+      .run();
+  }
+
+  countStickerDescriptions() {
+    return this.#db.select({ count: count() }).from(stickerDescriptions).get()!
+      .count;
   }
 
   saveStickerSet(

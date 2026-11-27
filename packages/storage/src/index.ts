@@ -328,6 +328,16 @@ export interface IndexedSticker {
   uniqueId: string;
 }
 
+export interface StickerDescription {
+  createdAt: number;
+  description: string;
+  emoji?: string;
+  keywords?: string[];
+  model: string;
+  platformKind: string;
+  stickerId: string;
+}
+
 export interface StickerSetStatus {
   blocked: boolean;
   count: number;
@@ -452,6 +462,7 @@ export interface Store {
       >
     | undefined;
   countPendingApprovals(now: number): number;
+  countStickerDescriptions(): number;
   createApproval(approval: ApprovalRecord): void;
   createSchedule(schedule: ScheduleRecord, limit: number): boolean;
   createTask(task: TaskRecord): void;
@@ -488,6 +499,10 @@ export interface Store {
   getApproval(id: string): ApprovalRecord | undefined;
   getChat(ref: ChatRef): ChatRecord | undefined;
   getCursor(adapterId: string, stream: string): AdapterCursor | undefined;
+  getIndexedSticker(
+    name: string,
+    uniqueId: string,
+  ): Pick<IndexedSticker, 'description' | 'emoji'> | undefined;
   getMessage(
     ref: ChatRef,
     messageId: string,
@@ -503,6 +518,10 @@ export interface Store {
     model?: string,
   ): AgentSession | undefined;
   getSetupRun(id: string): SetupRun | undefined;
+  getStickerDescription(
+    platformKind: string,
+    stickerId: string,
+  ): StickerDescription | undefined;
   getStickerDescriptions(
     name: string,
   ): { description: string; uniqueId: string }[];
@@ -607,6 +626,7 @@ export interface Store {
   saveCursor(adapterId: string, stream: string, cursor: AdapterCursor): void;
   savePairingCode(adapterId: string, digest: string, expiresAt: number): void;
   saveSetupRun(run: SetupRun, lease: string): boolean;
+  saveStickerDescription(sticker: StickerDescription): void;
   saveStickerSet(
     name: string,
     botId: string,

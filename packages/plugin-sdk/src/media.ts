@@ -42,6 +42,7 @@ export interface MessageSender {
 }
 
 export interface AttachmentMetadata {
+  description?: string;
   emoji?: string;
   height?: number;
   index: number;

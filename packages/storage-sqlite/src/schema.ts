@@ -589,3 +589,17 @@ export const stickerFiles = sqliteTable(
     }).onDelete('cascade'),
   ],
 );
+
+export const stickerDescriptions = sqliteTable(
+  'sticker_descriptions',
+  {
+    platformKind: text('platform_kind').notNull(),
+    stickerId: text('sticker_id').notNull(),
+    description: text('description').notNull(),
+    emoji: text('emoji'),
+    keywords: text('keywords', { mode: 'json' }).$type<string[]>(),
+    model: text('model').notNull(),
+    createdAt: integer('created_at').notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.platformKind, table.stickerId] })],
+);

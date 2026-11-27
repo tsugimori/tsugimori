@@ -452,7 +452,7 @@ export class Gateway {
       },
       outbound: this.#outbound,
       runtime: this.#runtime,
-      stickerTools: (adapter) => this.#stickers.tools(adapter),
+      stickers: this.#stickers,
       log,
       tools: [
         ...registry.plugins.flatMap((plugin) => [...(plugin.tools ?? [])]),

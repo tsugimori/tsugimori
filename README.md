@@ -81,9 +81,10 @@ For Telegram and LINE, chat context includes attachment metadata and quoted
 messages when available. Agents can use `attachment.get` with a message ID and
 attachment index to download a file into the current chat workspace. Image
 downloads made with this tool are removed when the task ends. With `ffmpeg` on
-PATH, supported inbound images and Telegram stickers are also sent to the
-model from memory. LINE stickers include webhook metadata. The LINE content
-API serves attachments hosted by LINE.
+PATH, supported inbound images reach the model from memory. For LINE stickers
+and stickers from named Telegram sets, later turns use a cached English
+description when available. The agent can still load the original image with
+`attachment.get`. The LINE content API serves attachments hosted by LINE.
 
 Agents can send media in the current conversation using the tools supported by
 its platform. `send.image` and `send.file` accept a chat workspace path or
@@ -95,9 +96,10 @@ Telegram sticker sets are indexed in the background for `sticker.search`. The
 index stores file IDs and descriptions without retaining image grids. The
 default agent needs vision support and `ffmpeg` must be on PATH. Set
 `stickers.model` in `tsugimori.json` to select a low-cost vision model for
-that backend. By default the gateway uses the connector's economy model when
-available, then the default agent's configured model. LINE searches its bundled
-official sticker catalog.
+that backend. The same model describes uncached stickers after a chat task.
+By default the gateway uses the connector's economy model when available, then
+the default agent's configured model. LINE searches its bundled official
+sticker catalog.
 
 ## Chat commands
 
@@ -109,7 +111,7 @@ official sticker catalog.
 | `/model [name]`                                  | Owner                                                     | Shows the current model and its source, or sets a chat override. Use `default` to clear it.                 |
 | `/thinking [level]`                              | Owner                                                     | Shows or sets reasoning effort for this chat. Use `default` to clear the override.                          |
 | `/fast [on\|off\|default]`                       | Owner                                                     | Shows or sets speed on a supported agent. `off` selects standard speed and `default` clears the override.   |
-| `/sticker`                                       | Owner in DM                                               | Lists indexed Telegram sets and their sticker counts and block status.                                      |
+| `/sticker`                                       | Owner in DM                                               | Lists Telegram sets and block status, plus the number of cached single stickers.                            |
 | `/sticker block <set>`, `/sticker unblock <set>` | Owner                                                     | Blocks or unblocks a set for indexing and search across the workspace.                                      |
 | `/compact`                                       | Owner                                                     | Requests compaction of this chat's current agent session.                                                   |
 | `/allow`                                         | Owner                                                     | Lets members trigger the bot in this chat.                                                                  |

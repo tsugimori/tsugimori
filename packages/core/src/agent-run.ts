@@ -233,7 +233,7 @@ export async function runAgent(
         signal.throwIfAborted();
         if (next.done) {
           complete = true;
-          return { text: final ?? deltas, sessionId };
+          return { text: final ?? deltas, sessionId, resolvedModel };
         }
         if (approvalPending?.aborted) continue;
         const event = next.value;

@@ -29,7 +29,7 @@ export function describeStickerError(
   return describeTaskError(error, (text) =>
     redact(text)
       .replace(
-        /\bDescribe the first \d+ cells of this sticker sheet[^\r\n\u2028\u2029]*/u,
+        /\b(?:Describe the first \d+ cells of this sticker sheet|Describe this sticker in one short English line)[^\r\n\u2028\u2029]*/u,
         '[redacted prompt]',
       )
       .replace(

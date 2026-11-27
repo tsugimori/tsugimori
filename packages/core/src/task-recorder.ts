@@ -156,9 +156,17 @@ export class TaskRecorder {
               seq,
               trust: block.trust,
               revision,
-              // Album membership can change independently of this message's revision.
+              // Album membership and cached descriptions can change independently
+              // of this message's revision.
               ...(block.message &&
-                (block.message.albumId || block.message.replyTo?.albumId) && {
+                (block.message.albumId ||
+                  block.message.replyTo?.albumId ||
+                  block.message.attachments.some(
+                    ({ description }) => description,
+                  ) ||
+                  block.message.replyTo?.attachments.some(
+                    ({ description }) => description,
+                  )) && {
                   message: block.message,
                 }),
             });

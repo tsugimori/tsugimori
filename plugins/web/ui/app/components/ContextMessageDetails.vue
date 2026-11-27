@@ -47,6 +47,10 @@ const sections = computed(() =>
             }}</code>
             <span v-if="attachment.emoji">{{ attachment.emoji }}</span>
           </div>
+          <div v-if="attachment.description">
+            <strong>{{ t('Description', '描述') }}</strong>
+            {{ attachment.description }}
+          </div>
           <div v-if="attachment.keywords?.length" class="keywords">
             <strong>{{ t('Keywords', '關鍵字') }}</strong>
             {{ attachment.keywords.join(' · ') }}

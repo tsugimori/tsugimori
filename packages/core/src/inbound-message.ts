@@ -55,12 +55,25 @@ export function resolveReplyTarget(
   }
   if (!sender && quoted?.direction === 'outbound' && bot?.id)
     sender = { id: bot.id, name: bot.username };
+  const attachments = quoted?.metadata?.attachments?.map((attachment) => {
+    if (attachment.kind !== 'sticker' || attachment.stickerId)
+      return attachment;
+    const live = reply.attachments?.find(
+      (item) =>
+        item.kind === 'sticker' &&
+        item.index === attachment.index &&
+        item.set === attachment.set,
+    );
+    return live?.stickerId
+      ? { ...attachment, stickerId: live.stickerId }
+      : attachment;
+  });
   return {
     replyTo: {
       ...reply,
       sender,
       text: quoted?.text ?? reply.text,
-      attachments: quoted?.metadata?.attachments ?? reply.attachments,
+      attachments: attachments ?? reply.attachments,
       albumId: quoted?.albumId ?? reply.albumId,
     },
   };

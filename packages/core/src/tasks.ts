@@ -5,10 +5,12 @@ import type {
   AgentImage,
   AgentRequest,
   ApprovalRequest,
+  AttachmentMetadata,
   ChatRef,
   ContextBlock,
   ExecBackend,
   ExecScope,
+  InboundAttachment,
   InboundMessage,
   OutboundMessage,
   PlatformAdapter,
@@ -43,6 +45,7 @@ import { isDeepStrictEqual } from 'node:util';
 import type { HookRunner, Logger } from './hooks.ts';
 import type { MemoryResult } from './memory.ts';
 import type { Runtime } from './runtime.ts';
+import type { StickerIndex } from './stickers.ts';
 import type { BackgroundSummaries } from './summary.ts';
 import type { TaskInput } from './supplements.ts';
 import type { ToolDetail, ToolDetails } from './tool-details.ts';
@@ -76,7 +79,7 @@ interface TaskDependencies {
   outbound: Outbound;
   runtime: Runtime;
   scope(workdir: string): ExecScope;
-  stickerTools(adapter: PlatformAdapter): readonly ToolDefinition[];
+  stickers: StickerIndex;
   store: Store;
   summarize: BackgroundSummaries['enqueue'];
   toolDetails: ToolDetails;
@@ -106,6 +109,7 @@ type Work = {
   sessionScopeChatId?: string | null;
   sessionScopeModel?: string;
   sessionValid: boolean;
+  stickerCandidates?: InboundAttachment[];
   supplements: Supplements;
   temporaryAttachments: Set<string>;
   workdir?: string;
@@ -376,6 +380,8 @@ export class Tasks {
         this.#running.delete(key);
         this.#work.delete(work);
         if (this.#queues.get(key) === tail) this.#queues.delete(key);
+        if (!work.abort.signal.aborted && work.stickerCandidates?.length)
+          this.#deps.stickers.observeSingles(adapter, work.stickerCandidates);
       });
     this.#queues.set(key, tail);
     if (input.scheduled) return tail.then(() => store.getTask(work.id)?.status);
@@ -828,7 +834,7 @@ export class Tasks {
           !name.startsWith('exec.') || Boolean(this.#deps.backend()),
       ),
       ...(adapter.tools?.() ?? []),
-      ...this.#deps.stickerTools(adapter),
+      ...this.#deps.stickers.tools(adapter),
       ...(sendAllowed
         ? sendTools(
             { ...this.#deps, workdir: (chat) => context.workdir(chat) },
@@ -963,11 +969,26 @@ export class Tasks {
     settings: Pick<AgentRequest, 'model' | 'serviceTier' | 'thinking'>,
     recorder: TaskRecorder,
   ) {
-    const { store, auth, context, runtime, trace, hooks } = this.#deps;
+    const { store, auth, context, runtime, trace, hooks, stickers } =
+      this.#deps;
     const { chat, input, id, abort, supplements, adapter } = work;
     const { signal } = abort;
     const approvalPending = work.endForApproval.signal;
     const { model } = settings;
+    const collectStickers = (message: InboundMessage) => {
+      if (input.scheduled || !adapter.downloadAttachment) return;
+      for (const attachments of [
+        message.attachments,
+        message.replyTo?.attachments,
+      ])
+        for (const attachment of attachments ?? [])
+          if (attachment.kind === 'sticker')
+            (work.stickerCandidates ??= []).push(attachment);
+    };
+    collectStickers(input.message);
+    const describe = <T extends AttachmentMetadata>(
+      attachments: readonly T[],
+    ) => stickers.describe(adapter, attachments);
     const task: ToolContext = {
       chat,
       signal,
@@ -1057,6 +1078,13 @@ export class Tasks {
                 'Return the scheduled response without textual mentions. The platform adds any approved recipients separately.',
             },
           });
+        for (const { block } of entries) {
+          const { message } = block;
+          if (!message) continue;
+          message.attachments = describe(message.attachments);
+          if (message.replyTo)
+            message.replyTo.attachments = describe(message.replyTo.attachments);
+        }
         await recorder.context(entries);
         const workdir = await context.workdir(chat);
         await prepareWorkspace(workdir, !runtime.disabled('workspace.record'));
@@ -1077,6 +1105,19 @@ export class Tasks {
     let blocks = assembled.blocks;
     let sessionId = session?.sessionId;
     const answers: string[] = [];
+    const describeSupplement = (message: InboundMessage) => {
+      collectStickers(message);
+      return {
+        ...message,
+        attachments: message.attachments && describe(message.attachments),
+        replyTo: message.replyTo && {
+          ...message.replyTo,
+          attachments:
+            message.replyTo.attachments &&
+            describe(message.replyTo.attachments),
+        },
+      };
+    };
     const supplementBlock = (message: InboundMessage): ContextBlock => ({
       source: 'message',
       trust: auth.isOwner({ adapterId: chat.adapterId, userId: message.userId })
@@ -1208,9 +1249,14 @@ export class Tasks {
               }
               return result === true;
             },
-            supplements: supplements.stream(passSignal, (message) =>
-              recorder.supplement(message.messageId, supplementBlock(message)),
-            ),
+            supplements: supplements.stream(passSignal, (message) => {
+              const described = describeSupplement(message);
+              recorder.supplement(
+                message.messageId,
+                supplementBlock(described),
+              );
+              return described;
+            }),
           },
         );
         if (result.text.trim()) answers.push(result.text);
@@ -1230,7 +1276,7 @@ export class Tasks {
         break;
       }
       blocks = next.map(({ message }) => {
-        const block = supplementBlock(message);
+        const block = supplementBlock(describeSupplement(message));
         recorder.supplement(message.messageId, block);
         return block;
       });

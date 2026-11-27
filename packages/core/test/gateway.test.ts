@@ -38,6 +38,7 @@ import type { Logger } from '../src/index.ts';
 
 import { LineApi } from '../../../plugins/platform-line/src/api.ts';
 import { mapEvent } from '../../../plugins/platform-line/src/updates.ts';
+import { telegramAttachments } from '../../../plugins/platform-telegram/src/inbound-media.ts';
 import { sessionScope } from '../src/agent-run.ts';
 import {
   decideTrigger,
@@ -262,7 +263,15 @@ async function fixture(
         platforms:
           options.platform === false
             ? []
-            : [{ id: adapterId, kind: platformKind }],
+            : [
+                {
+                  id: adapterId,
+                  kind: platformKind,
+                  ...(platformKind === 'telegram' && {
+                    tokenEnv: 'FIXTURE_TELEGRAM_TOKEN',
+                  }),
+                },
+              ],
         agents: enabled
           ? (options.agents ?? [
               {
@@ -4719,137 +4728,428 @@ test('renders an old quoted file and downloads only attachments in the current c
   );
 });
 
-test('LINE sticker PNGs reach the agent and CDN failures leave the keywords', async (t) => {
-  if (spawnSync('ffmpeg', ['-version']).status !== 0) {
-    t.skip('ffmpeg is unavailable on PATH');
-    return;
-  }
-  const png = execFileSync('ffmpeg', [
-    '-loglevel',
-    'error',
-    '-f',
-    'lavfi',
-    '-i',
-    'color=red:s=80x40',
-    '-frames:v',
-    '1',
-    '-threads',
-    '1',
-    '-c:v',
-    'png',
-    '-f',
-    'image2pipe',
-    'pipe:1',
-  ]);
-  const downloads: string[] = [];
-  const api = new LineApi(async (input) => {
-    const path = new URL(String(input)).pathname;
-    downloads.push(path);
-    return path.includes('/12/')
-      ? new Response(null, { status: 503 })
-      : new Response(new Uint8Array(png), {
-          headers: { 'Content-Type': 'image/png' },
-        });
-  }, 'fixture');
-  const requests: AgentRequest[] = [];
-  const f = await fixture(
-    t,
-    async function* (request) {
-      requests.push(request);
-      if (requests.length === 3) {
-        const tool = request.tools.find(
-          ({ name }) => name === 'attachment.get',
-        );
-        assert.ok(tool);
-        const saved = (await tool.run({ messageId: 'legacy', index: 0 })) as {
-          mime: string;
-          path: string;
-        };
-        assert.equal(saved.mime, 'image/png');
-        assert.deepEqual(await readFile(saved.path), png);
-      }
-      yield { type: 'text.final', text: 'Sticker received' };
-    },
-    true,
-    {
-      context: { recentMessages: 1, summary: { enabled: false } },
-      downloadAttachment: api.downloadAttachment.bind(api),
-      imageLimits: { maxBytes: 1024, maxEdge: 40, sourceMaxBytes: 1024 },
-      platformKind: 'line',
-    },
-  );
-  async function emitLine(message: Record<string, unknown>) {
-    const mapped = mapEvent(
-      {
-        type: 'message',
-        source: { type: 'user', userId: 'owner' },
-        message,
+test(
+  'LINE stickers use cached descriptions for later messages and replies',
+  { timeout: 10_000 },
+  async (t) => {
+    if (spawnSync('ffmpeg', ['-version']).status !== 0) {
+      t.skip('ffmpeg is unavailable on PATH');
+      return;
+    }
+    const png = execFileSync('ffmpeg', [
+      '-loglevel',
+      'error',
+      '-f',
+      'lavfi',
+      '-i',
+      'color=red:s=80x40',
+      '-frames:v',
+      '1',
+      '-threads',
+      '1',
+      '-c:v',
+      'png',
+      '-f',
+      'image2pipe',
+      'pipe:1',
+    ]);
+    const downloads: string[] = [];
+    let available = true;
+    const api = new LineApi(async (input) => {
+      const path = new URL(String(input)).pathname;
+      downloads.push(path);
+      return path.includes('/12/') || (!available && path.includes('/11/'))
+        ? new Response(null, { status: 503 })
+        : new Response(new Uint8Array(png), {
+            headers: { 'Content-Type': 'image/png' },
+          });
+    }, 'fixture');
+    const requests: AgentRequest[] = [];
+    const description = 'A happy red character waves.';
+    const f = await fixture(
+      t,
+      async function* (request) {
+        if (request.purpose === 'sticker-index') {
+          assert.equal(request.model, 'sticker-model');
+          assert.equal(request.thinking, 'low');
+          assert.deepEqual(request.tools, []);
+          assert.equal(request.images?.[0]?.mime, 'image/png');
+          assert.match(request.context[0]!.content, /do not transcribe/);
+          assert.doesNotMatch(
+            JSON.stringify(request.context),
+            /happy|legacy|owner/,
+          );
+          yield { type: 'model', model: 'resolved-sticker-model' };
+          yield { type: 'text.final', text: description };
+          return;
+        }
+        requests.push(request);
+        const current = request.context.findLast(
+          ({ message }) => message,
+        )?.message;
+        if (current?.id === 'quote' || current?.id === 'quote-cached') {
+          const tool = request.tools.find(
+            ({ name }) => name === 'attachment.get',
+          );
+          assert.ok(tool);
+          const saved = (await tool.run({
+            messageId: current.replyTo?.id,
+            index: 0,
+          })) as {
+            mime: string;
+            path: string;
+          };
+          assert.equal(saved.mime, 'image/png');
+          assert.deepEqual(await readFile(saved.path), png);
+        }
+        yield { type: 'text.final', text: 'Sticker received' };
       },
-      { emit: f.platform.emit },
+      true,
+      {
+        context: { recentMessages: 1, summary: { enabled: false } },
+        downloadAttachment: api.downloadAttachment.bind(api),
+        imageLimits: { maxBytes: 1024, maxEdge: 40, sourceMaxBytes: 1024 },
+        platformKind: 'line',
+        stickers: { model: 'sticker-model' },
+        thinkingLevels: async () => ['low', 'high'],
+      },
     );
-    assert.ok(mapped);
-    await f.platform.emit({ ...mapped.inbound, chatId: chat.chatId });
-    await f.gateway.idle();
-  }
-  await emitLine({
-    type: 'sticker',
-    id: 'available',
-    stickerId: '11',
-    stickerResourceType: 'ANIMATION',
-    keywords: ['happy'],
-  });
-  await emitLine({
-    type: 'sticker',
-    id: 'unavailable',
-    stickerId: '12',
-    keywords: ['sparkle'],
-  });
-  await f.platform.emit(
-    inbound('legacy', '[sticker]', {
-      userId: 'member',
-      attachments: [
-        { kind: 'sticker', index: 0, stickerId: '13', keywords: ['hello'] },
-      ],
-    }),
-  );
-  await emitLine({
-    type: 'text',
-    id: 'quote',
-    text: 'What is this?',
-    quotedMessageId: 'legacy',
-  });
+    async function emitLine(message: Record<string, unknown>) {
+      const mapped = mapEvent(
+        {
+          type: 'message',
+          source: { type: 'user', userId: 'owner' },
+          message,
+        },
+        { emit: f.platform.emit },
+      );
+      assert.ok(mapped);
+      await f.platform.emit({ ...mapped.inbound, chatId: chat.chatId });
+      await f.gateway.idle();
+    }
+    await emitLine({
+      type: 'sticker',
+      id: 'available',
+      stickerId: '11',
+      stickerResourceType: 'ANIMATION',
+      keywords: ['happy'],
+    });
+    await until(t, () => Boolean(f.store.getStickerDescription('line', '11')));
+    assert.deepEqual(f.store.getStickerDescription('line', '11'), {
+      platformKind: 'line',
+      stickerId: '11',
+      description,
+      keywords: ['happy'],
+      emoji: undefined,
+      model: 'resolved-sticker-model',
+      createdAt: f.store.getStickerDescription('line', '11')!.createdAt,
+    });
+    available = false;
+    await emitLine({ type: 'sticker', id: 'again', stickerId: '11' });
+    assert.equal(requests[1]?.images, undefined);
+    const cached = requests[1]?.context.find(
+      ({ message }) => message?.id === 'again',
+    );
+    assert.equal(cached?.message?.attachments[0]?.description, description);
+    assert.deepEqual(cached?.message?.attachments[0]?.keywords, ['happy']);
+    assert.equal(downloads.length, 2);
+    const againTask = f.store
+      .listChatTasks(chat)
+      .find(({ sourceMessageId }) => sourceMessageId === 'again');
+    assert.ok(againTask);
+    const execution = await f.gateway.admin.task(againTask.id);
+    assert.equal(
+      execution?.input?.[0]?.message?.attachments[0]?.description,
+      description,
+    );
 
-  assert.deepEqual(
-    f.platform.sent.map(({ text }) => text),
-    Array(3).fill('Sticker received'),
-  );
-  for (const [index, messageId] of [
-    [0, 'available'],
-    [2, 'legacy'],
-  ] as const) {
-    const images = requests[index]?.images;
-    assert.equal(images?.length, 1);
-    assert.equal(images[0]?.mime, 'image/png');
-    assert.deepEqual(images[0]?.source, { messageId, index: 0 });
-    const resized = Buffer.from(images[0]!.data, 'base64');
-    assert.equal(resized.subarray(0, 8).toString('hex'), '89504e470d0a1a0a');
-    assert.equal(resized.readUInt32BE(16), 40);
-    assert.equal(resized.readUInt32BE(20), 20);
-  }
-  assert.equal(requests[1]?.images?.length ?? 0, 0);
-  const fallback = requests[1]?.context.find(
-    ({ message }) => message?.id === 'unavailable',
-  );
-  assert.equal(fallback?.content, '[sticker]');
-  assert.deepEqual(fallback.message?.attachments[0]?.keywords, ['sparkle']);
-  assert.ok(f.logs.some(({ event }) => event === 'media.prepare_failed'));
-  assert.deepEqual(
-    downloads,
-    [11, 12, 13, 13].map(
-      (id) => `/stickershop/v1/sticker/${id}/android/sticker.png`,
-    ),
-  );
-});
+    available = true;
+    await emitLine({
+      type: 'text',
+      id: 'quote-cached',
+      text: 'Describe this sticker in detail',
+      quotedMessageId: 'available',
+    });
+    assert.equal(requests[2]?.images, undefined);
+    const quoted = requests[2]?.context.find(
+      ({ message }) => message?.id === 'quote-cached',
+    );
+    assert.equal(
+      quoted?.message?.replyTo?.attachments[0]?.description,
+      description,
+    );
+    await emitLine({
+      type: 'sticker',
+      id: 'unavailable',
+      stickerId: '12',
+      keywords: ['sparkle'],
+    });
+    await f.platform.emit(
+      inbound('legacy', '[sticker]', {
+        userId: 'member',
+        attachments: [
+          { kind: 'sticker', index: 0, stickerId: '13', keywords: ['hello'] },
+        ],
+      }),
+    );
+    await emitLine({
+      type: 'text',
+      id: 'quote',
+      text: 'What is this?',
+      quotedMessageId: 'legacy',
+    });
+
+    assert.deepEqual(
+      f.platform.sent.map(({ text }) => text),
+      Array(5).fill('Sticker received'),
+    );
+    for (const [index, messageId] of [
+      [0, 'available'],
+      [4, 'legacy'],
+    ] as const) {
+      const images = requests[index]?.images;
+      assert.equal(images?.length, 1);
+      assert.equal(images[0]?.mime, 'image/png');
+      assert.deepEqual(images[0]?.source, { messageId, index: 0 });
+      const resized = Buffer.from(images[0]!.data, 'base64');
+      assert.equal(resized.subarray(0, 8).toString('hex'), '89504e470d0a1a0a');
+      assert.equal(resized.readUInt32BE(16), 40);
+      assert.equal(resized.readUInt32BE(20), 20);
+    }
+    assert.equal(requests[3]?.images?.length ?? 0, 0);
+    const fallback = requests[3]?.context.find(
+      ({ message }) => message?.id === 'unavailable',
+    );
+    assert.equal(fallback?.content, '[sticker]');
+    assert.deepEqual(fallback.message?.attachments[0]?.keywords, ['sparkle']);
+    assert.ok(f.logs.some(({ event }) => event === 'media.prepare_failed'));
+    await until(t, () => Boolean(f.store.getStickerDescription('line', '13')));
+    assert.deepEqual(
+      downloads.toSorted(),
+      [11, 11, 11, 12, 12, 13, 13, 13].map(
+        (id) => `/stickershop/v1/sticker/${id}/android/sticker.png`,
+      ),
+    );
+    await f.platform.emit(inbound('cache-count', '/sticker'));
+    assert.match(f.platform.sent.at(-1)!.text, /Cached single stickers · 2/);
+  },
+);
+
+const staticStickerPng = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jL1sAAAAASUVORK5CYII=',
+  'base64',
+);
+
+test(
+  'single-sticker jobs wait for the task, deduplicate across chats and back off for ten minutes',
+  { timeout: 10_000 },
+  async (t) => {
+    if (spawnSync('ffmpeg', ['-version']).status !== 0) {
+      t.skip('ffmpeg is unavailable');
+      return;
+    }
+    t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+    const finishTask = Promise.withResolvers<void>();
+    const failDescription = Promise.withResolvers<void>();
+    const requests: AgentRequest[] = [];
+    let descriptions = 0;
+    const f = await fixture(
+      t,
+      async function* (request) {
+        if (request.purpose === 'sticker-index') {
+          if (++descriptions === 1) {
+            await failDescription.promise;
+            throw new Error('Temporary description failure');
+          }
+          yield { type: 'text.final', text: 'A smiling sticker.' };
+          return;
+        }
+        requests.push(request);
+        if (requests.length === 1) await finishTask.promise;
+        yield { type: 'text.final', text: 'Done' };
+      },
+      true,
+      {
+        context: { recentMessages: 1, summary: { enabled: false } },
+        downloadAttachment: async () => ({
+          bytes: staticStickerPng,
+          mime: 'image/png',
+        }),
+        imageLimits: { maxBytes: 1024, maxEdge: 64 },
+        platformKind: 'line',
+      },
+    );
+    t.after(() => {
+      finishTask.resolve();
+      failDescription.resolve();
+    });
+    const send = (messageId: string, chatId = chat.chatId) =>
+      f.platform.emit(
+        inbound(messageId, '', {
+          chatId,
+          attachments: [{ kind: 'sticker', index: 0, stickerId: '123' }],
+        }),
+      );
+    await send('first');
+    await until(t, () => requests.length === 1);
+    assert.equal(requests[0]?.images?.length, 1);
+    assert.equal(descriptions, 0);
+    assert.equal(f.platform.sent.length, 0);
+    finishTask.resolve();
+    await until(t, () => descriptions === 1);
+    assert.equal(f.platform.sent.length, 1);
+    await send('concurrent', 'another-chat');
+    await f.gateway.idle();
+    assert.equal(requests[1]?.images?.length, 1);
+    assert.equal(descriptions, 1);
+    failDescription.resolve();
+    await until(t, () =>
+      f.logs.some(({ event }) => event === 'sticker.index_failed'),
+    );
+    assert.equal(f.store.countStickerDescriptions(), 0);
+
+    t.mock.timers.tick(10 * 60_000 - 1);
+    await send('during-backoff');
+    await f.gateway.idle();
+    assert.equal(requests[2]?.images?.length, 1);
+    await setImmediate();
+    assert.equal(descriptions, 1);
+    t.mock.timers.tick(1);
+    await send('after-backoff');
+    await until(t, () => f.store.countStickerDescriptions() === 1);
+    assert.equal(requests[3]?.images?.length, 1);
+    assert.equal(descriptions, 2);
+  },
+);
+
+test(
+  'Telegram uses the set description by unique ID and lets blocked sets fall back to images',
+  { timeout: 10_000 },
+  async (t) => {
+    if (spawnSync('ffmpeg', ['-version']).status !== 0) {
+      t.skip('ffmpeg is unavailable');
+      return;
+    }
+    const requests: AgentRequest[] = [];
+    const downloads: string[] = [];
+    const f = await fixture(
+      t,
+      async function* (request) {
+        if (request.purpose === 'sticker-index') {
+          assert.match(request.context[0]!.content, /^Describe this sticker/);
+          yield { type: 'text.final', text: 'A smiling dog jumps.' };
+          return;
+        }
+        requests.push(request);
+        yield { type: 'text.final', text: 'Done' };
+      },
+      true,
+      {
+        context: { recentMessages: 1, summary: { enabled: false } },
+        downloadAttachment: async (attachment) => {
+          downloads.push(attachment.fileId!);
+          return { bytes: staticStickerPng, mime: 'image/png' };
+        },
+        imageLimits: { maxBytes: 1024, maxEdge: 64 },
+        platformKind: 'telegram',
+      },
+    );
+    f.store.saveStickerSet('sticker_set', 'different-bot', chat, [
+      {
+        description: 'A cat waves.',
+        emoji: '🐈',
+        fileId: 'old-file',
+        format: 'static',
+        uniqueId: 'stable-sticker-id',
+      },
+    ]);
+    const attachments = telegramAttachments({
+      sticker: {
+        file_id: 'new-file',
+        file_unique_id: 'stable-sticker-id',
+        set_name: 'Sticker_Set',
+      },
+    });
+    await f.platform.emit(inbound('indexed', '', { attachments }));
+    await f.gateway.idle();
+    assert.equal(requests[0]?.images, undefined);
+    assert.equal(downloads.length, 0);
+    const indexed = requests[0]?.context.find(
+      ({ message }) => message?.id === 'indexed',
+    );
+    assert.equal(indexed?.message?.attachments[0]?.description, 'A cat waves.');
+    assert.equal(indexed?.message?.attachments[0]?.emoji, '🐈');
+
+    await f.platform.emit(
+      inbound('old', '', {
+        chatKind: 'group',
+        userId: 'member',
+        attachments: attachments.map((attachment) => ({
+          ...attachment,
+          stickerId: undefined,
+        })),
+      }),
+    );
+    await f.platform.emit(
+      inbound('reply', 'What does it look like?', {
+        replyTo: { id: 'old', attachments },
+      }),
+    );
+    await f.gateway.idle();
+    assert.equal(requests[1]?.images, undefined);
+    const reply = requests[1]?.context.find(
+      ({ message }) => message?.id === 'reply',
+    );
+    assert.equal(
+      reply?.message?.replyTo?.attachments[0]?.description,
+      'A cat waves.',
+    );
+    assert.equal(downloads.length, 0);
+
+    f.store.setStickerSetBlocked('sticker_set', true);
+    await f.platform.emit(inbound('blocked', '', { attachments }));
+    await f.gateway.idle();
+    assert.equal(requests[2]?.images?.length, 1);
+    const blocked = requests[2]?.context.find(
+      ({ message }) => message?.id === 'blocked',
+    );
+    assert.equal(blocked?.message?.attachments[0]?.description, undefined);
+    assert.deepEqual(downloads, ['new-file']);
+    assert.equal(f.store.countStickerDescriptions(), 0);
+
+    f.platform.platform.getStickerSet = async () => {
+      throw new Error('Sticker set unavailable');
+    };
+    const fallback = telegramAttachments({
+      sticker: {
+        file_id: 'fallback-file',
+        file_unique_id: 'fallback-id',
+        set_name: 'Unavailable_Set',
+      },
+    });
+    await f.platform.emit(
+      inbound('missing-set', '', { attachments: fallback }),
+    );
+    await f.gateway.idle();
+    assert.equal(requests[3]?.images?.length, 1);
+    await until(t, () =>
+      Boolean(f.store.getStickerDescription('telegram', 'fallback-id')),
+    );
+    await f.platform.emit(
+      inbound('missing-set-again', '', { attachments: fallback }),
+    );
+    await f.gateway.idle();
+    assert.equal(requests[4]?.images, undefined);
+    const cached = requests[4]?.context.find(
+      ({ message }) => message?.id === 'missing-set-again',
+    );
+    assert.equal(
+      cached?.message?.attachments[0]?.description,
+      'A smiling dog jumps.',
+    );
+    assert.deepEqual(downloads, ['new-file', 'fallback-file', 'fallback-file']);
+  },
+);
 
 test('offers the first four album images once and removes explicitly downloaded images', async (t) => {
   if (spawnSync('ffmpeg', ['-version']).status !== 0) {
@@ -5371,10 +5671,7 @@ test(
       return;
     }
     t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
-    const bytes = Buffer.from(
-      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jL1sAAAAASUVORK5CYII=',
-      'base64',
-    );
+    const bytes = staticStickerPng;
     const errorMessage = 'Sticker model rejected the request';
     let modelCalls = 0;
     const f = await fixture(

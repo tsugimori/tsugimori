@@ -88,6 +88,7 @@ function stickerAttachment(
       emoji: string(sticker.emoji),
       set: string(sticker.set_name),
       stickerFormat,
+      stickerId: string(sticker.file_unique_id),
     };
 }
 
