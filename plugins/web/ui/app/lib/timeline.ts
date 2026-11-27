@@ -1,4 +1,11 @@
-import type { AdminTask, AdminToolCall } from '@tsugimori/plugin-sdk';
+import type {
+  AdminModelGap,
+  AdminTask,
+  AdminToolCall,
+  TaskEvent,
+} from '@tsugimori/plugin-sdk';
+
+import { statusStyle } from './display.ts';
 
 export function callAnchor(taskId: string, seq: number) {
   return 'call-' + (seq >= 0 ? seq : `${taskId}-${-seq}`);
@@ -14,35 +21,59 @@ export function toolOffset(ms: number) {
 export function taskLanes(task: AdminTask, start: number, end: number) {
   const wall = Math.max(0, end - start);
   const clamp = (at: number) => Math.min(wall, Math.max(0, at - start));
-  const tools = task.tools
-    .map((tool) => ({
-      tool,
-      from: clamp(tool.startedAt),
-      to: clamp(tool.endedAt ?? end),
-    }))
-    .sort((a, b) => a.from - b.from);
-  const model: { from: number; to: number }[] = [];
-  let lastEnd = 0;
-  for (const { from, to } of tools) {
-    if (to <= from) continue;
-    if (from > lastEnd) model.push({ from: lastEnd, to: from });
-    lastEnd = Math.max(lastEnd, to);
-  }
-  if (lastEnd < wall) model.push({ from: lastEnd, to: wall });
-
   function percent(ms: number) {
     return wall ? (ms * 100) / wall : 0;
   }
-  function position({ from, to }: { from: number; to: number }) {
-    return { left: percent(from), width: percent(Math.max(0, to - from)) };
+  function position(startedAt: number, endedAt: number) {
+    const from = clamp(startedAt);
+    return {
+      at: percent(from),
+      width: percent(Math.max(0, clamp(endedAt) - from)),
+    };
   }
   return {
-    model: model.map(position),
-    tools: tools.map((interval) => ({
-      tool: interval.tool,
-      ...position(interval),
+    model: (task.agentTiming?.modelGaps ?? []).map(
+      ({ startedAt, endedAt }) => ({
+        ...position(startedAt, endedAt),
+        tone: 'model',
+      }),
+    ),
+    tools: task.tools.map((tool) => ({
+      ...position(tool.startedAt, tool.endedAt ?? end),
+      tone: statusStyle(toolStatus(tool))[0],
     })),
   };
+}
+
+export function modelGapsByEvent(
+  gaps: readonly AdminModelGap[],
+  events: readonly TaskEvent[],
+) {
+  const tools = new Map(
+    events.flatMap((event) =>
+      event.kind === 'tool' ? [[event.data.toolSeq, event] as const] : [],
+    ),
+  );
+  const texts = events.filter(({ kind }) => kind === 'text');
+  const rows = new Map<number | undefined, AdminModelGap[]>();
+  for (const gap of gaps) {
+    const lastText =
+      gap.nextToolSeq === undefined
+        ? texts.findLast(({ at }) => at >= gap.startedAt && at <= gap.endedAt)
+        : undefined;
+    const event =
+      (gap.nextToolSeq === undefined
+        ? undefined
+        : tools.get(gap.nextToolSeq)) ??
+      // Long replies can span several recorded text chunks at the same time.
+      (lastText && texts.find(({ at }) => at === lastText.at)) ??
+      events.find(({ at, kind }) => at >= gap.endedAt && kind !== 'reasoning');
+    const key = event?.seq;
+    const group = rows.get(key);
+    if (group) group.push(gap);
+    else rows.set(key, [gap]);
+  }
+  return rows;
 }
 
 export function toolStatus(tool: AdminToolCall) {

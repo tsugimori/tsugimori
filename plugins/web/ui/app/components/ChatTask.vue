@@ -5,7 +5,7 @@ import { ChevronRight } from '@lucide/vue';
 
 import { statusStyle, tokenPair, taskHref } from '../lib/display.ts';
 import { duration } from '../lib/format.ts';
-import { taskLanes, toolStatus } from '../lib/timeline.ts';
+import { taskLanes } from '../lib/timeline.ts';
 
 // Render a native button even when PrimeVue registers Button globally.
 const TaskHeader = defineComponent({
@@ -107,24 +107,12 @@ function toggle() {
         >{{ t('Task details', '任務詳情') }} →</NuxtLink
       >
     </div>
-    <div v-if="task.tools.length" class="chat-lane">
-      <div v-if="expanded" class="timing-lane">
-        <span>{{ m.modelLane }}</span><TimingTrack
-          :segments="
-            lanes.model.map(({ left, width }) => ({ at: left, width }))
-          "
-        />
+    <div v-if="lanes.model.length || lanes.tools.length" class="chat-lane">
+      <div v-if="lanes.model.length" class="timing-lane">
+        <span>{{ m.modelLane }}</span><TimingTrack :segments="lanes.model" />
       </div>
-      <div class="timing-lane">
-        <span>{{ m.toolLane }}</span><TimingTrack
-          :segments="
-            lanes.tools.map(({ left, width, tool }) => ({
-              at: left,
-              width,
-              tone: statusStyle(toolStatus(tool))[0],
-            }))
-          "
-        />
+      <div v-if="lanes.tools.length" class="timing-lane">
+        <span>{{ m.toolLane }}</span><TimingTrack :segments="lanes.tools" />
       </div>
     </div>
     <div :id="'task-body-' + task.id" class="chat-task-body">

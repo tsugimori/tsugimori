@@ -637,3 +637,59 @@ test('lists task summaries with indexed filters and stable pagination on timesta
   assert.equal(first[2]?.triggerText, null);
   assert.equal(first[2]?.triggerReason, null);
 });
+
+test('task sort cursors preserve ties and the unfinished partition', (t) => {
+  const store = new SqliteStore(':memory:');
+  t.after(() => store.close());
+  const platforms = new Map<string, string>();
+  for (const [id, createdAt, startedAt, finishedAt] of [
+    ['short', 3000, 3010, 3020],
+    ['running-z', 4000, 4010, null],
+    ['running-a', 4000, 4010, null],
+    ['tie-z', 2000, 2100, 2200],
+    ['tie-a', 2000, 2100, 2200],
+    ['fallback', 1000, null, 1300],
+  ] as const) {
+    store.createTask({
+      adapterId: 'tg:main',
+      chatId: 'group',
+      id,
+      createdAt,
+      startedAt,
+      finishedAt,
+      status: finishedAt === null ? 'running' : 'completed',
+      agentId: null,
+      sourceMessageId: 'first',
+      model: null,
+    });
+  }
+  const newest = [
+    'running-z',
+    'running-a',
+    'short',
+    'tie-z',
+    'tie-a',
+    'fallback',
+  ];
+  const orders = {
+    newest,
+    oldest: [...newest].reverse(),
+    duration: ['fallback', 'tie-z', 'tie-a', 'short', 'running-z', 'running-a'],
+  };
+  for (const sort of ['newest', 'oldest', 'duration'] as const) {
+    let cursor: Parameters<SqliteStore['adminTasks']>[0]['cursor'];
+    for (const [index, id] of orders[sort].entries()) {
+      const rows = store.adminTasks({ limit: 1, sort, cursor }, platforms);
+      const row = rows[0]!;
+      assert.equal(row.id, id, sort);
+      if (id === 'fallback') assert.equal(row.durationMs, 300);
+      assert.equal(rows.length, index === newest.length - 1 ? 1 : 2);
+      const { createdAt, durationMs } = row;
+      cursor = { createdAt, durationMs, id };
+    }
+    assert.deepEqual(
+      store.adminTasks({ limit: 1, sort, cursor }, platforms),
+      [],
+    );
+  }
+});

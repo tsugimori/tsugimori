@@ -9,6 +9,8 @@ import type {
   AdminSchedules,
   AdminTask,
   AdminTaskRecord,
+  AdminTaskSort,
+  AdminTaskSummary,
   AdminTrace,
   AdminWorkspace,
 } from '@tsugimori/plugin-sdk';
@@ -641,38 +643,63 @@ const chatKey = ({
   adapterId: string;
   chatId: string;
 }) => JSON.stringify([adapterId, chatId]);
-const summaries = allTasks
-  .map((current, index) => {
-    const room =
-      allChats.find((room) => chatKey(room) === chatKey(current)) ?? chat;
-    const source = mainConversation.messages.find(
-      ({ seq }) => seq === current.sourceSeq,
-    );
-    const { tools, ...fields } = current;
-    return {
-      ...fields,
-      chatKey: chatKey(current),
-      chatTitle: room.title ?? room.chatId,
-      platform: room.platform,
-      durationMs:
-        current.finishedAt === null || current.startedAt === null
-          ? null
-          : current.finishedAt - current.startedAt,
-      error: current.error ?? null,
-      inputTokens: current.inputTokens ?? null,
-      outputTokens: current.outputTokens ?? null,
-      silent: current.silent ?? false,
-      toolCount: tools.length,
-      triggerReason:
-        index % 3 === 0
-          ? ('mention' as const)
-          : index % 3 === 1
-            ? ('reply-to-bot' as const)
-            : ('dm-owner' as const),
-      triggerText: source?.text ?? room.preview?.text ?? null,
-    };
-  })
-  .sort((a, b) => b.createdAt - a.createdAt || b.id.localeCompare(a.id));
+const summaries = allTasks.map((current, index): AdminTaskSummary => {
+  const room =
+    allChats.find((room) => chatKey(room) === chatKey(current)) ?? chat;
+  const source = mainConversation.messages.find(
+    ({ seq }) => seq === current.sourceSeq,
+  );
+  return {
+    adapterId: current.adapterId,
+    chatId: current.chatId,
+    id: current.id,
+    agentId: current.agentId,
+    model: current.model,
+    status: current.status,
+    createdAt: current.createdAt,
+    startedAt: current.startedAt,
+    finishedAt: current.finishedAt,
+    chatKey: chatKey(current),
+    chatTitle: room.title ?? room.chatId,
+    platform: room.platform,
+    durationMs:
+      current.finishedAt === null
+        ? null
+        : current.finishedAt - (current.startedAt ?? current.createdAt),
+    error: current.error ?? null,
+    inputTokens: current.inputTokens ?? null,
+    outputTokens: current.outputTokens ?? null,
+    silent: current.silent ?? false,
+    toolCount: current.tools.length,
+    triggerReason:
+      index % 3 === 0
+        ? ('mention' as const)
+        : index % 3 === 1
+          ? ('reply-to-bot' as const)
+          : ('dm-owner' as const),
+    triggerText: source?.text ?? room.preview?.text ?? null,
+  };
+});
+
+type TaskKey = Pick<AdminTaskSummary, 'createdAt' | 'id'> & {
+  durationMs?: number | null;
+};
+
+function compareTasks(a: TaskKey, b: TaskKey, sort: AdminTaskSort = 'newest') {
+  if (sort === 'duration') {
+    if (a.durationMs == null && b.durationMs != null) return 1;
+    if (a.durationMs != null && b.durationMs == null) return -1;
+    if (
+      a.durationMs != null &&
+      b.durationMs != null &&
+      a.durationMs !== b.durationMs
+    )
+      return b.durationMs - a.durationMs;
+  }
+  const creation =
+    a.createdAt - b.createdAt || (a.id < b.id ? -1 : Number(a.id > b.id));
+  return sort === 'oldest' ? creation : -creation;
+}
 
 export function createFixtureReader(empty = false) {
   const listeners = new Set<(event: AdminEvent) => void>();
@@ -759,10 +786,9 @@ export function createFixtureReader(empty = false) {
                     ?.toLowerCase()
                     .includes(filter.q.toLowerCase())) &&
                 (!filter.cursor ||
-                  row.createdAt < filter.cursor.createdAt ||
-                  (row.createdAt === filter.cursor.createdAt &&
-                    row.id < filter.cursor.id)),
+                  compareTasks(row, filter.cursor, filter.sort) > 0),
             )
+            .sort((a, b) => compareTasks(a, b, filter.sort))
             .slice(0, filter.limit + 1),
     toolCall: (id, seq) =>
       allTasks

@@ -94,6 +94,7 @@
   --bar-error: #bd4865;
   --bar-warn: #a87320;
   --bar-idle: #677f9b;
+  --model-time: #625084;
   --bar-phase-0: #687f9b;
   --bar-phase-1: #527aa8;
   --bar-phase-2: #33577f;
@@ -114,6 +115,7 @@
   --bar-error: #f17e9b;
   --bar-warn: #e5b463;
   --bar-idle: #9baec7;
+  --model-time: #cbc0ee;
   --bar-phase-0: #a6c2e2;
   --bar-phase-1: #7dacdf;
   --bar-phase-2: #6396cc;
@@ -698,6 +700,17 @@ input[type='date'],
   gap: 10px;
   padding: 12px;
 }
+.task-sort {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.task-sort select {
+  width: auto;
+}
 .task-filters label {
   display: grid;
   align-content: end;
@@ -824,6 +837,9 @@ input[type='date'],
 .track-idle {
   fill: var(--bar-idle);
 }
+.track-model {
+  fill: var(--model-time);
+}
 .track-phase-0 {
   fill: var(--bar-phase-0);
 }
@@ -856,6 +872,9 @@ input[type='date'],
 }
 .timing-labels span {
   color: var(--muted);
+}
+.agent-timing strong {
+  margin-inline-start: 4px;
 }
 .context-row {
   border-bottom: 1px solid var(--line-soft);
@@ -901,10 +920,28 @@ input[type='date'],
 .execution-event + .execution-event {
   margin-top: 7px;
 }
-.execution-event > time {
+.execution-event:has(> .execution-offset) {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+.execution-event:has(> .execution-offset) > :is(p, details, .transcript-text) {
+  grid-column: 1 / -1;
+}
+.execution-event > :is(time, .execution-offset) {
   color: var(--muted);
   font: 11px var(--font-code);
   padding-top: 6px;
+}
+.execution-offset {
+  text-align: right;
+}
+.model-gap {
+  grid-column: 1 / -1;
+  color: var(--model-time);
+  font-size: 11px;
+  font-weight: 650;
+}
+.model-gap + time {
+  padding-top: 2px;
 }
 .execution-event > p,
 .transcript-text,
@@ -1577,6 +1614,16 @@ input[type='date'],
   }
   .execution-event {
     grid-template-columns: 62px minmax(0, 1fr);
+  }
+  .execution-event:has(> .execution-offset) {
+    grid-template-columns: 62px minmax(0, 1fr) auto;
+  }
+  .execution-event:has(> .execution-offset)
+    > :is(p, details, .transcript-text) {
+    grid-column: auto;
+  }
+  .execution-offset {
+    order: 1;
   }
   .tool-inspectors {
     grid-template-columns: repeat(2, minmax(0, 1fr));

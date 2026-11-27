@@ -1725,6 +1725,7 @@ export class SqliteStore implements Store {
       platform,
       q,
       since,
+      sort = 'newest',
       status,
     }: AdminTaskFilter,
     platforms: ReadonlyMap<string, string>,
@@ -1738,6 +1739,22 @@ export class SqliteStore implements Store {
               .map(([id]) => id),
             ...(!platforms.has(platform) ? [platform] : []),
           ];
+    const duration = sql<
+      number | null
+    >`${tasks.finishedAt} - coalesce(${tasks.startedAt}, ${tasks.createdAt})`;
+    const durationOrder = [
+      sql`(${tasks.finishedAt} is not null)`,
+      sql`coalesce(${duration}, 0)`,
+    ] as const;
+    const creationKey = sql`(${tasks.createdAt}, ${tasks.id})`;
+    const cursorCondition = cursor
+      ? sort === 'duration'
+        ? sql`(${durationOrder[0]}, ${durationOrder[1]}, ${tasks.createdAt}, ${tasks.id}) < (${cursor.durationMs == null ? 0 : 1}, ${cursor.durationMs ?? 0}, ${cursor.createdAt}, ${cursor.id})`
+        : sort === 'oldest'
+          ? sql`${creationKey} > (${cursor.createdAt}, ${cursor.id})`
+          : sql`${creationKey} < (${cursor.createdAt}, ${cursor.id})`
+      : undefined;
+    const order = sort === 'oldest' ? asc : desc;
     const traceTask = sql`json_extract(${traceSpans.attrs}, '$.taskId') = ${tasks.id}`;
     const usage = (path: string) =>
       sql<number | null>`(
@@ -1757,6 +1774,7 @@ export class SqliteStore implements Store {
         createdAt: tasks.createdAt,
         startedAt: tasks.startedAt,
         finishedAt: tasks.finishedAt,
+        durationMs: duration.mapWith(Number),
         agentId: tasks.agentId,
         model: tasks.model,
         triggerText: sql<string | null>`substr(${messages.text}, 1, 241)`,
@@ -1826,12 +1844,15 @@ export class SqliteStore implements Store {
           status ? eq(tasks.status, status as TaskRecord['status']) : undefined,
           since === undefined ? undefined : gte(tasks.createdAt, since),
           before === undefined ? undefined : lt(tasks.createdAt, before),
-          cursor &&
-            sql`(${tasks.createdAt}, ${tasks.id}) < (${cursor.createdAt}, ${cursor.id})`,
+          cursorCondition,
           q ? sql`instr(lower(${messages.text}), lower(${q})) > 0` : undefined,
         ),
       )
-      .orderBy(desc(tasks.createdAt), desc(tasks.id))
+      .orderBy(
+        ...(sort === 'duration' ? durationOrder.map(desc) : []),
+        order(tasks.createdAt),
+        order(tasks.id),
+      )
       .limit(limit + 1)
       .all();
     function excerpt(text: string | null) {
@@ -1846,10 +1867,6 @@ export class SqliteStore implements Store {
       chatKey: JSON.stringify([row.adapterId, row.chatId]),
       chatTitle: row.chatTitle || row.chatId,
       platform: platforms.get(row.adapterId) ?? row.adapterId,
-      durationMs:
-        row.startedAt === null || row.finishedAt === null
-          ? null
-          : Math.max(0, row.finishedAt - row.startedAt),
       error: excerpt(row.error),
       triggerText: excerpt(row.triggerText),
       silent: Boolean(row.silent),

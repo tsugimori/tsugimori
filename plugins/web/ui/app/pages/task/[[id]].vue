@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type {
+  AdminModelGap,
   AdminTaskRecord,
   AdminTrace,
   TaskTiming,
@@ -28,6 +29,7 @@ import { duration } from '../../lib/format.ts';
 import { renderMarkdown } from '../../lib/markdown.ts';
 import {
   callAnchor,
+  modelGapsByEvent,
   taskLanes,
   toolOffset,
   toolStatus,
@@ -54,6 +56,7 @@ const tracing = useConsoleQuery<AdminTrace>(
 const data = record.data;
 const trace = tracing.data;
 const task = computed(() => data.value?.task ?? trace.value?.task);
+const agentTiming = computed(() => task.value?.agentTiming);
 const start = computed(
   () => task.value?.startedAt ?? task.value?.createdAt ?? now.value,
 );
@@ -101,10 +104,32 @@ const stages = computed(() => {
     return width > 0 ? [segment] : [];
   });
 });
-const timings = computed(
-  () =>
-    Object.entries(data.value?.timing ?? {}) as [keyof TaskTiming, number][],
+const timings = computed(() => {
+  const timings = Object.entries(data.value?.timing ?? {}) as [
+    keyof TaskTiming,
+    number,
+  ][];
+  return agentTiming.value
+    ? timings.filter(([key]) => key !== 'agentMs' && key !== 'toolsMs')
+    : timings;
+});
+const modelRows = computed(() =>
+  modelGapsByEvent(
+    agentTiming.value?.modelGaps ?? [],
+    data.value?.events ?? [],
+  ),
 );
+function modelLabel({
+  startedAt,
+  endedAt,
+  inputTokens,
+  outputTokens,
+}: AdminModelGap) {
+  const time = `${m.value.modelLane} ${duration(endedAt - startedAt, locale.value)}`;
+  if (inputTokens === undefined && outputTokens === undefined) return time;
+  const [input, output] = tokenPair(inputTokens, outputTokens).split(' / ');
+  return `${time} · ${t('in', '輸入')} ${input} / ${t('out', '輸出')} ${output}`;
+}
 const finalEvent = computed(() => {
   const last = data.value?.events.findLast(({ kind }) => kind === 'text');
   return last?.kind === 'text' && last.data.text === data.value?.output
@@ -223,17 +248,28 @@ useHead({
             class="phase-track"
             :segments="stages.length ? stages : [{ at: 0, width: 100 }]"
           />
-          <div v-if="lanes?.tools.length" class="timing-lane">
-            <span>{{ m.toolLane }}</span><TimingTrack
-              :segments="
-                lanes.tools.map(({ left, width, tool }) => ({
-                  at: left,
-                  width,
-                  tone: statusStyle(toolStatus(tool))[0],
-                }))
-              "
+          <div v-if="lanes?.model.length" class="timing-lane">
+            <span>{{ m.modelLane }}</span><TimingTrack
+              :segments="lanes.model"
             />
           </div>
+          <div v-if="lanes?.tools.length" class="timing-lane">
+            <span>{{ m.toolLane }}</span><TimingTrack :segments="lanes.tools" />
+          </div>
+          <ul v-if="agentTiming" class="timing-labels agent-timing">
+            <li>
+              <span>{{ t('Agent run', '代理執行') }}</span>
+              <strong>{{ duration(agentTiming.agentMs, locale) }}</strong>
+            </li>
+            <li>
+              <span>{{ m.modelLane }}</span>
+              <strong>{{ duration(agentTiming.modelMs, locale) }}</strong>
+            </li>
+            <li>
+              <span>{{ m.toolLane }}</span>
+              <strong>{{ duration(agentTiming.toolMs, locale) }}</strong>
+            </li>
+          </ul>
           <ul v-if="timings.length" class="timing-labels">
             <li v-for="[key, value] in timings" :key="key">
               <span>{{ m.timingLabel[key] }}</span>
@@ -317,7 +353,18 @@ useHead({
               :key="event.seq"
               class="execution-event"
             >
+              <small
+                v-for="gap in modelRows.get(event.seq)"
+                :key="gap.startedAt"
+                class="model-gap"
+                >{{ modelLabel(gap) }}</small
+              >
               <ConsoleTime :at="event.at" format="clock" />
+              <span
+                v-if="event.kind !== 'tool'"
+                class="muted execution-offset"
+                >{{ toolOffset(event.at - start) }}</span
+              >
               <template v-if="event.kind === 'tool'">
                 <details
                   :id="callAnchor(task.id, event.data.toolSeq)"
@@ -401,7 +448,18 @@ useHead({
               </p>
             </li>
             <li v-if="data.outcome?.delivery" class="execution-event">
+              <small
+                v-for="gap in modelRows.get(undefined)"
+                :key="gap.startedAt"
+                class="model-gap"
+                >{{ modelLabel(gap) }}</small
+              >
               <ConsoleTime :at="task.finishedAt" format="clock" />
+              <span
+                v-if="task.finishedAt !== null"
+                class="muted execution-offset"
+                >{{ toolOffset(task.finishedAt - start) }}</span
+              >
               <p>
                 <strong>{{ m.timingLabel.deliveryMs }}</strong> ·
                 {{ data.outcome.delivery.adapterId }} ·

@@ -657,6 +657,8 @@ test('task list authenticates viewers, validates filters, and returns opaque cur
     'limit=0',
     'limit=1.5',
     'status=bad',
+    'sort=unknown',
+    'sort=',
     'chat=room',
     'cursor=invalid',
     'before=yesterday',
@@ -671,4 +673,48 @@ test('task list authenticates viewers, validates filters, and returns opaque cur
     (await fetch(url, { method: 'POST', headers: viewer })).status,
     405,
   );
+});
+
+test('task list follows cursors in each sort order', async (t) => {
+  const f = await fixture();
+  t.after(f.stop);
+  const url = f.url + '/api/tasks?';
+  const newest = [
+    'fixture-running',
+    'fixture-completed',
+    'fixture-silent',
+    'fixture-failed',
+    'fixture-task-1',
+    'fixture-task-2',
+    'fixture-task-3',
+    'fixture-task-4',
+  ];
+  const orders = {
+    newest,
+    oldest: [...newest].reverse(),
+    duration: [newest[1], ...newest.slice(3), newest[2], newest[0]],
+  };
+  for (const [sort, expected] of Object.entries(orders)) {
+    const params = new URLSearchParams({ limit: '1', sort });
+    for (const [index, id] of expected.entries()) {
+      const response = await fetch(url + params, { headers });
+      assert.equal(response.status, 200);
+      const { tasks, nextCursor } = await response.json();
+      assert.deepEqual(
+        tasks.map((row: { id: string }) => row.id),
+        [id],
+        sort,
+      );
+      if (index === expected.length - 1) assert.equal(nextCursor, null);
+      else {
+        assert.equal(typeof nextCursor, 'string');
+        params.set('cursor', nextCursor);
+        if (index === 0) {
+          const other = new URLSearchParams(params);
+          other.set('sort', sort === 'newest' ? 'oldest' : 'newest');
+          assert.equal((await fetch(url + other, { headers })).status, 400);
+        }
+      }
+    }
+  }
 });

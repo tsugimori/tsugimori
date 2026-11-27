@@ -108,8 +108,24 @@ export interface AdminChat extends ChatRef {
   title: string | null;
 }
 
+export interface AdminModelGap {
+  endedAt: number;
+  inputTokens?: number;
+  nextToolSeq?: number;
+  outputTokens?: number;
+  startedAt: number;
+}
+
+export interface AdminAgentTiming {
+  agentMs: number;
+  modelGaps: readonly AdminModelGap[];
+  modelMs: number;
+  toolMs: number;
+}
+
 export interface AdminTask extends ChatRef {
   agentId: string | null;
+  agentTiming?: AdminAgentTiming;
   createdAt: number;
   error?: string;
   finishedAt: number | null;
@@ -350,16 +366,18 @@ export interface AdminSchedules {
   })[];
 }
 
-/** A task page is ordered by creation time, then ID, both descending. */
+export type AdminTaskSort = 'newest' | 'oldest' | 'duration';
+
 export interface AdminTaskFilter {
   agent?: string;
   before?: number;
   chat?: ChatRef;
-  cursor?: { createdAt: number; id: string };
+  cursor?: { createdAt: number; durationMs?: number | null; id: string };
   limit: number;
   platform?: string;
   q?: string;
   since?: number;
+  sort?: AdminTaskSort;
   status?: string;
 }
 

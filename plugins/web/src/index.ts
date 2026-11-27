@@ -308,7 +308,7 @@ export class AdminServer {
       case '/api/tasks': {
         const filter = taskFilter(query);
         if (!filter) return apiError(response, 400, 'invalidTaskFilter');
-        return json(taskPage(reader.tasks(filter), filter.limit));
+        return json(taskPage(reader.tasks(filter), filter));
       }
       case '/api/task': {
         const id = query.get('id');

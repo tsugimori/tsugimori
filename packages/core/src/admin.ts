@@ -22,6 +22,7 @@ import { defaultRecordsMaxBytes } from '@tsugimori/config';
 
 import type { Tasks } from './tasks.ts';
 
+import { agentTiming } from './agent-timing.ts';
 import { reconstructContext } from './record-context.ts';
 import { capToolDetail } from './tool-details.ts';
 
@@ -66,13 +67,19 @@ function taskDetails(
 ): AdminTask {
   const known = new Set(calls.map(({ seq }) => seq));
   const tools = [...calls];
+  const toolSeqs = new Map<TraceSpan, number>();
   for (const [index, span] of spans.entries()) {
     if (span.name !== 'tool.run' && span.name !== 'agent.tool') continue;
     const { name, toolCallSeq } = span.attrs;
-    if (typeof toolCallSeq === 'number' && known.has(toolCallSeq)) continue;
+    if (typeof toolCallSeq === 'number' && known.has(toolCallSeq)) {
+      toolSeqs.set(span, toolCallSeq);
+      continue;
+    }
     if (typeof name !== 'string') continue;
+    const seq = -index - 1;
+    toolSeqs.set(span, seq);
     tools.push({
-      seq: -index - 1,
+      seq,
       name,
       startedAt: span.startedAt,
       endedAt: span.endedAt,
@@ -96,6 +103,7 @@ function taskDetails(
     .error;
   return {
     ...task,
+    agentTiming: agentTiming(spans, toolSeqs),
     silent:
       task.status === 'completed' &&
       spans.some(

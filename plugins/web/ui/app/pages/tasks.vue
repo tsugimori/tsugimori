@@ -3,6 +3,7 @@ import type {
   AdminAgent,
   AdminChat,
   AdminTaskPage,
+  AdminTaskSort,
 } from '@tsugimori/plugin-sdk';
 
 import { ListTodo, SlidersHorizontal } from '@lucide/vue';
@@ -30,6 +31,10 @@ function draft() {
   >;
 }
 const filters = ref(draft());
+const sort = computed(() => {
+  const value = route.query.sort;
+  return typeof value === 'string' ? value : 'newest';
+});
 watch(
   () => route.query,
   () => {
@@ -41,7 +46,9 @@ const page = ref(0);
 const query = computed(() =>
   Object.entries(draft()).filter(([, value]) => value),
 );
-const filterKey = computed(() => new URLSearchParams(query.value).toString());
+const filterKey = computed(() =>
+  new URLSearchParams([...query.value, ['sort', sort.value]]).toString(),
+);
 watch(
   filterKey,
   () => {
@@ -51,7 +58,7 @@ watch(
   { flush: 'sync' },
 );
 const path = computed(() => {
-  const params = new URLSearchParams(query.value);
+  const params = new URLSearchParams(filterKey.value);
   params.set('limit', '25');
   const cursor = cursors.value[page.value];
   if (cursor) params.set('cursor', cursor);
@@ -73,7 +80,9 @@ function apply() {
   return navigateTo({
     path: '/tasks',
     query: Object.fromEntries(
-      Object.entries(filters.value).filter(([, value]) => value),
+      [...Object.entries(filters.value), ['sort', route.query.sort]].filter(
+        ([, value]) => value,
+      ),
     ),
   });
 }
@@ -88,7 +97,14 @@ function clear() {
     since: '',
     status: '',
   };
-  return navigateTo('/tasks');
+  return navigateTo({ path: '/tasks', query: { sort: route.query.sort } });
+}
+function changeSort(event: Event) {
+  const value = (event.target as HTMLSelectElement).value as AdminTaskSort;
+  return navigateTo({
+    path: '/tasks',
+    query: { ...route.query, sort: value === 'newest' ? undefined : value },
+  });
 }
 function next() {
   if (!data.value?.nextCursor) return;
@@ -107,6 +123,14 @@ useHead({ title: computed(() => t('Tasks', '任務')) });
   </div>
   <ConsolePanel :title="t('Task list', '任務清單')" :icon="ListTodo">
     <template #actions>
+      <label class="task-sort">
+        <span>{{ t('Sort', '排序') }}</span>
+        <select :value="sort" @change="changeSort">
+          <option value="newest">{{ t('Newest', '最新優先') }}</option>
+          <option value="oldest">{{ t('Oldest', '最舊優先') }}</option>
+          <option value="duration">{{ t('Longest', '耗時最長') }}</option>
+        </select>
+      </label>
       <Button
         class="mobile-filter"
         outlined
@@ -153,8 +177,10 @@ useHead({ title: computed(() => t('Tasks', '任務')) });
       <thead>
         <tr>
           <th>{{ t('Status', '狀態') }}</th>
-          <th>{{ m.started }} ↓</th>
-          <th>{{ m.timing }}</th>
+          <th>{{ m.started }}</th>
+          <th :aria-sort="sort === 'duration' ? 'descending' : undefined">
+            {{ m.timing }}{{ sort === 'duration' ? ' ↓' : '' }}
+          </th>
           <th>{{ m.chat }}</th>
           <th>{{ m.trigger }}</th>
           <th>{{ m.agent }}</th>

@@ -55,17 +55,18 @@ The header offers System, Light and Dark. System follows the device preference. 
 
 ## Task list API
 
-`GET /api/tasks` returns `{ tasks, nextCursor }` to authorized owners and viewers. Results are ordered by creation time, newest first, with task ID as the tie-breaker. Use the returned `nextCursor` with the same filters to load the next page. The default limit is 25, and the maximum is 100.
+`GET /api/tasks` returns `{ tasks, nextCursor }` to authorized owners and viewers. Use the returned `nextCursor` with the same filters and sort order to load the next page. The default limit is 25, and the maximum is 100.
 
-| Parameter         | Meaning                                                                                                  |
-| ----------------- | -------------------------------------------------------------------------------------------------------- |
-| `status`          | Stored task status, such as `running`, `sent`, or `failed`.                                              |
-| `agent`           | Agent instance ID.                                                                                       |
-| `chat`            | JSON array of adapter instance ID and chat ID, matching each row’s `chatKey`.                            |
-| `platform`        | Platform kind, such as `telegram` or `line`.                                                             |
-| `since`, `before` | Inclusive start and exclusive end by task creation time. Use ISO timestamps with an offset or UTC dates. |
-| `q`               | Literal substring of the source message. SQLite folds ASCII case.                                        |
-| `cursor`, `limit` | Opaque continuation cursor and page size.                                                                |
+| Parameter         | Meaning                                                                                                                                                                                                                                                           |
+| ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `status`          | Stored task status, such as `running`, `sent`, or `failed`.                                                                                                                                                                                                       |
+| `agent`           | Agent instance ID.                                                                                                                                                                                                                                                |
+| `chat`            | JSON array of adapter instance ID and chat ID, matching each row’s `chatKey`.                                                                                                                                                                                     |
+| `platform`        | Platform kind, such as `telegram` or `line`.                                                                                                                                                                                                                      |
+| `since`, `before` | Inclusive start and exclusive end by task creation time. Use ISO timestamps with an offset or UTC dates.                                                                                                                                                          |
+| `q`               | Literal substring of the source message. SQLite folds ASCII case.                                                                                                                                                                                                 |
+| `sort`            | `newest` (default), `oldest`, or `duration`. Date sorts use creation time and task ID in the selected direction. Duration sorts by finish minus start (or creation when start is missing), longest first, then newest first for ties. Unfinished tasks come last. |
+| `cursor`, `limit` | Opaque continuation cursor and page size.                                                                                                                                                                                                                         |
 
 ## Tool details
 

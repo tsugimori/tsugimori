@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import { renderMarkdown } from '../ui/app/lib/markdown.ts';
-import { taskLanes } from '../ui/app/lib/timeline.ts';
+import { modelGapsByEvent, taskLanes } from '../ui/app/lib/timeline.ts';
 
 test('markdown renders formatting and escapes stored HTML and unsafe URLs', () => {
   const html = renderMarkdown(
@@ -24,11 +24,17 @@ test('markdown renders formatting and escapes stored HTML and unsafe URLs', () =
   assert.doesNotMatch(html, /<(?:script|img)\b|href="(?:javascript|java&)/i);
 });
 
-test('model lane fills the gaps between overlapping tool calls', () => {
+test('timeline lanes position trace model gaps and tool calls on the task clock', () => {
   const { model, tools } = taskLanes(
     {
+      agentTiming: {
+        modelGaps: [
+          { startedAt: 15, endedAt: 20 },
+          { startedAt: 60, endedAt: 90 },
+        ],
+      },
       tools: [
-        { startedAt: 10, endedAt: 40 },
+        { startedAt: 20, endedAt: 40 },
         { startedAt: 30, endedAt: 60 },
       ],
     },
@@ -36,14 +42,36 @@ test('model lane fills the gaps between overlapping tool calls', () => {
     100,
   );
   assert.deepEqual(model, [
-    { left: 0, width: 10 },
-    { left: 60, width: 40 },
+    { at: 15, width: 5, tone: 'model' },
+    { at: 60, width: 30, tone: 'model' },
   ]);
   assert.deepEqual(
-    tools.map(({ left, width }) => ({ left, width })),
+    tools.map(({ at, width }) => ({ at, width })),
     [
-      { left: 10, width: 30 },
-      { left: 30, width: 30 },
+      { at: 20, width: 20 },
+      { at: 30, width: 30 },
+    ],
+  );
+});
+
+test('model labels attach to the associated tool and the first chunk of the final reply', () => {
+  const first = { startedAt: 100, endedAt: 500, nextToolSeq: 3 };
+  const last = { startedAt: 750, endedAt: 1300 };
+  const rows = modelGapsByEvent(
+    [first, last],
+    [
+      { seq: 1, kind: 'reasoning', at: 200, data: { text: 'Reasoning' } },
+      { seq: 2, kind: 'tool', at: 499, data: { toolSeq: 3 } },
+      { seq: 3, kind: 'text', at: 800, data: { text: 'Earlier text' } },
+      { seq: 4, kind: 'text', at: 1100, data: { text: 'First chunk' } },
+      { seq: 5, kind: 'text', at: 1100, data: { text: 'Second chunk' } },
+    ],
+  );
+  assert.deepEqual(
+    [...rows],
+    [
+      [2, [first]],
+      [4, [last]],
     ],
   );
 });

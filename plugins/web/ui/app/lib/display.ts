@@ -102,12 +102,19 @@ export function chatKey({ adapterId, chatId }: ChatRef) {
 }
 
 export function taskDuration(
-  task: { finishedAt: number | null; startedAt: number | null },
+  task: {
+    createdAt: number;
+    finishedAt: number | null;
+    startedAt: number | null;
+  },
   now: number,
 ) {
-  return task.startedAt === null
+  return task.startedAt === null && task.finishedAt === null
     ? null
-    : Math.max(0, (task.finishedAt ?? now) - task.startedAt);
+    : Math.max(
+        0,
+        (task.finishedAt ?? now) - (task.startedAt ?? task.createdAt),
+      );
 }
 
 export function tokenPair(input?: number | null, output?: number | null) {
