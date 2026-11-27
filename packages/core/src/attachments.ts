@@ -43,6 +43,21 @@ function hasLineStickerId(
   );
 }
 
+export type QuotedAttachmentSources = Map<string, Set<number>>;
+
+export function rememberQuotedAttachments(
+  sources: QuotedAttachmentSources,
+  message: ContextBlock['message'],
+  seq: number,
+) {
+  for (const target of message?.replyTo?.replyChain ?? []) {
+    if (!target.attachments.length) continue;
+    let quoting = sources.get(target.id);
+    if (!quoting) sources.set(target.id, (quoting = new Set()));
+    quoting.add(seq);
+  }
+}
+
 export function attachmentTool(
   {
     store,
@@ -53,6 +68,7 @@ export function attachmentTool(
   },
   adapter: PlatformAdapter,
   temporaryFiles?: Set<string>,
+  quotedSources?: QuotedAttachmentSources,
 ): ToolDefinition {
   return {
     name: 'attachment.get',
@@ -74,7 +90,7 @@ export function attachmentTool(
     async run(args, { chat, signal }) {
       const { messageId, index } = args as { index: number; messageId: string };
       chat = store.resolveChat(chat);
-      const items = findAttachments(store, chat, messageId);
+      const items = findAttachments(store, chat, messageId, '', quotedSources);
       const attachment = items.find(
         (item) => item.attachment.index === index,
       )?.attachment;
@@ -144,29 +160,40 @@ export function findAttachments(
   chat: Pick<MessageRecord, 'adapterId' | 'chatId'>,
   id: string,
   migratedFromChatId = '',
+  quotedSources?: QuotedAttachmentSources,
 ) {
   const row =
     store.getMessage(chat, id, migratedFromChatId, false) ??
     (migratedFromChatId === ''
       ? store.getMessage(chat, id, undefined, false)
       : undefined);
-  if (
-    row?.deleted ||
-    !store.messageVisible(
-      chat,
-      id,
-      row?.migratedFromChatId ?? migratedFromChatId,
-    ) ||
-    store.isSetupSecret(chat, id)
-  )
-    return [];
-  const quoted = row?.metadata?.attachments?.length
-    ? undefined
-    : store.quotedAttachmentMessage(
+  const sourceChatId = row?.migratedFromChatId ?? migratedFromChatId;
+  const threadAttachments = () => {
+    for (const sourceSeq of quotedSources?.get(id) ?? []) {
+      const quoted = store.quotedAttachmentMessage(
         chat,
         id,
-        row?.migratedFromChatId ?? migratedFromChatId,
+        sourceChatId,
+        sourceSeq,
       );
+      const target = quoted?.metadata?.replyTo?.replyChain?.find(
+        (part) => part.id === id,
+      );
+      if (target?.attachments) return target.attachments;
+    }
+  };
+  const items = (attachments: readonly InboundAttachment[] = []) =>
+    attachments.map((attachment) => ({
+      attachment,
+      id,
+      albumFirstSeq: undefined,
+    }));
+  if (
+    row?.deleted ||
+    !store.messageVisible(chat, id, sourceChatId) ||
+    store.isSetupSecret(chat, id, sourceChatId)
+  )
+    return items(threadAttachments());
   const albumId = row?.albumId;
   if (albumId) {
     const members = store.messageAlbum(chat, albumId, row.migratedFromChatId);
@@ -177,9 +204,11 @@ export function findAttachments(
         id,
       }));
   }
-  const quotedAttachments = quoted?.metadata?.replyTo?.attachments;
-  return (row?.metadata?.attachments ?? quotedAttachments ?? []).map(
-    (attachment) => ({ attachment, id, albumFirstSeq: undefined }),
+  const stored = row?.metadata?.attachments;
+  if (stored?.length) return items(stored);
+  return items(
+    store.quotedAttachmentMessage(chat, id, sourceChatId)?.metadata?.replyTo
+      ?.attachments ?? threadAttachments(),
   );
 }
 
@@ -191,6 +220,7 @@ export function turnAttachments(
   migratedFromChatId: string,
   afterSeq: number | undefined,
   includeReplies: boolean,
+  quotedSources: QuotedAttachmentSources,
 ) {
   // Older LINE stickers have only a sticker ID. The adapter can still fetch them.
   const isVisual = (attachment: InboundAttachment) =>
@@ -200,6 +230,12 @@ export function turnAttachments(
     for (const part of [
       message,
       includeReplies ? message?.replyTo : undefined,
+      ...(message?.replyTo?.replyChain?.filter(
+        (part) =>
+          part.attachments.length > 0 &&
+          (includeReplies ||
+            !store.messageVisible(chat, part.id, migratedFromChatId)),
+      ) ?? []),
     ]) {
       if (!part) continue;
       for (const attachment of part.attachments) {
@@ -213,7 +249,13 @@ export function turnAttachments(
   }
   const groups = new Set<number>();
   return [...ids].flatMap(([id, described]) => {
-    const items = findAttachments(store, chat, id, migratedFromChatId);
+    const items = findAttachments(
+      store,
+      chat,
+      id,
+      migratedFromChatId,
+      quotedSources,
+    );
     const album = items[0]?.albumFirstSeq;
     const images = items.filter(
       ({ attachment }) =>

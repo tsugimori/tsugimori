@@ -134,7 +134,7 @@ sticker catalog.
 | `/previews`                                      | Owner                                                     | Lists open previews on this adapter.                                                                        |
 | `/preview close <id>`                            | Owner                                                     | Closes a preview on this adapter.                                                                           |
 
-Incognito mode starts a fresh agent session. While it is on, ordinary turns, `/btw`, `/ask`, and scheduled agent runs can see only messages from the open window. Chat summaries, history tools, memory proposals, and tools that create or update schedules are unavailable. The mode survives restarts, model and agent changes, and compaction.
+Incognito mode starts a fresh agent session. Recent history comes from the open window. An explicit reply can bring up to 20 messages and 12,000 characters from its thread, including earlier ordinary messages and their attachments, into that window's context. Messages from other incognito windows stay hidden. Chat summaries, history tools, memory proposals, and tools that create or update schedules are unavailable. The mode survives restarts, model and agent changes, and compaction.
 
 Turning incognito off starts another fresh session. The agent regains access to ordinary history. Messages from the window, including the agent's replies and attachments, stay hidden from the agent and remain visible in the admin console. Replies to those messages show only the reply target. While chat work is pending, the bot keeps the current state.
 

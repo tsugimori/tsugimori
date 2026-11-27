@@ -226,18 +226,13 @@ export class BackgroundSummaries implements SummaryProvider {
       if (direction !== 'inbound' || text.trim()) {
         const shortened = excerpt(text, seq, maxMessageChars);
         const details = messageContext(message, album);
-        if (details.replyTo?.text)
-          details.replyTo.text = excerpt(
-            details.replyTo.text,
-            seq,
-            maxMessageChars,
-          );
-        if (details.replyTo?.quote)
-          details.replyTo.quote = excerpt(
-            details.replyTo.quote,
-            seq,
-            maxMessageChars,
-          );
+        const { replyTo } = details;
+        if (replyTo)
+          for (const part of [replyTo, ...(replyTo.replyChain ?? [])]) {
+            if (part.text) part.text = excerpt(part.text, seq, maxMessageChars);
+            if (part.quote)
+              part.quote = excerpt(part.quote, seq, maxMessageChars);
+          }
         const chars =
           shortened.length +
           (details.replyTo ? JSON.stringify(details.replyTo).length : 0) +

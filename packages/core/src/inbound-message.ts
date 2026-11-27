@@ -3,9 +3,14 @@ import type {
   PlatformAdapter,
   ReplyTarget,
 } from '@tsugimori/plugin-sdk';
-import type { Store } from '@tsugimori/storage';
+import type { MessageRecord, Store } from '@tsugimori/storage';
 
 import { parseCommand } from './chat-commands.ts';
+
+const replyMessageLimit = 20;
+const replyCharacterLimit = 12_000;
+const pairingCode =
+  /(\/pair(?:@[a-z0-9_]+)?\s+)(?:[\w-]{16}(?![\w-])|\[redacted\])/gi;
 
 export function hasPrivateArguments(name: string) {
   return (
@@ -14,11 +19,10 @@ export function hasPrivateArguments(name: string) {
 }
 
 export function redactPairingCodes(text: string) {
-  return text.replace(
-    /(\/pair(?:@[a-z0-9_]+)?\s+)[\w-]{16}(?![\w-])/gi,
-    '$1[redacted]',
-  );
+  return text.replace(pairingCode, '$1[redacted]');
 }
+
+type ThreadMessage = Omit<ReplyTarget, 'replyChain'>;
 
 export function resolveReplyTarget(
   { store, bot }: { bot: PlatformAdapter['botIdentity']; store: Store },
@@ -27,23 +31,93 @@ export function resolveReplyTarget(
   migratedFromChatId = '',
 ): { replyTo?: ReplyTarget; sensitiveReply?: boolean } {
   if (!reply) return {};
-  const quoted = store.getMessage(chat, reply.id, migratedFromChatId, false);
-  const command = reply.text
-    ? parseCommand(reply.text, bot?.username)
-    : undefined;
+  const sensitive = (text: string | undefined) => {
+    if (!text) return false;
+    const command = parseCommand(text, bot?.username);
+    return (
+      text.search(pairingCode) !== -1 ||
+      (command !== undefined &&
+        command !== 'other-bot' &&
+        (hasPrivateArguments(command.name) ||
+          command.name === 'btw' ||
+          command.name === 'ask'))
+    );
+  };
+  const load = (id: string) =>
+    store.getMessage(chat, id, migratedFromChatId, false);
+  const canQuote = (message: MessageRecord) =>
+    !sensitive(message.text) &&
+    store.replyTargetVisible(chat, message.messageId, migratedFromChatId);
+  let target = load(reply.id);
   if (
-    quoted?.deleted ||
-    quoted?.metadata?.sideQuestion ||
-    !store.messageVisible(chat, reply.id, migratedFromChatId) ||
-    store.isSetupSecret(chat, reply.id) ||
-    (reply.text !== undefined &&
-      redactPairingCodes(reply.text) !== reply.text) ||
-    (reply.quote !== undefined &&
-      redactPairingCodes(reply.quote) !== reply.quote) ||
-    (command && command !== 'other-bot' && hasPrivateArguments(command.name))
+    sensitive(reply.text) ||
+    sensitive(reply.quote) ||
+    (target
+      ? !canQuote(target)
+      : !store.messageVisible(chat, reply.id, migratedFromChatId) ||
+        store.isSetupSecret(chat, reply.id, migratedFromChatId))
   )
     return { replyTo: { id: reply.id }, sensitiveReply: true };
 
+  let remaining = replyCharacterLimit;
+  const fit = (value: string | undefined) => {
+    if (value === undefined) return;
+    const text = value.slice(0, remaining).replace(/[\uD800-\uDBFF]$/u, '');
+    remaining -= text.length;
+    return text;
+  };
+  const toThreadMessage = (
+    message: MessageRecord | undefined,
+    live: ThreadMessage,
+  ) => {
+    const quote = fit(live.quote);
+    return {
+      ...replyDetails(store, chat, bot, message, live),
+      text: fit(message?.text ?? live.text),
+      quote,
+    };
+  };
+  const immediate = toThreadMessage(target, reply);
+  if (!target) return { replyTo: immediate };
+  const sensitiveReply = !store.messageVisible(
+    chat,
+    reply.id,
+    migratedFromChatId,
+  );
+  const chain = [immediate];
+  const visited = new Set([reply.id]);
+  while (target.replyTo && chain.length < replyMessageLimit && remaining > 0) {
+    const parentId = target.replyTo;
+    if (visited.has(parentId)) break;
+    const parent = load(parentId);
+    if (!parent || !canQuote(parent)) break;
+    const saved = target.metadata?.replyTo;
+    chain.push(
+      toThreadMessage(parent, {
+        id: parentId,
+        ...(saved?.id === parentId && {
+          albumId: saved.albumId,
+          attachments: saved.attachments,
+          sender: saved.sender,
+        }),
+      }),
+    );
+    visited.add(parentId);
+    target = parent;
+  }
+  return {
+    replyTo: { ...immediate, replyChain: chain.reverse() },
+    sensitiveReply,
+  };
+}
+
+function replyDetails(
+  store: Store,
+  chat: ChatRef,
+  bot: PlatformAdapter['botIdentity'],
+  quoted: MessageRecord | undefined,
+  reply: ThreadMessage,
+): ThreadMessage {
   let sender = quoted?.metadata?.sender ?? reply.sender;
   if (!sender && quoted?.userId) {
     const { userId } = quoted;
@@ -71,12 +145,9 @@ export function resolveReplyTarget(
       : attachment;
   });
   return {
-    replyTo: {
-      ...reply,
-      sender,
-      text: quoted?.text ?? reply.text,
-      attachments: attachments ?? reply.attachments,
-      albumId: quoted?.albumId ?? reply.albumId,
-    },
+    id: reply.id,
+    sender,
+    attachments: attachments?.length ? attachments : reply.attachments,
+    albumId: quoted?.albumId ?? reply.albumId,
   };
 }

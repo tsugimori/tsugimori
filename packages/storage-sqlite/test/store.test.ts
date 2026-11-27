@@ -108,6 +108,7 @@ test('group migration carries over the open incognito window and clears the acti
     throughSeq: before,
   });
   const start = add(previous, 'private-start');
+  store.markSetupSecret(previous, 'private-start');
   store.clearSession(previous, start);
   const latest = add(previous, 'visible');
   assert.equal(store.migrateChat(previous, current.chatId), true);
@@ -122,6 +123,14 @@ test('group migration carries over the open incognito window and clears the acti
   assert.equal(
     store.getMessage(current, 'visible', previous.chatId)?.incognitoId,
     start,
+  );
+  assert.equal(
+    store.replyTargetVisible(current, 'destination-before-private', ''),
+    true,
+  );
+  assert.equal(
+    store.replyTargetVisible(current, 'private-start', previous.chatId),
+    false,
   );
   store.clearSession(current, null);
   assert.deepEqual(

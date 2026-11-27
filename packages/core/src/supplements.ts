@@ -35,7 +35,7 @@ export class Supplements {
 
   async *stream(
     signal: AbortSignal,
-    onDelivery: (message: InboundMessage) => InboundMessage,
+    onDelivery: (input: TaskInput) => InboundMessage,
   ): AsyncIterable<InboundMessage> {
     const wake = () => this.#wake();
     signal.addEventListener('abort', wake);
@@ -44,7 +44,7 @@ export class Supplements {
         const input = this.#queue.shift();
         if (input) {
           this.delivered.add(input.seq);
-          yield onDelivery(input.message);
+          yield onDelivery(input);
         } else {
           await this.#available.promise;
         }

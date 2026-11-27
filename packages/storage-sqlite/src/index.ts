@@ -7,6 +7,7 @@ import type {
   ContextBlock,
   PreviewCloseReason,
   PrincipalRef,
+  ReplyTarget,
   TaskEvent,
   TaskExecution,
   TriggerDecision,
@@ -952,7 +953,7 @@ export class SqliteStore implements Store {
       .run();
   }
 
-  isSetupSecret(ref: ChatRef, messageId: string) {
+  isSetupSecret(ref: ChatRef, messageId: string, migratedFromChatId = '') {
     const { adapterId, chatId } = ref;
     return Boolean(
       this.#db
@@ -961,7 +962,12 @@ export class SqliteStore implements Store {
         .where(
           and(
             eq(setupSecrets.adapterId, adapterId),
-            eq(setupSecrets.chatId, chatId),
+            or(
+              eq(setupSecrets.chatId, chatId),
+              migratedFromChatId
+                ? eq(setupSecrets.chatId, migratedFromChatId)
+                : undefined,
+            ),
             eq(setupSecrets.messageId, messageId),
           ),
         )
@@ -2668,12 +2674,17 @@ export class SqliteStore implements Store {
     ref: ChatRef,
     messageId: string,
     migratedFromChatId: string,
+    sourceSeq?: number,
   ) {
     ref = this.resolveChat(ref);
     const incognitoId = this.getChat(ref)?.incognitoId ?? null;
-    if (!this.#messageVisible(ref, messageId, migratedFromChatId, incognitoId))
+    if (
+      sourceSeq === undefined &&
+      (!this.#messageVisible(ref, messageId, migratedFromChatId, incognitoId) ||
+        this.isSetupSecret(ref, messageId, migratedFromChatId))
+    )
       return;
-    return this.#db
+    const row = this.#db
       .select({
         ...getColumns(messages),
         raw: sql<null>`null`,
@@ -2684,14 +2695,26 @@ export class SqliteStore implements Store {
         and(
           chatScope(messages, ref),
           visibleToAgent(incognitoId),
-          eq(messages.replyTo, messageId),
-          eq(messages.migratedFromChatId, migratedFromChatId),
           eq(messages.deleted, false),
-          sql`json_array_length(${messages.metadata}, '$.replyTo.attachments') > 0`,
+          sourceSeq === undefined
+            ? and(
+                eq(messages.replyTo, messageId),
+                eq(messages.migratedFromChatId, migratedFromChatId),
+                sql`json_array_length(${messages.metadata}, '$.replyTo.attachments') > 0`,
+              )
+            : eq(messages.seq, sourceSeq),
         ),
       )
       .orderBy(desc(messages.seq))
       .get();
+    if (!row) return;
+    const visible = this.#redactMessageReply(ref, row, incognitoId);
+    const reply = visible.metadata?.replyTo;
+    const target =
+      sourceSeq === undefined
+        ? reply
+        : reply?.replyChain?.find(({ id }) => id === messageId);
+    if (target?.attachments?.length) return visible;
   }
 
   messageVisible(ref: ChatRef, messageId: string, migratedFromChatId: string) {
@@ -2704,15 +2727,48 @@ export class SqliteStore implements Store {
     );
   }
 
+  replyTargetVisible(
+    ref: ChatRef,
+    messageId: string,
+    migratedFromChatId: string,
+  ) {
+    ref = this.resolveChat(ref);
+    return this.#messageVisible(
+      ref,
+      messageId,
+      migratedFromChatId,
+      this.getChat(ref)?.incognitoId ?? null,
+      true,
+    );
+  }
+
   #messageVisible(
     ref: ChatRef,
     messageId: string,
     migratedFromChatId: string,
     incognitoId: number | null,
+    explicitReply = false,
   ) {
+    if (explicitReply && this.isSetupSecret(ref, messageId, migratedFromChatId))
+      return false;
+    const window =
+      explicitReply && incognitoId !== null
+        ? or(
+            isNull(messages.incognitoId),
+            eq(messages.incognitoId, incognitoId),
+          )
+        : visibleToAgent(incognitoId);
+    const eligible = and(
+      window,
+      eq(messages.deleted, false),
+      explicitReply
+        ? sql`json_extract(${messages.metadata}, '$.sideQuestion') is not 1
+          and json_extract(${messages.metadata}, '$.privateReply') is not 1`
+        : undefined,
+    );
     const rows = this.#db
       .select({
-        visible: sql<number>`(${visibleToAgent(incognitoId)}) and not ${messages.deleted}`,
+        visible: sql<number | null>`(${eligible})`,
       })
       .from(messages)
       .where(
@@ -2726,7 +2782,43 @@ export class SqliteStore implements Store {
       .all();
     return rows.length
       ? rows.every(({ visible }) => visible)
-      : incognitoId === null;
+      : !explicitReply && incognitoId === null;
+  }
+
+  visibleReply(ref: ChatRef, reply: ReplyTarget, migratedFromChatId: string) {
+    ref = this.resolveChat(ref);
+    return this.#visibleReply(
+      ref,
+      reply,
+      migratedFromChatId,
+      this.getChat(ref)?.incognitoId ?? null,
+    );
+  }
+
+  #visibleReply(
+    ref: ChatRef,
+    reply: ReplyTarget,
+    migratedFromChatId: string,
+    incognitoId: number | null,
+  ): ReplyTarget {
+    const chain = reply.replyChain;
+    if (!chain?.length)
+      return this.#messageVisible(
+        ref,
+        reply.id,
+        migratedFromChatId,
+        incognitoId,
+      )
+        ? reply
+        : { id: reply.id };
+    // Walk from the direct quote toward older ancestors, dropping any prefix beyond a hidden link.
+    const hidden = chain.findLastIndex(
+      ({ id }) =>
+        !this.#messageVisible(ref, id, migratedFromChatId, incognitoId, true),
+    );
+    if (hidden === -1) return reply;
+    if (hidden === chain.length - 1) return { id: reply.id };
+    return { ...reply, replyChain: chain.slice(hidden + 1) };
   }
 
   #redactMessageReply<
@@ -2736,14 +2828,18 @@ export class SqliteStore implements Store {
     >,
   >(ref: ChatRef, row: Row, incognitoId: number | null): Row {
     const replyId = row.metadata?.replyTo?.id ?? row.replyTo;
-    if (
-      !replyId ||
-      this.#messageVisible(ref, replyId, row.migratedFromChatId, incognitoId)
-    )
-      return row;
+    if (!replyId) return row;
+    const target = row.metadata?.replyTo ?? { id: replyId };
+    const visible = this.#visibleReply(
+      ref,
+      target,
+      row.migratedFromChatId,
+      incognitoId,
+    );
+    if (visible === target) return row;
     return {
       ...row,
-      metadata: { ...row.metadata, replyTo: { id: replyId } },
+      metadata: { ...row.metadata, replyTo: visible },
       ...('raw' in row && { raw: null }),
     };
   }

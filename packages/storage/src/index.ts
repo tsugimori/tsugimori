@@ -11,6 +11,7 @@ import type {
   PluginInstanceConfig,
   PreviewCloseReason,
   PrincipalRef,
+  ReplyTarget,
   ResourceRef,
   TaskEvent,
   TaskExecution,
@@ -55,7 +56,11 @@ export type MessageMetadata = Pick<
   | 'replyTo'
   | 'sender'
   | 'userDisplay'
-> & { sessionBoundary?: boolean; sideQuestion?: boolean };
+> & {
+  privateReply?: boolean;
+  sessionBoundary?: boolean;
+  sideQuestion?: boolean;
+};
 
 export interface MessageRecord extends ChatRef {
   albumId?: string | null;
@@ -559,7 +564,11 @@ export interface Store {
   instanceSetupRuns(target: RemovalTarget): SetupRun[];
   interruptScheduleRuns(now: number): void;
   interruptTasks(now: number): void;
-  isSetupSecret(ref: ChatRef, messageId: string): boolean;
+  isSetupSecret(
+    ref: ChatRef,
+    messageId: string,
+    migratedFromChatId?: string,
+  ): boolean;
   isStickerSetBlocked(name: string): boolean;
   latestSessionSpan(
     scope: string,
@@ -612,10 +621,12 @@ export interface Store {
     maxBytes: number,
     active?: readonly ActiveTaskRefs[],
   ): { bytes: number; tasks: number };
+  /** A source sequence restricts the lookup to a resolved reply shown to the agent. */
   quotedAttachmentMessage(
     ref: ChatRef,
     messageId: string,
     migratedFromChatId: string,
+    sourceSeq?: number,
   ): MessageRecord | undefined;
   recentMessages(
     ref: ChatRef,
@@ -640,6 +651,12 @@ export interface Store {
     user: Omit<UserRecord, 'username'> & Partial<Pick<UserRecord, 'username'>>,
   ): void;
   releaseRemoval(id: string, lease: string): void;
+  /** Whether an explicit reply can expose this known target in the current window. */
+  replyTargetVisible(
+    ref: ChatRef,
+    messageId: string,
+    migratedFromChatId: string,
+  ): boolean;
   resolveChat(ref: ChatRef): ChatRef;
   saveContextBlob(sha256: string, content: string): void;
   saveCursor(adapterId: string, stream: string, cursor: AdapterCursor): void;
@@ -716,5 +733,10 @@ export interface Store {
       >
     >,
   ): void;
+  visibleReply(
+    ref: ChatRef,
+    reply: ReplyTarget,
+    migratedFromChatId: string,
+  ): ReplyTarget;
   writeTraceSpans(spans: readonly TraceSpan[]): void | Promise<void>;
 }

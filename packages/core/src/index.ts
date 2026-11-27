@@ -1087,7 +1087,8 @@ export class Gateway {
       command?.name === 'incognito' && ['on', 'off'].includes(command.args)
         ? ` ${command.args}`
         : '';
-    const privateRaw = privateCommand || reset || redactedText !== event.text;
+    const privateReply = privateCommand || redactedText !== event.text;
+    const privateRaw = privateReply || reset;
     const replyId = event.replyTo?.id;
     const { replyTo, sensitiveReply } = resolveReplyTarget(
       { store, bot: adapter.botIdentity },
@@ -1119,6 +1120,7 @@ export class Gateway {
             userDisplay: event.userDisplay,
             ...(event.mentionsBot === true && { mentionsBot: true }),
             ...(event.repliesToBot === true && { repliesToBot: true }),
+            ...(privateReply && { privateReply }),
             ...(sideQuestion && { sideQuestion }),
           },
           threadId: event.threadId ?? null,

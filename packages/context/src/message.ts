@@ -36,9 +36,9 @@ function publicAttachments(attachments: readonly InboundAttachment[] = []) {
 }
 
 function publicReply(
-  reply: ReplyTarget,
+  reply: Omit<ReplyTarget, 'replyChain'>,
   attachments = reply.attachments,
-): ContextMessage['replyTo'] {
+) {
   const { albumId, id, quote, sender, text } = reply;
   return {
     ...(albumId !== undefined && { albumId }),
@@ -89,7 +89,24 @@ export function messageContext(
         ? (metadata.sender.name ?? null)
         : (metadata?.userDisplay ?? message.displayName ?? null),
     },
-    replyTo: reply && publicReply(reply, replyAttachments),
+    replyTo: reply && {
+      ...publicReply(reply, replyAttachments),
+      ...(reply.replyChain && {
+        replyChain: reply.replyChain.map((part) => {
+          const members =
+            part.albumId && album
+              ? album(part.albumId, migratedFromChatId)
+              : [];
+          const attachments = members
+            .filter(({ message }) => message.messageId === part.id)
+            .map(({ attachment }) => attachment);
+          return publicReply(
+            part,
+            attachments.length ? attachments : part.attachments,
+          );
+        }),
+      }),
+    },
     attachments: publicAttachments(attachments),
     ...(metadata?.mentionsBot === true && { mentionsYou: true }),
     ...(metadata?.repliesToBot === true && { repliesToYou: true }),

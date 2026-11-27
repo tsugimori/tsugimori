@@ -71,6 +71,8 @@ export interface ReplyTarget {
   attachments?: readonly InboundAttachment[];
   id: string;
   quote?: string;
+  /** Resolved thread, oldest first, including the immediate reply target. */
+  replyChain?: readonly Omit<ReplyTarget, 'replyChain'>[];
   sender?: MessageSender;
   text?: string;
 }
@@ -114,6 +116,10 @@ export function imageLimits(
   };
 }
 
+type ContextReply = Omit<ReplyTarget, 'attachments' | 'replyChain'> & {
+  attachments: AttachmentMetadata[];
+};
+
 export interface ContextMessage {
   albumId?: string;
   at: number | null;
@@ -121,9 +127,7 @@ export interface ContextMessage {
   id: string;
   mentionsYou?: true;
   repliesToYou?: true;
-  replyTo?: Omit<ReplyTarget, 'attachments'> & {
-    attachments: AttachmentMetadata[];
-  };
+  replyTo?: ContextReply & { replyChain?: ContextReply[] };
   sender: { id: string | null; name: string | null };
 }
 

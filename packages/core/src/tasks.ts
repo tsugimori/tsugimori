@@ -42,6 +42,7 @@ import { rm } from 'node:fs/promises';
 import { setTimeout as delay } from 'node:timers/promises';
 import { isDeepStrictEqual } from 'node:util';
 
+import type { QuotedAttachmentSources } from './attachments.ts';
 import type { HookRunner, Logger } from './hooks.ts';
 import type { MemoryResult } from './memory.ts';
 import type { Runtime } from './runtime.ts';
@@ -58,7 +59,11 @@ import {
   resolveAgentSetting,
 } from './agent-settings.ts';
 import { approvalMessages, approvalPrompt } from './approval-messages.ts';
-import { attachmentTool, turnAttachments } from './attachments.ts';
+import {
+  attachmentTool,
+  rememberQuotedAttachments,
+  turnAttachments,
+} from './attachments.ts';
 import { describeError } from './errors.ts';
 import { FfmpegMissing, findFfmpeg, prepareImage } from './media.ts';
 import { memoryAction } from './memory.ts';
@@ -105,6 +110,7 @@ type Work = {
   messageIds: Set<string>;
   pendingApprovalFallback?: string;
   progress: { stage: TaskStage; startedAt: number };
+  quotedAttachments: QuotedAttachmentSources;
   recorder?: TaskRecorder;
   route?: { agentId: string; model: string };
   sessionId?: string;
@@ -369,6 +375,7 @@ export class Tasks {
       temporaryAttachments: new Set(),
       acceptsSupplements: false,
       progress: { stage: 'preparing', startedAt: createdAt },
+      quotedAttachments: new Map(),
       sessionValid: true,
     };
     store.createTask({
@@ -977,6 +984,7 @@ export class Tasks {
               { store, workdir: (chat) => context.workdir(chat) },
               adapter,
               work?.temporaryAttachments,
+              work?.quotedAttachments,
             ),
           ]
         : []),
@@ -1091,30 +1099,29 @@ export class Tasks {
     const { signal } = abort;
     const approvalPending = work.endForApproval.signal;
     const { model } = settings;
-    const visibleReply = (message: InboundMessage) => {
-      const { replyTo } = message;
-      if (
-        replyTo &&
-        !store.messageVisible(
-          chat,
-          replyTo.id,
-          input.message.migratedFromChatId ?? '',
-        )
-      )
-        return { id: replyTo.id };
-      return replyTo;
-    };
-    const collectStickers = (message: InboundMessage) => {
+    const visibleReply = (message: TaskInput['message']) =>
+      message.replyTo &&
+      store.visibleReply(
+        chat,
+        message.replyTo,
+        message.migratedFromChatId ?? '',
+      );
+    const collectStickers = (
+      message: InboundMessage,
+      reply = message.replyTo,
+    ) => {
       if (input.scheduled || !adapter.downloadAttachment) return;
       for (const attachments of [
         message.attachments,
-        visibleReply(message)?.attachments,
+        reply?.attachments,
+        ...(reply?.replyChain?.slice(0, -1).map((part) => part.attachments) ??
+          []),
       ])
         for (const attachment of attachments ?? [])
           if (attachment.kind === 'sticker')
             (work.stickerCandidates ??= []).push(attachment);
     };
-    collectStickers(input.message);
+    collectStickers(input.message, visibleReply(input.message));
     const describe = <T extends AttachmentMetadata>(
       attachments: readonly T[],
     ) => stickers.describe(adapter, attachments);
@@ -1259,8 +1266,17 @@ export class Tasks {
           const { message } = block;
           if (!message) continue;
           message.attachments = describe(message.attachments);
-          if (message.replyTo)
+          if (message.replyTo) {
             message.replyTo.attachments = describe(message.replyTo.attachments);
+            for (const part of message.replyTo.replyChain ?? [])
+              part.attachments = describe(part.attachments);
+          }
+          if ('seq' in entry && entry.seq !== undefined)
+            rememberQuotedAttachments(
+              work.quotedAttachments,
+              message,
+              entry.seq,
+            );
         }
         await recorder.context(entries, incognitoId !== undefined);
         const workdir = await context.workdir(chat);
@@ -1282,9 +1298,9 @@ export class Tasks {
     let blocks = assembled.blocks;
     let sessionId = session?.sessionId;
     const answers: string[] = [];
-    const describeSupplement = (message: InboundMessage) => {
-      collectStickers(message);
+    const describeSupplement = (message: TaskInput['message']) => {
       const replyTo = visibleReply(message);
+      collectStickers(message, replyTo);
       return {
         ...message,
         ...((incognitoId !== undefined || replyTo !== message.replyTo) && {
@@ -1294,6 +1310,10 @@ export class Tasks {
         replyTo: replyTo && {
           ...replyTo,
           attachments: replyTo.attachments && describe(replyTo.attachments),
+          replyChain: replyTo.replyChain?.map((part) => ({
+            ...part,
+            attachments: part.attachments && describe(part.attachments),
+          })),
         },
       };
     };
@@ -1313,6 +1333,13 @@ export class Tasks {
         userId: message.userId,
       }),
     });
+    const deliverSupplement = ({ message, seq }: TaskInput) => {
+      const described = describeSupplement(message);
+      const block = supplementBlock(described);
+      rememberQuotedAttachments(work.quotedAttachments, block.message, seq);
+      recorder.supplement(message.messageId, block);
+      return { described, block };
+    };
     let media = assembled.media;
     const seenImages = new Set<string>();
     for (;;) {
@@ -1433,14 +1460,10 @@ export class Tasks {
               }
               return result === true;
             },
-            supplements: supplements.stream(passSignal, (message) => {
-              const described = describeSupplement(message);
-              recorder.supplement(
-                message.messageId,
-                supplementBlock(described),
-              );
-              return described;
-            }),
+            supplements: supplements.stream(
+              passSignal,
+              (input) => deliverSupplement(input).described,
+            ),
           },
         );
         if (result.text.trim()) answers.push(result.text);
@@ -1459,11 +1482,7 @@ export class Tasks {
         work.acceptsSupplements = false;
         break;
       }
-      blocks = next.map(({ message }) => {
-        const block = supplementBlock(describeSupplement(message));
-        recorder.supplement(message.messageId, block);
-        return block;
-      });
+      blocks = next.map((input) => deliverSupplement(input).block);
       media = blocks;
     }
     const seenAfter = [
@@ -1481,7 +1500,7 @@ export class Tasks {
   }
 
   async #images(
-    { abort, adapter, chat, id, input }: Work,
+    { abort, adapter, chat, id, input, quotedAttachments }: Work,
     { imageLimits }: AgentConnector,
     blocks: readonly ContextBlock[],
     afterSeq: number | undefined,
@@ -1499,6 +1518,7 @@ export class Tasks {
       input.message.migratedFromChatId ?? '',
       afterSeq,
       includeReplies,
+      quotedAttachments,
     );
     if (!attachments.length) return [];
     const { signal } = abort;

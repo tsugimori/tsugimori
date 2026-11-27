@@ -822,10 +822,7 @@ test('/incognito limits context and tools across turns, model changes, compactio
       if (request.context.at(-1)?.content === 'First private turn') {
         const get = request.tools.find(({ name }) => name === 'attachment.get');
         assert.ok(get);
-        await assert.rejects(
-          get.run({ messageId: 'previous', index: 0 }),
-          /Attachment not found/,
-        );
+        await get.run({ messageId: 'previous', index: 0 });
         await assert.rejects(
           get.run({ messageId: 'private-first', index: 0 }),
           /Attachment not found/,
@@ -907,7 +904,7 @@ test('/incognito limits context and tools across turns, model changes, compactio
   assert.equal(store.getMessage(chat, 'private-start')?.text, '/incognito');
   assert.equal(
     platform.sent.at(-1)?.text,
-    "Incognito on: I can't see earlier messages, and what's said from now on won't be visible to me after `/incognito off` or `/new`.",
+    "Incognito on. Reply to an earlier ordinary message to bring its thread into this conversation. After `/incognito off` or `/new`, I won't see what was said in this window.",
   );
   assert.equal(store.getMessage(chat, 'private-start')?.incognitoId, start);
   assert.equal(
@@ -942,7 +939,7 @@ test('/incognito limits context and tools across turns, model changes, compactio
     false,
   );
   const first = requests[1]!;
-  assert.deepEqual(downloads, ['private-file']);
+  assert.deepEqual(downloads, ['old-file', 'private-file']);
   assert.equal(first.resumeSessionId, undefined);
   assert.deepEqual(
     first.context
@@ -950,13 +947,14 @@ test('/incognito limits context and tools across turns, model changes, compactio
       .map(({ content }) => content),
     ['First private turn'],
   );
-  assert.deepEqual(first.context.at(-1)?.message?.replyTo, {
-    id: 'previous',
-    attachments: [],
-    sender: undefined,
-    text: undefined,
-    quote: undefined,
-  });
+  const firstReply = first.context.at(-1)?.message?.replyTo;
+  assert.equal(firstReply?.text, 'Old conversation');
+  assert.equal(firstReply?.quote, 'Old quote');
+  assert.deepEqual(firstReply?.sender, { id: 'owner' });
+  assert.deepEqual(
+    firstReply?.replyChain?.map(({ id }) => id),
+    ['previous'],
+  );
   assert.deepEqual(
     first.context
       .at(-1)
@@ -995,7 +993,7 @@ test('/incognito limits context and tools across turns, model changes, compactio
     );
     assert.doesNotMatch(
       JSON.stringify(request.context),
-      /Old conversation|Old quote|old-attachment|Discarded argument/,
+      /Old summary|Discarded argument/,
     );
     assert.ok(request.tools.some(({ name }) => name === 'attachment.get'));
     assert.ok(
@@ -1063,9 +1061,12 @@ test('/incognito limits context and tools across turns, model changes, compactio
         ({ content }) => content === 'Second private turn',
       ),
     );
-    assert.doesNotMatch(
-      JSON.stringify(afterRestart.context),
-      /Old conversation|Old quote|Old summary|old-attachment/,
+    assert.doesNotMatch(JSON.stringify(afterRestart.context), /Old summary/);
+    assert.deepEqual(
+      afterRestart.context
+        .find(({ message }) => message?.id === 'private-first')
+        ?.message?.replyTo?.replyChain?.map(({ text }) => text),
+      ['Old conversation'],
     );
     assert.ok(
       afterRestart.tools.every(({ name }) => !name.startsWith('history.')),
@@ -1206,6 +1207,261 @@ test('/incognito limits context and tools across turns, model changes, compactio
     await restarted.stop();
     reopened.close();
   }
+});
+
+test('incognito explicit replies expose only the quoted thread and its attachments', async (t) => {
+  const requests: AgentRequest[] = [];
+  const downloads: (string | undefined)[] = [];
+  const hasFfmpeg = spawnSync('ffmpeg', ['-version']).status === 0;
+  let toolCheck: Promise<void> | undefined;
+  const { gateway, platform, store } = await fixture(
+    t,
+    async function* (request) {
+      requests.push(request);
+      const source = request.context.at(-1)?.message?.id;
+      if (source === 'read-thread' || source === 'unquoted-turn') {
+        toolCheck = (async () => {
+          const get = request.tools.find(
+            ({ name }) => name === 'attachment.get',
+          );
+          assert.ok(get);
+          const fetch = (messageId: string, index = 0) =>
+            get.run({ messageId, index });
+          if (source === 'read-thread') {
+            await fetch('root');
+            await fetch('latest');
+          } else {
+            await assert.rejects(fetch('root'), /Attachment not found/);
+            await assert.rejects(fetch('latest'), /Attachment not found/);
+          }
+          await assert.rejects(fetch('unrelated'), /Attachment not found/);
+          await assert.rejects(fetch('latest', 1), /Attachment not found/);
+        })();
+        await toolCheck;
+      }
+      yield { type: 'text.final', text: 'Ready' };
+    },
+    true,
+    {
+      context: { recentMessages: 1, summary: { enabled: false } },
+      downloadAttachment: async ({ fileId }) => {
+        downloads.push(fileId);
+        if (fileId === 'root-image')
+          return { bytes: staticStickerPng, mime: 'image/png' };
+        return { bytes: Buffer.from('file'), mime: 'application/pdf' };
+      },
+      imageLimits: hasFfmpeg ? { maxBytes: 1024, maxEdge: 64 } : undefined,
+    },
+  );
+  const post = (
+    id: string,
+    text: string,
+    replyId?: string,
+    overrides?: Partial<InboundMessage>,
+  ) =>
+    platform.emit(
+      inbound(id, text, {
+        chatKind: 'group',
+        userId: 'member',
+        userDisplay: 'Ada',
+        ...(replyId && { replyTo: { id: replyId } }),
+        ...overrides,
+      }),
+    );
+  const file = { kind: 'file', index: 0, name: 'file.pdf' } as const;
+
+  await platform.emit(inbound('earlier-start', '/incognito on'));
+  await post('old-private', 'Earlier window text');
+  await platform.emit(inbound('earlier-end', '/incognito off'));
+  await post('root', 'First message', undefined, {
+    attachments: [
+      { kind: 'image', index: 0, fileId: 'root-image', mime: 'image/png' },
+    ],
+  });
+  await post('middle', 'Second message', 'root');
+  await post('latest', 'Third message', 'middle', {
+    albumId: 'old-album',
+    attachments: [{ ...file, fileId: 'latest-file' }],
+  });
+  await post('unrelated', 'Unrelated old message', undefined, {
+    albumId: 'old-album',
+    attachments: [{ ...file, fileId: 'unrelated-file' }],
+  });
+  await post('deleted', 'Deleted text', 'root');
+  await post('side', '/ask Side question text', 'root');
+  await post('pairing', 'Pairing reply with /pair abcdefghijklmnop', 'root');
+  await post('private-command', '/login example-secret', 'root');
+  await post('setup-secret', 'Setup secret text', 'root');
+  const blockers = [
+    'old-private',
+    'deleted',
+    'side',
+    'pairing',
+    'private-command',
+    'setup-secret',
+    'missing',
+  ];
+  for (const blocked of blockers) {
+    await post('bridge-' + blocked, 'Visible reply', blocked);
+  }
+  store.markSetupSecret(chat, 'setup-secret');
+  store.markDeleted(chat, 'deleted');
+  await platform.emit(inbound('current-start', '/incognito on'));
+  await platform.emit(
+    inbound('read-thread', 'Read this thread', {
+      replyTo: { id: 'latest' },
+    }),
+  );
+  await gateway.idle();
+  assert.ok(toolCheck);
+  await toolCheck;
+  assert.deepEqual(
+    downloads,
+    hasFfmpeg
+      ? ['root-image', 'root-image', 'latest-file']
+      : ['root-image', 'latest-file'],
+  );
+
+  const [request] = requests;
+  if (hasFfmpeg)
+    assert.deepEqual(
+      request?.images?.map(({ source }) => source),
+      [{ messageId: 'root', index: 0 }],
+    );
+  const messages = request?.context.filter(
+    ({ source }) => source === 'message',
+  );
+  assert.deepEqual(
+    messages?.map(({ message }) => message?.id),
+    ['read-thread'],
+  );
+  const reply = messages?.[0]?.message?.replyTo;
+  assert.equal(reply?.text, 'Third message');
+  assert.deepEqual(reply?.sender, { id: 'member', name: 'Ada' });
+  assert.deepEqual(
+    reply?.replyChain?.map(({ id, text }) => [id, text]),
+    [
+      ['root', 'First message'],
+      ['middle', 'Second message'],
+      ['latest', 'Third message'],
+    ],
+  );
+  assert.doesNotMatch(JSON.stringify(reply), /fileId|unrelated/i);
+  const throughSeq = store.getMessage(chat, 'read-thread')!.seq;
+  const recent = store.recentMessages(chat, { throughSeq });
+  assert.deepEqual(
+    recent.map(({ messageId }) => messageId),
+    ['read-thread'],
+  );
+  assert.equal(recent[0]?.metadata?.replyTo?.replyChain?.length, 3);
+  assert.deepEqual(
+    store.historyMessages(chat, { query: 'First message', limit: 10 }),
+    [],
+  );
+  assert.deepEqual(store.messageAlbum(chat, 'old-album', ''), []);
+
+  toolCheck = undefined;
+  await platform.emit(inbound('unquoted-turn', 'A separate turn'));
+  await gateway.idle();
+  assert.ok(toolCheck);
+  await toolCheck;
+  store.markDeleted(chat, 'middle');
+  assert.deepEqual(
+    store
+      .recentMessages(chat, { throughSeq })[0]
+      ?.metadata?.replyTo?.replyChain?.map(({ id }) => id),
+    ['latest'],
+  );
+  for (const blocked of blockers) {
+    await platform.emit(
+      inbound('via-' + blocked, 'Follow only the visible portion', {
+        replyTo: { id: 'bridge-' + blocked },
+      }),
+    );
+    await gateway.idle();
+    assert.deepEqual(
+      requests
+        .at(-1)
+        ?.context.at(-1)
+        ?.message?.replyTo?.replyChain?.map(({ id }) => id),
+      ['bridge-' + blocked],
+    );
+    await platform.emit(
+      inbound('to-' + blocked, 'Try a direct quote', {
+        replyTo: { id: blocked, text: 'Embedded text' },
+      }),
+    );
+    await gateway.idle();
+    if (blocked === 'setup-secret') {
+      assert.ok(store.isSetupSecret(chat, 'to-' + blocked));
+      assert.equal(store.getMessage(chat, 'to-' + blocked), undefined);
+    } else
+      assert.deepEqual(
+        store.getMessage(chat, 'to-' + blocked)?.metadata?.replyTo,
+        { id: blocked },
+      );
+  }
+});
+
+test('ordinary replies cap their threads at 20 messages and 12,000 characters', async (t) => {
+  const requests: AgentRequest[] = [];
+  const { gateway, platform } = await fixture(
+    t,
+    async function* (request) {
+      requests.push(request);
+      yield { type: 'text.final', text: 'Ready' };
+    },
+    true,
+    { context: { recentMessages: 1, summary: { enabled: false } } },
+  );
+  const post = (id: string, text: string, parent?: string) =>
+    platform.emit(
+      inbound(id, text, {
+        chatKind: 'group',
+        userId: 'member',
+        ...(parent && { replyTo: { id: parent } }),
+      }),
+    );
+  for (let i = 1; i <= 21; i++)
+    await post(
+      `thread-${i}`,
+      `Message ${i}`,
+      i > 1 ? `thread-${i - 1}` : undefined,
+    );
+  await platform.emit(
+    inbound('count-cap', 'Look at this thread', {
+      replyTo: { id: 'thread-21' },
+    }),
+  );
+  await gateway.idle();
+  assert.deepEqual(
+    requests[0]?.context
+      .at(-1)
+      ?.message?.replyTo?.replyChain?.map(({ id }) => id),
+    Array.from({ length: 20 }, (_, i) => `thread-${i + 2}`),
+  );
+
+  await post('long-parent', 'P'.repeat(7_000), 'thread-21');
+  await post('long-target', 'T'.repeat(7_500), 'long-parent');
+  await platform.emit(
+    inbound('char-cap', 'Look at this long thread', {
+      replyTo: { id: 'long-target', quote: 'Excerpt' },
+    }),
+  );
+  await gateway.idle();
+  assert.deepEqual(
+    requests[1]?.context
+      .at(-1)
+      ?.message?.replyTo?.replyChain?.map(({ id, text, quote }) => [
+        id,
+        text?.length,
+        quote,
+      ]),
+    [
+      ['long-parent', 4_493, undefined],
+      ['long-target', 7_500, 'Excerpt'],
+    ],
+  );
 });
 
 test(
@@ -5872,6 +6128,21 @@ test('renders an old quoted file and downloads only attachments in the current c
     .filter((block) => block.source === 'message')
     .map(renderContextLine);
   assert.equal(context?.length, 1);
+  const expectedReply = {
+    id: 'original',
+    text: '[file]',
+    sender: { id: 'member', name: 'Ada' },
+    attachments: [
+      {
+        index: 0,
+        kind: 'file',
+        name: 'record.pdf',
+        mime: 'application/pdf',
+        size: 3,
+      },
+    ],
+    quote: 'part',
+  };
   assert.deepEqual(JSON.parse(context![0]!), {
     source: 'message',
     trust: 'owner',
@@ -5879,21 +6150,7 @@ test('renders an old quoted file and downloads only attachments in the current c
     id: 'latest',
     at: 2,
     sender: { id: 'owner', name: 'Owner' },
-    replyTo: {
-      id: 'original',
-      text: '[file]',
-      sender: { id: 'member', name: 'Ada' },
-      attachments: [
-        {
-          index: 0,
-          kind: 'file',
-          name: 'record.pdf',
-          mime: 'application/pdf',
-          size: 3,
-        },
-      ],
-      quote: 'part',
-    },
+    replyTo: { ...expectedReply, replyChain: [expectedReply] },
     attachments: [],
   });
   assert.deepEqual(downloads, ['remote-original', 'remote-snapshot']);

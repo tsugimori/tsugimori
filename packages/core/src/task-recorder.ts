@@ -163,6 +163,7 @@ export class TaskRecorder {
                 (incognito ||
                   block.message.albumId ||
                   block.message.replyTo?.albumId ||
+                  block.message.replyTo?.replyChain ||
                   block.message.attachments.some(
                     ({ description }) => description,
                   ) ||
