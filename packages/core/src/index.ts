@@ -45,12 +45,14 @@ import {
 import { Tracer } from '@tsugimori/trace';
 import { isDeepStrictEqual } from 'node:util';
 
+import type { ChoiceHandler } from './chat-choices.ts';
 import type { Command } from './chat-commands.ts';
 import type { Logger } from './hooks.ts';
 import type { MemoryResult } from './memory.ts';
 import type { PreviewProviders } from './previews.ts';
 import type { RemovalPlan } from './removal.ts';
 import type { PlatformNotice } from './runtime.ts';
+import type { TaskInput } from './supplements.ts';
 import type { WebImageNetwork } from './web-image.ts';
 
 import { untilAborted } from './abort.ts';
@@ -58,11 +60,7 @@ import { adminReader } from './admin.ts';
 import { acceptsServiceTier, formatServiceTier } from './agent-settings.ts';
 import { approvalDecisionText, approvalMessages } from './approval-messages.ts';
 import { ChatChoices, supportsChoices } from './chat-choices.ts';
-import {
-  chatCommands,
-  isMemberCommand,
-  parseCommand,
-} from './chat-commands.ts';
+import { canRunCommand, chatCommands, parseCommand } from './chat-commands.ts';
 import { ChatRemoval } from './chat-removal.ts';
 import { ChatSetup } from './chat-setup.ts';
 import { EnvironmentChecks, failureText } from './checks.ts';
@@ -946,7 +944,11 @@ export class Gateway {
     }
   }
 
-  async #process(adapter: PlatformAdapter, inbound: PlatformInboundEvent) {
+  async #process(
+    adapter: PlatformAdapter,
+    inbound: PlatformInboundEvent,
+    finishChoice?: (text: string) => Promise<void>,
+  ) {
     const at = Date.now();
     const { store } = this.#deps;
     if (inbound.type === 'chat-migrated')
@@ -1050,12 +1052,20 @@ export class Gateway {
     };
     const parsed = parseCommand(event.text, adapter.botIdentity?.username);
     const command = parsed === 'other-bot' ? undefined : parsed;
+    const finishSelected = async (allowed = true) => {
+      if (!finishChoice || !command) return;
+      const { choices } = systemMessages(this.#runtime.config.locale);
+      await finishChoice(
+        allowed ? choices.answer(`/${command.name}`) : choices.unavailable,
+      );
+    };
     if (
       inbound.type !== 'chat-migrated' &&
       command?.name === 'cancel' &&
       (await this.#chatRemoval.receive(adapter, chat, event, true))
     ) {
       recordDecision('command', true);
+      if (finishChoice) await finishSelected();
       return;
     }
     if (
@@ -1069,6 +1079,7 @@ export class Gateway {
     ) {
       store.recordUser(user);
       recordDecision('command', true);
+      if (finishChoice) await finishSelected(this.#auth.isOwner(user));
       return;
     }
     if (
@@ -1174,6 +1185,7 @@ export class Gateway {
               command,
             );
             await received;
+            if (finishChoice) await finishSelected(Boolean(response));
             if (response)
               await this.#outbound.send(
                 adapter,
@@ -1224,9 +1236,11 @@ export class Gateway {
       userId: event.userId,
     });
     if (command) {
-      const finish = owner
-        ? this.#chatChoices.claimReply(adapter, message, command)
-        : undefined;
+      const finish =
+        finishChoice ??
+        (owner
+          ? this.#chatChoices.claimReply(adapter, message, command)
+          : undefined);
       let recorded = false;
       const commandDecision = (taskId?: string) => {
         if (recorded) return;
@@ -1955,8 +1969,11 @@ export class Gateway {
     if (
       this.#removingPlatform(adapter.id) ||
       this.#removingAgentRoute(chat) ||
-      (!this.#auth.isOwner({ adapterId: adapter.id, userId: message.userId }) &&
-        !this.#auth.isAllowlisted(chat))
+      !canRunCommand(
+        name,
+        this.#auth.isOwner({ adapterId: adapter.id, userId: message.userId }),
+        this.#auth.isAllowlisted(chat),
+      )
     )
       return;
     const m = systemMessages(this.#runtime.config.locale);
@@ -1993,25 +2010,33 @@ export class Gateway {
     const { store } = this.#deps;
     const { locale } = this.#runtime.config;
     const m = systemMessages(locale);
-    const selectedCommand = m.choices.answer(`/${name} ${args}`);
+    const selectedCommand = m.choices.answer(
+      args ? `/${name} ${args}` : `/${name}`,
+    );
     const send = async (
       text: string,
       choices: readonly PromptChoice[] = [],
       fallback?: string,
-      choiceCommand = name,
+      {
+        canChoose,
+        command: choiceCommand = name,
+        describePage,
+        select,
+      }: {
+        canChoose?(): boolean;
+        command?: Command['name'];
+        describePage?(page: readonly PromptChoice[]): string;
+        select?: ChoiceHandler;
+      } = {},
     ) => {
-      if (!choices.length) {
-        if (finish) await finish(text);
-        else await this.#outbound.send(adapter, reply(message, text));
-        return;
-      }
       const limit = adapter.capabilities.maxInlineButtons ?? Infinity;
-      if (!supportsChoices(adapter) || (limit < 3 && choices.length > limit)) {
-        await this.#outbound.send(
-          adapter,
-          reply(
-            message,
-            [
+      if (
+        !choices.length ||
+        !supportsChoices(adapter) ||
+        (limit < 3 && choices.length > limit)
+      ) {
+        const body = choices.length
+          ? [
               text,
               fallback ??
                 m.choices.values(
@@ -2019,9 +2044,10 @@ export class Gateway {
                     .map(({ value }) => `/${choiceCommand} ${value}`)
                     .join(' · '),
                 ),
-            ].join('\n'),
-          ),
-        );
+            ].join('\n')
+          : text;
+        if (finish) await finish(body);
+        else await this.#outbound.send(adapter, reply(message, body));
         return;
       }
       if (finish) await finish(selectedCommand);
@@ -2034,22 +2060,31 @@ export class Gateway {
         if (this.#isStopping()) return;
         const offset = index * choicesPerPage;
         const page = choices.slice(offset, offset + choicesPerPage);
+        const prompt = [
+          text,
+          pages > 1 ? m.choices.page(index + 1, pages) : undefined,
+          describePage?.(page),
+        ]
+          .filter(Boolean)
+          .join('\n');
         const previous = { value: '', label: m.choices.previous };
         const next = { value: '', label: m.choices.next };
         if (index > 0) page.push(previous);
         if (index + 1 < pages) page.push(next);
-        const prompt =
-          pages > 1 ? `${text}\n${m.choices.page(index + 1, pages)}` : text;
         await this.#chatChoices.send(
           adapter,
           reply(message, prompt),
           message.userId,
           page,
-          async (choice, edit) => {
+          async (choice, edit, event) => {
             if (choice === previous || choice === next) {
               const target = index + (choice === previous ? -1 : 1);
               await edit(prompt);
               await showPage(target);
+              return;
+            }
+            if (select) {
+              await select(choice, edit, event);
               return;
             }
             await this.#trace.span(
@@ -2071,7 +2106,8 @@ export class Gateway {
             );
           },
           {
-            command: choiceCommand,
+            canChoose,
+            command: select ? undefined : choiceCommand,
             deliver: (outbound) => this.#outbound.send(adapter, outbound),
             expires: true,
           },
@@ -2089,7 +2125,14 @@ export class Gateway {
         if (owner) await this.#newPairingCode(adapter, message, args);
         return;
       }
-      if (message.chatKind !== 'dm' || this.#auth.owner(adapter.id)) return;
+      if (owner && !args && message.chatKind === 'dm') {
+        await send(m.pairing.useNew);
+        return;
+      }
+      if (message.chatKind !== 'dm' || this.#auth.owner(adapter.id)) {
+        if (finish) await finish(m.choices.unavailable);
+        return;
+      }
       const paired = this.#auth.claimPairing(adapter.id, message.userId, args);
       if (paired) this.#commandMenus.sync(adapter);
       await send(paired ? m.pairing.success : m.pairing.invalid);
@@ -2099,8 +2142,10 @@ export class Gateway {
       }
       return;
     }
-    if (!owner && !(isMemberCommand(name) && this.#auth.isAllowlisted(chat)))
+    if (!canRunCommand(name, owner, this.#auth.isAllowlisted(chat))) {
+      if (finish) await finish(m.choices.unavailable);
       return;
+    }
     const isCurrentOwner = () =>
       !this.#isStopping() &&
       this.#runtime.getAdapter(adapter.id) === adapter &&
@@ -2111,13 +2156,59 @@ export class Gateway {
           this.#stickers.command(args, locale, message.chatKind === 'dm'),
         );
         break;
-      case 'help':
-        await send(
-          chatCommands(locale)
-            .owner.map(({ name, description }) => `/${name} · ${description}`)
-            .join('\n'),
+      case 'help': {
+        const commands = chatCommands(locale)[
+          owner ? 'owner' : 'member'
+        ].filter(
+          ({ name }) =>
+            message.chatKind === 'dm' ||
+            (name !== 'pair' && name !== 'sticker'),
         );
+        const descriptions = new Map(
+          commands.map(({ name, description }) => [`/${name}`, description]),
+        );
+        const choices = [...descriptions.keys()].map((label) => ({
+          label,
+          value: label,
+        }));
+        const describePage = (page: readonly PromptChoice[]) =>
+          page
+            .map(({ label }) => `${label} · ${descriptions.get(label)}`)
+            .join('\n');
+        await send(m.choices.help, choices, describePage(choices), {
+          canChoose: () =>
+            !this.#isStopping() &&
+            !this.#removingPlatform(adapter.id) &&
+            this.#runtime.getAdapter(adapter.id) === adapter &&
+            canRunCommand(
+              'help',
+              this.#auth.isOwner({
+                adapterId: adapter.id,
+                userId: message.userId,
+              }),
+              this.#auth.isAllowlisted(chat),
+            ),
+          describePage,
+          select: ({ value }, edit, event) => {
+            // Give the tap its own log position while replying to a platform message.
+            const selected: TaskInput['message'] = {
+              type: 'message',
+              chatId: event.chatId,
+              chatKind: message.chatKind,
+              chatTitle: message.chatTitle,
+              messageId: event.callbackId,
+              replyToMessageId: event.messageId,
+              text: value,
+              threadId: event.threadId,
+              userDisplay: event.userDisplay,
+              userId: event.userId,
+              userUsername: event.userUsername,
+            };
+            return this.#process(adapter, selected, edit);
+          },
+        });
         break;
+      }
       case 'webhook': {
         const w = m.webhook;
         if (args === 'setup') {
@@ -2213,7 +2304,7 @@ export class Gateway {
                 { value: 'check', label: w.check },
               ],
               undefined,
-              'webhook',
+              { command: 'webhook' },
             );
             break;
           }
@@ -2401,13 +2492,15 @@ export class Gateway {
         )
           break;
         if (args) await send(m.compactUsage);
-        else
+        else {
           this.#tasks.dispatch(
             adapter,
             chat,
             { message, seq, compact: true },
             onTask,
           );
+          if (finish) await finish(selectedCommand);
+        }
         break;
       case 'stop':
       case 'context':
@@ -2478,10 +2571,10 @@ export class Gateway {
         break;
       }
       case 'preview': {
-        if (args === 'close') {
+        if (!args || args === 'close') {
           const open = this.#previews?.list(chat.adapterId) ?? [];
           await send(
-            open.length ? m.previewCloseUsage : m.noPreviews,
+            open.length || !args ? m.previewCloseUsage : m.noPreviews,
             open.map(({ id }) => ({ value: `close ${id}`, label: id })),
           );
           break;
@@ -2514,6 +2607,7 @@ export class Gateway {
           chat,
           message,
         );
+        if (finish) await finish(selectedCommand);
         await this.#outbound.send(adapter, {
           ...reply(message, card.text),
           ...card,

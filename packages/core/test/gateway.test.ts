@@ -262,13 +262,14 @@ async function fixture(
       compactAt?: number;
       context?: Config['context'];
       model?: string;
+      owner?: string;
       platform?: boolean;
     } = {},
   ) {
     return writeFile(
       path,
       JSON.stringify({
-        owner: { [platformKind]: 'owner' },
+        owner: { [platformKind]: options.owner ?? 'owner' },
         platforms:
           options.platform === false
             ? []
@@ -1653,6 +1654,156 @@ test('/context shows usage and sizes for the current session in plain text', asy
   );
   assert.match(platform.sent.at(-1)?.text ?? '', /^\/incognito · /m);
   assert.match(platform.sent.at(-1)?.text ?? '', /^\/ask · /m);
+});
+
+test('/help lists commands for the sender and validates each tap', async (t) => {
+  const { configure, logs, platform, store } = await fixture(
+    t,
+    async function* () {},
+    false,
+    { locale: 'zh-TW' },
+  );
+  const group = { chatKind: 'group' } as const;
+  const member = { ...group, userId: 'member' };
+  await platform.emit(inbound('denied-help', '/help', member));
+  assert.equal(platform.sent.length, 0);
+  await platform.emit(inbound('allow-help', '/allow', group));
+  await platform.emit(inbound('owner-help', '/help', group));
+  const ownerMenu = platform.sent.at(-1)!;
+  assert.match(ownerMenu.text, /^可用指令\n/);
+  assert.match(ownerMenu.text, /^\/deny · 將這個對話移出允許清單$/m);
+  assert.doesNotMatch(ownerMenu.text, /^\/(pair|sticker) ·/m);
+  await platform.emit(inbound('dm-help', '/help'));
+  const dmMenu = platform.sent.at(-1)!;
+  assert.match(dmMenu.text, /^\/pair · /m);
+  assert.match(dmMenu.text, /^\/sticker · /m);
+  await platform.emit(inbound('member-help', '/help', member));
+  const memberMenu = platform.sent.at(-1)!;
+  assert.deepEqual(
+    memberMenu.buttons?.map(({ label }) => label),
+    ['/ask', '/btw', '/context', '/help', '/incognito', '/new'],
+  );
+  assert.match(memberMenu.text, /^\/help · 查看可用指令$/m);
+  assert.doesNotMatch(memberMenu.text, /^\/(deny|status) ·/m);
+
+  const tap = async (
+    menu: typeof memberMenu,
+    label: string,
+    userId: string,
+  ) => {
+    const button = menu.buttons?.find((entry) => entry.label === label);
+    assert.ok(button);
+    await platform.emit({
+      type: 'callback',
+      chatId: menu.chatId,
+      messageId: menu.messageId,
+      callbackId: button.id,
+      queryId: `tap-${platform.feedback.length}`,
+      userId,
+    });
+    return button.id;
+  };
+  await tap(ownerMenu, '/deny', 'member');
+  assert.equal(platform.feedback.at(-1)?.notice, '此選項目前無法使用。');
+  assert.equal(store.getChat(chat)?.allowlisted, true);
+  await tap(dmMenu, '/pair', 'owner');
+  assert.equal(
+    platform.feedback.at(-1)?.decisionText,
+    '用法：/pair new <adapterId>',
+  );
+  await tap(memberMenu, '/ask', 'member');
+  assert.equal(platform.feedback.at(-1)?.decisionText, '用法：/ask <訊息>');
+  assert.equal(store.listChatTasks(chat).length, 0);
+
+  await platform.emit(inbound('reset-help', '/help', member));
+  const resetMenu = platform.sent.at(-1)!;
+  await platform.emit(inbound('before-incognito', 'ordinary message', member));
+  const tapId = await tap(resetMenu, '/incognito', 'member');
+  const selected = store.getMessage(chat, tapId);
+  assert.equal(selected?.text, '/incognito');
+  assert.equal(selected?.userId, 'member');
+  assert.equal(store.getChat(chat)?.incognitoId, selected?.seq);
+  assert.ok(selected!.seq > store.getMessage(chat, 'before-incognito')!.seq);
+  assert.match(platform.sent.at(-1)!.text, /^無痕模式已開啟/);
+  assert.equal(platform.sent.at(-1)?.replyTo, resetMenu.messageId);
+
+  const reloads = () =>
+    logs.filter(({ event }) => event === 'config.reloaded').length;
+  const beforeReload = reloads();
+  await configure(false, { owner: 'new-owner' });
+  await until(t, () => reloads() > beforeReload);
+  const staleTap = await tap(ownerMenu, '/deny', 'owner');
+  assert.equal(store.getMessage(chat, staleTap)?.text, '/deny');
+  assert.equal(platform.feedback.at(-1)?.decisionText, '此選項目前無法使用。');
+  assert.equal(store.getChat(chat)?.allowlisted, true);
+});
+
+test('/help paginates within the inline button limit and falls back to text', async (t) => {
+  const { platform } = await fixture(t, async function* () {}, false);
+  platform.platform.capabilities.maxInlineButtons = 13;
+  await platform.emit(inbound('paged-help', '/help'));
+  const first = platform.sent.at(-1)!;
+  const commands: string[] = [];
+  const labels = (page: typeof first) =>
+    page.buttons?.map(({ label }) => label);
+  const checkPage = (page: typeof first, index: number) => {
+    assert.ok(page.buttons?.length);
+    assert.ok(page.buttons.length <= 13);
+    assert.match(
+      page.text,
+      new RegExp(`^Available commands\\nPage ${index} of 3\\n`),
+    );
+    const pageCommands = page.buttons
+      .map(({ label }) => label)
+      .filter((label) => label.startsWith('/'));
+    assert.deepEqual(
+      page.text
+        .split('\n')
+        .slice(2)
+        .map((line) => line.split(' · ')[0]),
+      pageCommands,
+    );
+    commands.push(...pageCommands);
+  };
+  const navigate = async (page: typeof first, label: string) => {
+    const button = page.buttons?.find((entry) => entry.label === label);
+    assert.ok(button);
+    await platform.emit({
+      type: 'callback',
+      chatId: page.chatId,
+      messageId: page.messageId,
+      callbackId: button.id,
+      userId: 'owner',
+    });
+    return platform.sent.at(-1)!;
+  };
+  checkPage(first, 1);
+  assert.equal(labels(first)?.at(-1), 'Next');
+  const second = await navigate(first, 'Next');
+  checkPage(second, 2);
+  assert.deepEqual(labels(second)?.slice(-2), ['Previous', 'Next']);
+  assert.equal(second.buttons?.length, 13);
+  const third = await navigate(second, 'Next');
+  checkPage(third, 3);
+  assert.equal(labels(third)?.at(-1), 'Previous');
+  assert.equal(commands.length, 24);
+  assert.equal(new Set(commands).size, commands.length);
+  assert.deepEqual(labels(await navigate(third, 'Previous')), labels(second));
+
+  platform.platform.capabilities.inlineButtons = false;
+  const group = { chatKind: 'group' } as const;
+  await platform.emit(inbound('allow-text-help', '/allow', group));
+  await platform.emit(
+    inbound('text-help', '/help', { ...group, userId: 'member' }),
+  );
+  const fallback = platform.sent.at(-1)!;
+  assert.equal(fallback.buttons, undefined);
+  assert.match(
+    fallback.text,
+    /^\/context · Show session context and token usage$/m,
+  );
+  assert.match(fallback.text, /^\/new · Start a new conversation$/m);
+  assert.doesNotMatch(fallback.text, /^\/deny ·/m);
 });
 
 test(
@@ -4755,7 +4906,17 @@ test(
     assert.ok(
       f.store.listPreviews().every(({ url }) => !url.includes('token')),
     );
-    await f.platform.emit(inbound('owner-close', '/preview close', group));
+    await f.platform.emit(inbound('owner-preview-help', '/help', group));
+    const help = f.platform.sent.at(-1);
+    const preview = help?.buttons?.find(({ label }) => label === '/preview');
+    assert.ok(help && preview);
+    await f.platform.emit({
+      type: 'callback',
+      chatId: chat.chatId,
+      messageId: help.messageId,
+      callbackId: preview.id,
+      userId: 'owner',
+    });
     const menu = f.platform.sent.at(-1);
     assert.ok(menu?.buttons?.length);
     assert.deepEqual(menu.buttons.map(({ label }) => label).sort(), [

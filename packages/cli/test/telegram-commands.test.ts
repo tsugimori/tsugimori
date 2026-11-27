@@ -314,7 +314,9 @@ test(
       set(
         allowlistedScope,
         ownerCommands.filter(({ command }) =>
-          ['ask', 'btw', 'context', 'new', 'incognito'].includes(command),
+          ['ask', 'btw', 'context', 'help', 'new', 'incognito'].includes(
+            command,
+          ),
         ),
       ),
     ]);

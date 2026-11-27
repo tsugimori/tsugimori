@@ -22,6 +22,11 @@ type Address = Pick<OutboundMessage, 'chatId' | 'threadId'> & {
   messageId: string;
 };
 type Finish = (text: string, retainPrompt?: boolean) => Promise<void>;
+export type ChoiceHandler = (
+  choice: PromptChoice,
+  finish: Finish,
+  event: Callback,
+) => void | Promise<void>;
 
 interface Dependencies {
   isOwner(adapter: PlatformAdapter, userId: string): boolean;
@@ -48,7 +53,8 @@ export function choiceLabel(choice: PromptChoice, locale: Config['locale']) {
 interface PendingChoice {
   active(): boolean;
   adapter: PlatformAdapter;
-  choose(): void | Promise<void>;
+  canChoose(): boolean;
+  choose(event: Callback): void | Promise<void>;
   finish: Finish;
   ready: Promise<Address | undefined>;
   userId: string;
@@ -56,6 +62,7 @@ interface PendingChoice {
 
 interface ChoiceOptions {
   active?(): boolean;
+  canChoose?(): boolean;
   command?: Command['name'];
   deliver?(message: OutboundMessage): Promise<SendReceipt>;
   expires?: boolean;
@@ -81,9 +88,10 @@ export class ChatChoices {
     message: OutboundMessage,
     userId: string,
     choices: readonly PromptChoice[],
-    select: (choice: PromptChoice, finish: Finish) => void | Promise<void>,
+    select: ChoiceHandler,
     {
       active = () => true,
+      canChoose = () => this.#deps.isOwner(adapter, userId),
       command,
       deliver = (outbound) => adapter.send(outbound),
       expires = false,
@@ -121,12 +129,13 @@ export class ChatChoices {
       this.#pending.set(id, {
         adapter,
         active,
+        canChoose,
         userId,
         ready: ready.promise,
         finish,
-        choose: () => {
+        choose: (event) => {
           deactivate();
-          return select(choice, finish);
+          return select(choice, finish, event);
         },
       });
     }
@@ -199,12 +208,11 @@ export class ChatChoices {
     if (!event.callbackId.startsWith(prefix)) return false;
     const pending = this.#pending.get(event.callbackId);
     const { userId, queryId } = event;
-    const owner = () => this.#deps.isOwner(adapter, userId);
     const address =
       !moved &&
       pending?.adapter === adapter &&
       pending.userId === userId &&
-      owner()
+      pending.canChoose()
         ? await pending.ready
         : undefined;
     const m = systemMessages(this.#deps.locale()).choices;
@@ -215,7 +223,7 @@ export class ChatChoices {
       address.chatId !== event.chatId ||
       address.threadId !== event.threadId ||
       this.#pending.get(event.callbackId) !== pending ||
-      !owner() ||
+      !pending.canChoose() ||
       !pending.active()
     ) {
       if (queryId)
@@ -229,7 +237,7 @@ export class ChatChoices {
       ? this.#feedback(adapter, address, { queryId, notice: '' })
       : undefined;
     try {
-      await pending.choose();
+      await pending.choose(event);
     } catch {
       this.#deps.log({
         level: 'error',

@@ -111,7 +111,7 @@ sticker catalog.
 
 | Command                                          | Who                                                       | What it does                                                                                                |
 | ------------------------------------------------ | --------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| `/help`                                          | Owner                                                     | Lists owner commands.                                                                                       |
+| `/help`                                          | Owner or members of an allowlisted chat                   | Lists the commands you can use in this chat, with tappable buttons where supported.                         |
 | `/status`                                        | Owner                                                     | Shows gateway health, chat activity, incognito mode, and system state.                                      |
 | `/agent <id>`                                    | Owner                                                     | Switches this chat to an available agent and reports any incompatible thinking or fast overrides it clears. |
 | `/model [name]`                                  | Owner                                                     | Shows the current model and its source, or sets a chat override. Use `default` to clear it.                 |

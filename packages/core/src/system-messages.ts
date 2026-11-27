@@ -72,6 +72,7 @@ const messages = {
     },
     choices: {
       answer: (label: string) => `Selected: ${label}`,
+      help: 'Available commands',
       cancelled: 'Selection cancelled.',
       expired: 'Selection expired.',
       failed: 'The selection could not be completed.',
@@ -283,6 +284,7 @@ const messages = {
     },
     choices: {
       answer: (label: string) => `已選擇：${label}`,
+      help: '可用指令',
       cancelled: '已取消選擇。',
       expired: '選擇已過期。',
       failed: '無法完成此選擇。',

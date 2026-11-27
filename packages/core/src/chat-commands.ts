@@ -84,12 +84,17 @@ const memberCommands = new Set<Command['name']>([
   'ask',
   'btw',
   'context',
+  'help',
   'incognito',
   'new',
 ]);
 
-export function isMemberCommand(name: Command['name']) {
-  return memberCommands.has(name);
+export function canRunCommand(
+  name: Command['name'],
+  owner: boolean,
+  allowlisted: boolean,
+) {
+  return owner || (allowlisted && memberCommands.has(name));
 }
 
 export function parseCommand(
@@ -113,15 +118,13 @@ export function parseCommand(
 }
 
 export function chatCommands(locale: Config['locale']) {
+  const describe = (name: Command['name']) => ({
+    name,
+    description: descriptions[name][locale],
+  });
   return {
-    member: Array.from(memberCommands, (name) => ({
-      name,
-      description: descriptions[name][locale],
-    })),
-    owner: Object.entries(descriptions).map(([name, localized]) => ({
-      name,
-      description: localized[locale],
-    })),
+    member: Array.from(memberCommands, describe),
+    owner: (Object.keys(descriptions) as Command['name'][]).map(describe),
     pair: [
       {
         name: 'pair',

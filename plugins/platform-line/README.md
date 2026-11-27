@@ -30,6 +30,8 @@ Terminal setup with `corepack pnpm exec tsugimori add platform line --dir ./ws` 
 
 ## Checks and status
 
+Send `/help` to discover the commands you can use in this chat. Tap a command to run it or see how to supply its arguments. Use **Previous** and **Next** to browse longer menus.
+
 `tsugimori doctor` checks the channel secret and access token, reads the gateway's ingress status, and compares LINE's configured endpoint with the gateway URL when ingress is healthy. `/status` shows gateway ingress and LINE attachment status in **System**. In **This chat**, the card can show the latest approval decision because LINE uses metered push.
 
 ## Delivery and limits
