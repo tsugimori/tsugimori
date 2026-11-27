@@ -13,17 +13,21 @@
     "lint": "eslint . --max-warnings=0",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
+    "lint:commits": "commitlint --from origin/main --to HEAD --verbose",
     "test": "node --test --test-concurrency=2",
     "build": "tsc -b tsconfig.build.json && node scripts/build-version.mjs && corepack pnpm --filter @tsugimori/web build",
-    "check": "corepack pnpm typecheck && corepack pnpm lint && corepack pnpm format:check && corepack pnpm test && corepack pnpm build"
+    "check": "corepack pnpm typecheck && corepack pnpm lint && corepack pnpm format:check && corepack pnpm test && corepack pnpm build",
+    "prepare": "node scripts/install-git-hooks.mjs"
   },
   "devDependencies": {
+    "@commitlint/cli": "21.2.4",
+    "@commitlint/config-conventional": "21.2.4",
+    "@tsugimori/cli": "workspace:*",
     "@types/node": "24.13.5",
     "eslint": "9.39.5",
     "eslint-plugin-perfectionist": "5.14.0",
     "prettier": "3.10.1",
     "typescript": "5.9.3",
-    "typescript-eslint": "8.74.0",
-    "@tsugimori/cli": "workspace:*"
+    "typescript-eslint": "8.74.0"
   }
 }
