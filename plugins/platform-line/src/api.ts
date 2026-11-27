@@ -4,6 +4,8 @@ import { attachmentBytes, ToolFailure } from '@tsugimori/plugin-sdk';
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 
+import { downloadSticker } from './sticker-image.ts';
+
 export function record(value: unknown): Record<string, unknown> | undefined {
   if (value && typeof value === 'object' && !Array.isArray(value))
     return value as Record<string, unknown>;
@@ -78,7 +80,9 @@ export class LineApi {
     signal: AbortSignal,
     maxBytes?: number,
   ) {
-    if (!attachment.fileId || attachment.kind === 'sticker')
+    if (attachment.kind === 'sticker')
+      return downloadSticker(this.#fetch, attachment, signal, maxBytes);
+    if (!attachment.fileId)
       throw new ToolFailure(
         'This attachment is unavailable through the LINE content API',
       );

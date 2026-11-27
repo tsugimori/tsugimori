@@ -1,6 +1,7 @@
 import type { InboundAttachment } from '@tsugimori/plugin-sdk';
 
 import { nonempty, record } from './api.ts';
+import { validStickerId } from './sticker-image.ts';
 
 export function lineAttachments(
   message: Record<string, unknown>,
@@ -30,13 +31,19 @@ export function lineAttachments(
         },
       ];
     }
-    case 'sticker':
+    case 'sticker': {
+      const stickerId = nonempty(message.stickerId);
       return [
         {
           index: 0,
           kind,
+          ...(validStickerId(stickerId) && {
+            fileId: `sticker:${stickerId}`,
+            stickerFormat: 'static',
+          }),
           set: nonempty(message.packageId),
-          stickerId: nonempty(message.stickerId),
+          stickerId,
+          stickerResourceType: nonempty(message.stickerResourceType),
           keywords: Array.isArray(message.keywords)
             ? message.keywords.filter(
                 (keyword: unknown): keyword is string =>
@@ -45,6 +52,7 @@ export function lineAttachments(
             : undefined,
         },
       ];
+    }
     default:
       return [];
   }

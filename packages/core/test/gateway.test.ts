@@ -36,6 +36,8 @@ import { setTimeout as delay, setImmediate } from 'node:timers/promises';
 
 import type { Logger } from '../src/index.ts';
 
+import { LineApi } from '../../../plugins/platform-line/src/api.ts';
+import { mapEvent } from '../../../plugins/platform-line/src/updates.ts';
 import { sessionScope } from '../src/agent-run.ts';
 import {
   decideTrigger,
@@ -142,6 +144,7 @@ async function fixture(
     locale?: 'en' | 'zh-TW';
     onScopedTool?: (args: unknown, userId: string) => void;
     outboundPush?: PlatformCapabilities['outboundPush'];
+    platformKind?: string;
     plugins?: PluginDefinition[];
     previews?: { named?: TunnelProvider; quick: TunnelProvider };
     reactions?: true | PlatformAdapter['setApprovalReaction'];
@@ -161,13 +164,15 @@ async function fixture(
     options.outboundPush,
   );
   platform.platform.downloadAttachment = options.downloadAttachment;
+  const platformKind = options.platformKind ?? 'fake';
+  platform.platform.kind = platformKind;
   let agentStarts = 0;
   let agentStops = 0;
   const registry = new PluginRegistry([
     ...(options.plugins ?? []),
     {
       name: 'test',
-      adapters: { fake: () => platform.platform },
+      adapters: { [platformKind]: () => platform.platform },
       agents: {
         fake: ({ id }) => ({
           id,
@@ -253,9 +258,11 @@ async function fixture(
     return writeFile(
       path,
       JSON.stringify({
-        owner: { fake: 'owner' },
+        owner: { [platformKind]: 'owner' },
         platforms:
-          options.platform === false ? [] : [{ id: adapterId, kind: 'fake' }],
+          options.platform === false
+            ? []
+            : [{ id: adapterId, kind: platformKind }],
         agents: enabled
           ? (options.agents ?? [
               {
@@ -4709,6 +4716,138 @@ test('renders an old quoted file and downloads only attachments in the current c
       ['attachment.get', 'ok'],
       ['attachment.get', 'error'],
     ],
+  );
+});
+
+test('LINE sticker PNGs reach the agent and CDN failures leave the keywords', async (t) => {
+  if (spawnSync('ffmpeg', ['-version']).status !== 0) {
+    t.skip('ffmpeg is unavailable on PATH');
+    return;
+  }
+  const png = execFileSync('ffmpeg', [
+    '-loglevel',
+    'error',
+    '-f',
+    'lavfi',
+    '-i',
+    'color=red:s=80x40',
+    '-frames:v',
+    '1',
+    '-threads',
+    '1',
+    '-c:v',
+    'png',
+    '-f',
+    'image2pipe',
+    'pipe:1',
+  ]);
+  const downloads: string[] = [];
+  const api = new LineApi(async (input) => {
+    const path = new URL(String(input)).pathname;
+    downloads.push(path);
+    return path.includes('/12/')
+      ? new Response(null, { status: 503 })
+      : new Response(new Uint8Array(png), {
+          headers: { 'Content-Type': 'image/png' },
+        });
+  }, 'fixture');
+  const requests: AgentRequest[] = [];
+  const f = await fixture(
+    t,
+    async function* (request) {
+      requests.push(request);
+      if (requests.length === 3) {
+        const tool = request.tools.find(
+          ({ name }) => name === 'attachment.get',
+        );
+        assert.ok(tool);
+        const saved = (await tool.run({ messageId: 'legacy', index: 0 })) as {
+          mime: string;
+          path: string;
+        };
+        assert.equal(saved.mime, 'image/png');
+        assert.deepEqual(await readFile(saved.path), png);
+      }
+      yield { type: 'text.final', text: 'Sticker received' };
+    },
+    true,
+    {
+      context: { recentMessages: 1, summary: { enabled: false } },
+      downloadAttachment: api.downloadAttachment.bind(api),
+      imageLimits: { maxBytes: 1024, maxEdge: 40, sourceMaxBytes: 1024 },
+      platformKind: 'line',
+    },
+  );
+  async function emitLine(message: Record<string, unknown>) {
+    const mapped = mapEvent(
+      {
+        type: 'message',
+        source: { type: 'user', userId: 'owner' },
+        message,
+      },
+      { emit: f.platform.emit },
+    );
+    assert.ok(mapped);
+    await f.platform.emit({ ...mapped.inbound, chatId: chat.chatId });
+    await f.gateway.idle();
+  }
+  await emitLine({
+    type: 'sticker',
+    id: 'available',
+    stickerId: '11',
+    stickerResourceType: 'ANIMATION',
+    keywords: ['happy'],
+  });
+  await emitLine({
+    type: 'sticker',
+    id: 'unavailable',
+    stickerId: '12',
+    keywords: ['sparkle'],
+  });
+  await f.platform.emit(
+    inbound('legacy', '[sticker]', {
+      userId: 'member',
+      attachments: [
+        { kind: 'sticker', index: 0, stickerId: '13', keywords: ['hello'] },
+      ],
+    }),
+  );
+  await emitLine({
+    type: 'text',
+    id: 'quote',
+    text: 'What is this?',
+    quotedMessageId: 'legacy',
+  });
+
+  assert.deepEqual(
+    f.platform.sent.map(({ text }) => text),
+    Array(3).fill('Sticker received'),
+  );
+  for (const [index, messageId] of [
+    [0, 'available'],
+    [2, 'legacy'],
+  ] as const) {
+    const images = requests[index]?.images;
+    assert.equal(images?.length, 1);
+    assert.equal(images[0]?.mime, 'image/png');
+    assert.deepEqual(images[0]?.source, { messageId, index: 0 });
+    const resized = Buffer.from(images[0]!.data, 'base64');
+    assert.equal(resized.subarray(0, 8).toString('hex'), '89504e470d0a1a0a');
+    assert.equal(resized.readUInt32BE(16), 40);
+    assert.equal(resized.readUInt32BE(20), 20);
+  }
+  assert.equal(requests[1]?.images?.length ?? 0, 0);
+  const fallback = requests[1]?.context.find(
+    ({ message }) => message?.id === 'unavailable',
+  );
+  assert.equal(fallback?.content, '[sticker]');
+  assert.deepEqual(fallback.message?.attachments[0]?.keywords, ['sparkle']);
+  assert.ok(f.logs.some(({ event }) => event === 'media.prepare_failed'));
+  assert.deepEqual(
+    downloads,
+    [11, 12, 13, 13].map(
+      (id) => `/stickershop/v1/sticker/${id}/android/sticker.png`,
+    ),
   );
 });
 

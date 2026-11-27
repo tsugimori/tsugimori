@@ -54,6 +54,7 @@ export interface AttachmentMetadata {
   size?: number;
   stickerFormat?: 'lottie' | 'static' | 'video';
   stickerId?: string;
+  stickerResourceType?: string;
   width?: number;
 }
 

@@ -32,6 +32,17 @@ export function visual(
   );
 }
 
+function hasLineStickerId(
+  platformKind: string,
+  attachment: Pick<InboundAttachment, 'kind' | 'stickerId'>,
+) {
+  return (
+    platformKind === 'line' &&
+    attachment.kind === 'sticker' &&
+    Boolean(attachment.stickerId)
+  );
+}
+
 export function attachmentTool(
   {
     store,
@@ -68,7 +79,10 @@ export function attachmentTool(
       )?.attachment;
       if (!attachment)
         throw new ToolFailure('Attachment not found in this conversation');
-      if (!attachment.fileId || !adapter.downloadAttachment)
+      if (
+        !adapter.downloadAttachment ||
+        (!attachment.fileId && !hasLineStickerId(adapter.kind, attachment))
+      )
         throw new ToolFailure(
           'The platform does not provide a download for this attachment',
         );
@@ -159,15 +173,19 @@ export function findAttachments(
 export function turnAttachments(
   store: Store,
   chat: Pick<MessageRecord, 'adapterId' | 'chatId'>,
+  platformKind: string,
   blocks: readonly ContextBlock[],
   migratedFromChatId: string,
   afterSeq: number | undefined,
   includeReplies: boolean,
 ) {
+  // Older LINE stickers have only a sticker ID. The adapter can still fetch them.
+  const isVisual = (attachment: InboundAttachment) =>
+    visual(attachment) || hasLineStickerId(platformKind, attachment);
   const ids = new Set<string>();
   for (const { message } of blocks) {
-    if (message?.attachments.some(visual)) ids.add(message.id);
-    if (includeReplies && message?.replyTo?.attachments.some(visual))
+    if (message?.attachments.some(isVisual)) ids.add(message.id);
+    if (includeReplies && message?.replyTo?.attachments.some(isVisual))
       ids.add(message.replyTo.id);
   }
   const groups = new Set<number>();
@@ -175,7 +193,9 @@ export function turnAttachments(
     const items = findAttachments(store, chat, id, migratedFromChatId);
     const album = items[0]?.albumFirstSeq;
     const images = items.filter(
-      ({ attachment }) => attachment.fileId && visual(attachment),
+      ({ attachment }) =>
+        isVisual(attachment) &&
+        (attachment.fileId || hasLineStickerId(platformKind, attachment)),
     );
     if (album === undefined) return images;
     if (groups.has(album) || (afterSeq !== undefined && album <= afterSeq))

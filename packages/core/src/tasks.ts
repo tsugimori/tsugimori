@@ -1264,6 +1264,7 @@ export class Tasks {
     const attachments = turnAttachments(
       store,
       chat,
+      adapter.kind,
       blocks,
       input.message.migratedFromChatId ?? '',
       afterSeq,
