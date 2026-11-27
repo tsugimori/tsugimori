@@ -2,6 +2,7 @@ import type { PlatformInboundEvent, ReplyTarget } from '@tsugimori/plugin-sdk';
 
 import type { Data } from './wire.ts';
 
+import { inboundMedia } from './attachments.ts';
 import { attribute, plainText, replySchema } from './text.ts';
 import { chatKind, messageId, mri, object, string } from './wire.ts';
 
@@ -43,7 +44,7 @@ function propertyList(value: unknown): Data[] {
     : [];
 }
 
-function nativeQuote(html: string) {
+export function nativeQuote(html: string) {
   for (const [quote, tag, body] of html.matchAll(
     /(<blockquote\b[^>]*>)([\s\S]*?)<\/blockquote\s*>/giu,
   )) {
@@ -117,28 +118,32 @@ export function normalizeMessage(
   const properties = object(raw.properties) ?? {};
   const type = string(raw.messagetype);
   const deleted = change === 'MessageRemoved' || Boolean(properties.deletetime);
-  const content = string(raw.content);
-  if (
-    !deleted &&
-    (!userId ||
-      !content ||
-      (type !== 'Text' && type !== 'RichText/Html' && type !== 'RichText'))
-  )
-    return;
+  const content = string(raw.content) ?? '';
   if (type?.startsWith('Control/') || type?.startsWith('ThreadActivity/'))
     return;
   const id = messageId(raw.id);
   if (!id) return;
   if (deleted) return { type: 'delete', chatId, messageId: id };
-  if (!userId || !content) return;
+  if (
+    !userId ||
+    (type !== 'Text' &&
+      type !== 'RichText/Html' &&
+      type !== 'RichText' &&
+      type !== 'RichText/Media_Picture' &&
+      type !== 'RichText/Media_GenericFile')
+  )
+    return;
 
   const quote = type === 'Text' ? undefined : nativeQuote(content);
   const replyTo = replyTarget(quote, properties);
-  const text =
-    type === 'Text'
-      ? content
-      : plainText(quote ? content.replace(quote.quote, '') : content);
-  if (!text.trim()) return;
+  const media = inboundMedia(
+    raw,
+    type === 'Text' ? '' : quote ? content.replace(quote.quote, '') : content,
+    properties,
+    type,
+  );
+  const text = type === 'Text' ? content : plainText(media.text);
+  if (!text.trim() && !media.attachments.length) return;
   const userDisplay = string(raw.imdisplayname) ?? userId;
   return {
     type: 'message',
@@ -146,6 +151,7 @@ export function normalizeMessage(
     chatKind: kind,
     messageId: id,
     at: arrival(raw),
+    ...(media.attachments.length && { attachments: media.attachments }),
     userId,
     userDisplay,
     botMessage: false,

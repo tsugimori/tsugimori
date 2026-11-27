@@ -1,3 +1,10 @@
+import { setTimeout as delay } from 'node:timers/promises';
+
+export type Wait = (ms: number, signal: AbortSignal) => Promise<void>;
+
+export const waitFor: Wait = (ms, signal) =>
+  delay(ms, undefined, { signal, ref: false });
+
 export type Data = Record<string, unknown>;
 
 export function object(value: unknown): Data | undefined {
@@ -38,10 +45,12 @@ export function chatKind(id: string) {
 }
 
 export class HttpError extends Error {
+  readonly retryAfterMs?: number;
   readonly status: number;
 
-  constructor(status: number) {
+  constructor(status: number, retryAfterMs?: number) {
     super(`Teams request failed (HTTP ${status})`);
+    this.retryAfterMs = retryAfterMs;
     this.status = status;
   }
 }

@@ -10,6 +10,7 @@ const origin = 'https://teams.live.com';
 const clientId = '8ec6bc83-69c8-4392-8f08-b3c986009232';
 const scope =
   'service::api.fl.spaces.skype.com::MBI_SSL openid profile offline_access';
+const graphScope = 'https://graph.microsoft.com/Files.ReadWrite';
 
 export interface ChatToken {
   account: string;
@@ -108,10 +109,18 @@ export function microsoftAuth(
     return data;
   }
 
-  const refresh = (refreshToken: string, signal: AbortSignal) =>
+  const refresh = (
+    refreshToken: string,
+    signal: AbortSignal,
+    resource: 'chat' | 'graph' = 'chat',
+  ) =>
     exchange(
       '/consumers/oauth2/v2.0/token',
-      { grant_type: 'refresh_token', refresh_token: refreshToken, scope },
+      {
+        grant_type: 'refresh_token',
+        refresh_token: refreshToken,
+        scope: resource === 'graph' ? graphScope : scope,
+      },
       signal,
     );
 
@@ -299,17 +308,36 @@ export function teamsSession(
   now = Date.now,
 ) {
   let current: (ChatToken & { displayName: string }) | undefined;
+  let graph: { expiresAt: number; token: string } | undefined;
   let refreshing: Promise<NonNullable<typeof current>> | undefined;
+  let refreshingGraph: Promise<NonNullable<typeof graph>> | undefined;
+  let serial = Promise.resolve();
   let required = false;
 
-  async function refresh() {
+  function serialize<T>(run: () => Promise<T>) {
+    const next = serial.then(() => {
+      signal.throwIfAborted();
+      if (required) throw new LoginRequired();
+      return run();
+    });
+    // Each scope shares the same on-disk refresh token and rotation order.
+    serial = next.then(
+      () => undefined,
+      () => undefined,
+    );
+    return next;
+  }
+
+  async function grantFor(resource: 'chat' | 'graph') {
     const saved = await credentials.read();
     if (!saved || saved.account !== account) throw new LoginRequired();
     let grant;
     try {
-      grant = await auth.refresh(saved.refreshToken, signal);
+      grant = await auth.refresh(saved.refreshToken, signal, resource);
     } catch (error) {
       if (error instanceof RefreshRejected) {
+        if (resource === 'graph')
+          throw new Error('Microsoft Graph file access was denied');
         required = true;
         await credentials.clear();
       }
@@ -318,9 +346,19 @@ export function teamsSession(
     const refreshToken = string(grant.refresh_token);
     if (refreshToken && refreshToken !== saved.refreshToken)
       await credentials.save({ ...saved, refreshToken });
-    const { chat } = await auth.authorize(grant, signal);
-    if (chat.account !== account) throw new LoginRequired();
-    return { ...chat, displayName: saved.displayName };
+    return { grant, saved };
+  }
+
+  async function refresh() {
+    try {
+      const { grant, saved } = await grantFor('chat');
+      const { chat } = await auth.authorize(grant, signal);
+      if (chat.account !== account) throw new LoginRequired();
+      return { ...chat, displayName: saved.displayName };
+    } catch (error) {
+      if (error instanceof LoginRequired) required = true;
+      throw error;
+    }
   }
 
   return {
@@ -335,23 +373,41 @@ export function teamsSession(
       if (required) return Promise.reject(new LoginRequired());
       if (current && current.expiresAt - now() > 120_000)
         return Promise.resolve(current);
-      refreshing ??= refresh()
+      refreshing ??= serialize(refresh)
         .then((token) => {
           current = token;
           return token;
-        })
-        .catch((error: unknown) => {
-          if (error instanceof LoginRequired) required = true;
-          throw error;
         })
         .finally(() => {
           refreshing = undefined;
         });
       return refreshing;
     },
+    getGraph() {
+      signal.throwIfAborted();
+      if (required) return Promise.reject(new LoginRequired());
+      if (graph && graph.expiresAt - now() > 120_000)
+        return Promise.resolve(graph);
+      refreshingGraph ??= serialize(async () => {
+        const { grant } = await grantFor('graph');
+        const token = string(grant.access_token);
+        if (!token) throw new Error('Microsoft did not return a Graph token');
+        graph = {
+          expiresAt: now() + seconds(grant.expires_in, 3600) * 1000,
+          token,
+        };
+        return graph;
+      }).finally(() => {
+        refreshingGraph = undefined;
+      });
+      return refreshingGraph;
+    },
+    invalidateGraph(token: string) {
+      if (graph?.token === token) graph = undefined;
+    },
     async stop() {
       // The adapter aborts its signal before waiting for any pending token rotation.
-      await refreshing?.catch(() => undefined);
+      await serial;
     },
   };
 }

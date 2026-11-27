@@ -1,3 +1,6 @@
+import type { MediaUpload } from '@tsugimori/plugin-sdk';
+import type { TestContext } from 'node:test';
+
 import { platformHome } from '@tsugimori/plugin-sdk';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -8,11 +11,12 @@ import { setImmediate as flush } from 'node:timers/promises';
 import { gzipSync } from 'node:zlib';
 
 import type { Socket } from '../src/trouter.ts';
-import type { Data } from '../src/wire.ts';
+import type { Data, Wait } from '../src/wire.ts';
 
 import { credentialStore } from '../src/credentials.ts';
 import { createTeamsAdapter } from '../src/index.ts';
 import { listen } from '../src/trouter.ts';
+import { prepareImage } from '../src/upload.ts';
 
 class FakeSocket extends EventTarget implements Socket {
   readyState = 1;
@@ -50,6 +54,7 @@ test('Trouter registers and renews, acks after delivery, and repairs on loss and
   const events: Data[] = [];
   const recovery: boolean[] = [];
   const backoff: number[] = [];
+  const connections: AbortSignal[] = [];
   const ready = Promise.withResolvers<void>();
   const delivered = Promise.withResolvers<void>();
   const token = {
@@ -61,7 +66,10 @@ test('Trouter registers and renews, acks after delivery, and repairs on loss and
     {
       authorize: async () => token,
       invalidate: () => assert.fail('unexpected invalidation'),
-      registered: ready.resolve,
+      registered(signal) {
+        connections.push(signal);
+        ready.resolve();
+      },
       fetch: async (url, init) => {
         assert.equal(
           String(url),
@@ -159,6 +167,7 @@ test('Trouter registers and renews, acks after delivery, and repairs on loss and
   }
   assert.equal(registrations.length, 2);
   assert.deepEqual(registrations[1], registrations[0]);
+  assert.equal(connections.length, 1);
 
   first.socket.event('trouter.reconnect', {
     target: 'host',
@@ -172,6 +181,9 @@ test('Trouter registers and renews, acks after delivery, and repairs on loss and
   await flush();
   assert.deepEqual(recovery, [true, false]);
   assert.equal(registrations.length, 3);
+  assert.equal(connections.length, 2);
+  assert.equal(connections[0]?.aborted, true);
+  assert.equal(connections[1]?.aborted, false);
 
   second.socket.event('trouter.reconnect', {
     target: 'host',
@@ -305,4 +317,425 @@ test('adapter waits for gateway readiness before delivery and cancels that wait 
   await adapter.stop();
   assert.equal(second.readyState, 3);
   assert.equal(emissions, 1);
+});
+
+async function connectedAdapter(
+  t: TestContext,
+  respond: typeof globalThis.fetch,
+  wait?: Wait,
+) {
+  const workspace = await mkdtemp(join(tmpdir(), 'teams-phase-2-'));
+  t.after(() => rm(workspace, { recursive: true, force: true }));
+  const home = platformHome(workspace, 'teams');
+  const account = '8:self';
+  await credentialStore(workspace, home).save({
+    account,
+    refreshToken: 'fixture',
+    displayName: 'Offline fixture',
+  });
+  const sockets: FakeSocket[] = [];
+  const warnings: string[] = [];
+  let messagingEndpoint: string | null = null;
+  const adapter = createTeamsAdapter(
+    {
+      wait,
+      socket(url) {
+        messagingEndpoint = url.searchParams.get('epid');
+        const socket = new FakeSocket();
+        sockets.push(socket);
+        queueMicrotask(() => socket.connect());
+        return socket;
+      },
+      fetch(input, init) {
+        const url = new URL(String(input));
+        if (url.hostname === 'login.microsoftonline.com')
+          return Promise.resolve(
+            Response.json({ access_token: 'fake-access' }),
+          );
+        if (url.hostname === 'teams.microsoft.com')
+          return Promise.resolve(new Response(null));
+        if (url.pathname === '/api/auth/v1.0/authz/consumer') {
+          const claims = Buffer.from(
+            JSON.stringify({ skypeid: account }),
+          ).toString('base64url');
+          return Promise.resolve(
+            Response.json({ skypeToken: `header.${claims}.signature` }),
+          );
+        }
+        return respond(input, init);
+      },
+    },
+    { id: 'teams', account, workspace, home },
+  );
+  t.after(() => adapter.stop());
+  await adapter.start({
+    emit: async () => {},
+    logWarning: (event) => warnings.push(event),
+  });
+  return {
+    adapter,
+    sockets,
+    warnings,
+    get messagingEndpoint() {
+      return messagingEndpoint;
+    },
+  };
+}
+
+function media(bytes: Uint8Array, name: string): MediaUpload {
+  return {
+    chatId: '8:peer',
+    file: { bytes, name },
+    preview: async () =>
+      assert.fail('Teams native upload uses the original image'),
+  };
+}
+
+test('Teams reads JPEG, PNG, GIF, and WebP display dimensions with pixel limits', () => {
+  const png = Buffer.from(
+    '89504e470d0a1a0a0000000d494844520000032000000190',
+    'hex',
+  );
+  const gif = Buffer.from('47494638396120039001', 'hex');
+  const jpeg = Buffer.from('ffd8ffc0000b080190032001011100', 'hex');
+  const webp = Buffer.from(
+    '524946461600000057454250565038580a000000000000001f03008f0100',
+    'hex',
+  );
+  for (const [subtype, bytes] of Object.entries({ png, gif, jpeg, webp })) {
+    assert.deepEqual(prepareImage(media(bytes, 'picture').file), {
+      subtype,
+      width: 800,
+      height: 400,
+    });
+  }
+  png.writeUInt32BE(150_000, 16);
+  assert.throws(
+    () => prepareImage(media(png, 'too large').file),
+    /25 million pixels/,
+  );
+  assert.throws(
+    () =>
+      prepareImage(
+        media(new Uint8Array(5 * 1024 ** 2 + 1), 'too many bytes').file,
+      ),
+    /5 MiB/,
+  );
+});
+
+test('Teams queues inline images with a single caption receipt and sends original files', async (t) => {
+  const calls: string[] = [];
+  const messages: Data[] = [];
+  let object = 0;
+  const { adapter } = await connectedAdapter(t, async (input, init) => {
+    const url = new URL(String(input));
+    calls.push(`${init?.method} ${url.pathname}`);
+    assert.equal(init?.redirect, 'error');
+    if (url.hostname === 'api.asm.skype.com') {
+      assert.match(
+        new Headers(init?.headers).get('Authorization') ?? '',
+        /^skype_token /,
+      );
+      if (init?.method === 'POST') {
+        object++;
+        assert.deepEqual(JSON.parse(String(init.body)), {
+          type: object === 3 ? 'sharing/file' : 'pish/image',
+          ...(object === 3 ? {} : { sharingMode: 'Inline' }),
+          filename: object === 3 ? 'a & b.pdf' : 'picture<.png',
+          permissions: { '8:peer': ['read'] },
+        });
+        return Response.json({ id: `object-${object}` });
+      }
+      assert.ok(init?.body instanceof Uint8Array);
+      assert.equal(init.body.byteLength, object === 3 ? 3 : 24);
+      return new Response(null);
+    }
+    assert.equal(url.hostname, 'teams.live.com');
+    messages.push(JSON.parse(String(init?.body)));
+    return Response.json({
+      OriginalArrivalTime: String(100 + messages.length),
+    });
+  });
+  const signal = AbortSignal.timeout(3000);
+  const picture = media(
+    Buffer.from('89504e470d0a1a0a0000000d494844520000032000000190', 'hex'),
+    'picture<.png',
+  );
+  const first = await adapter.sendImage!(picture, signal);
+  const second = await adapter.sendImage!(picture, signal);
+  assert.ok('queued' in first && 'queued' in second);
+  assert.deepEqual(calls, []);
+  await assert.rejects(
+    adapter.send(
+      { chatId: '8:other', text: 'Caption' },
+      { media: [first], signal },
+    ),
+    /belongs to a different reply/,
+  );
+  const receipt = await adapter.send(
+    { chatId: '8:peer', text: 'A **caption**', format: 'markdown' },
+    { media: [first, second], signal },
+  );
+  assert.deepEqual(receipt, {
+    messageId: '101',
+    parts: [
+      {
+        messageId: '101',
+        mediaIds: [first.id, second.id],
+        text: 'A **caption**',
+      },
+    ],
+  });
+  await assert.rejects(
+    adapter.send({ chatId: '8:peer', text: '' }, { media: [first], signal }),
+    /belongs to a different reply/,
+  );
+  assert.deepEqual(
+    await adapter.sendFile!(media(Buffer.from('pdf'), 'a & b.pdf'), signal),
+    { messageId: '102' },
+  );
+  assert.deepEqual(calls, [
+    'POST /v1/objects/',
+    'PUT /v1/objects/object-1/content/imgpsh',
+    'POST /v1/objects/',
+    'PUT /v1/objects/object-2/content/imgpsh',
+    'POST /api/chatsvc/consumer/v1/users/ME/conversations/8%3Apeer/messages',
+    'POST /v1/objects/',
+    'PUT /v1/objects/object-3/content/original',
+    'POST /api/chatsvc/consumer/v1/users/ME/conversations/8%3Apeer/messages',
+  ]);
+  const [image, file] = messages;
+  assert.equal(image?.messagetype, 'RichText/Html');
+  assert.deepEqual(image?.amsreferences, ['object-1', 'object-2']);
+  assert.match(
+    String(image?.content),
+    /^<p>A <strong>caption<\/strong><\/p><p><img /,
+  );
+  assert.match(
+    String(image?.content),
+    /object-1\/views\/imgo.*itemscope="png" width="400" height="200" alt="picture&lt;.png"/,
+  );
+  assert.equal(file?.messagetype, 'RichText/Media_GenericFile');
+  assert.deepEqual(file?.amsreferences, ['object-3']);
+  assert.match(
+    String(file?.content),
+    /^<URIObject type="File.1" uri="https:\/\/api.asm.skype.com\/v1\/objects\/object-3"><Title>a &amp; b.pdf<\/Title>.*<FileSize v="3"\/>/,
+  );
+});
+
+test('Teams reacts with native keys and limits edits and deletes to the signed-in account', async (t) => {
+  const methods: string[] = [];
+  const quote =
+    '<blockquote itemtype="http://schema.skype.com/Reply" itemid="111"><p>Old quote</p></blockquote>';
+  const quoted = '[{"messageId":"111"}]';
+  const { adapter } = await connectedAdapter(t, async (input, init) => {
+    const url = new URL(String(input));
+    methods.push(
+      `${init?.method} ${url.pathname.split('/messages/')[1]}${url.search}`,
+    );
+    if (init?.method === 'GET')
+      return Response.json({
+        id: url.pathname.split('/').at(-1),
+        conversationid: '8:peer',
+        fromId: url.pathname.endsWith('/124') ? '8:peer' : '8:self',
+        content: quote + '<p>Original</p>',
+        properties: { qtdMsgs: quoted },
+        messagetype: 'RichText/Html',
+      });
+    if (url.searchParams.get('name') === 'emotions') {
+      const { emotions } = JSON.parse(String(init?.body));
+      assert.equal(emotions.key, 'heart');
+      assert.equal(typeof emotions.value, 'number');
+    } else if (init?.method === 'PUT') {
+      const value = JSON.parse(String(init.body));
+      assert.equal(value.content, quote + '<p>Updated</p>');
+      assert.equal(value.properties.qtdMsgs, quoted);
+    }
+    return new Response(null);
+  });
+  const signal = AbortSignal.timeout(2000);
+  const destination = { chatId: '8:peer', messageId: '123' };
+  await adapter.sendReaction!({ ...destination, emoji: '❤️' }, signal);
+  await assert.rejects(
+    adapter.sendReaction!({ ...destination, emoji: '🥑' }, signal),
+    /unsupported by Teams/,
+  );
+  await adapter.updateChoices!(
+    { ...destination, buttons: [], text: 'Updated' },
+    signal,
+  );
+  await adapter.deleteMessage!(destination);
+  await assert.rejects(
+    adapter.deleteMessage!({ ...destination, messageId: '124' }),
+    /its own messages/,
+  );
+  await assert.rejects(
+    adapter.updateChoices!({
+      ...destination,
+      messageId: '124',
+      buttons: [],
+      text: 'Denied',
+    }),
+    /its own messages/,
+  );
+  assert.deepEqual(methods, [
+    'PUT 123/properties?name=emotions',
+    'GET 123',
+    'PUT 123',
+    'GET 123',
+    'DELETE 123?behavior=softDelete',
+    'GET 124',
+    'GET 124',
+  ]);
+});
+
+function controlledWait() {
+  const pauses: { ms: number; resume(): void; signal: AbortSignal }[] = [];
+  const wait: Wait = (ms, signal) =>
+    new Promise<void>((resolve, reject) => {
+      const abort = () => reject(signal.reason);
+      signal.throwIfAborted();
+      signal.addEventListener('abort', abort, { once: true });
+      pauses.push({
+        ms,
+        signal,
+        resume() {
+          signal.removeEventListener('abort', abort);
+          resolve();
+        },
+      });
+    });
+  return { pauses, wait };
+}
+
+test('Teams typing refreshes every four seconds and stops on caller abort', async (t) => {
+  const { pauses, wait } = controlledWait();
+  let controls = 0;
+  const { adapter, warnings } = await connectedAdapter(
+    t,
+    async (input, init) => {
+      assert.match(String(input), /\/conversations\/8%3Apeer\/messages$/);
+      assert.equal(init?.method, 'POST');
+      assert.deepEqual(JSON.parse(String(init?.body)), {
+        content: '',
+        contenttype: 'Application/Message',
+        messagetype: 'Control/Typing',
+      });
+      controls++;
+      return new Response(null);
+    },
+    wait,
+  );
+  const caller = new AbortController();
+  t.after(() => caller.abort());
+  adapter.typing!({ chatId: '8:peer' }, caller.signal);
+  await flush();
+  assert.equal(controls, 1);
+  assert.equal(pauses[0]?.ms, 4000);
+  pauses[0]?.resume();
+  await flush();
+  assert.equal(controls, 2);
+  assert.equal(pauses[1]?.ms, 4000);
+  caller.abort();
+  pauses[1]?.resume();
+  await flush();
+  assert.equal(controls, 2);
+  assert.deepEqual(warnings, []);
+});
+
+test('Teams publishes and refreshes an isolated presence endpoint, repairs it, and cleans up', async (t) => {
+  const { pauses, wait } = controlledWait();
+  const methods: string[] = [];
+  let endpoint: string | null = null;
+  let activities = 0;
+  const f = await connectedAdapter(
+    t,
+    async (input, init) => {
+      const url = new URL(String(input));
+      if (url.pathname.endsWith('/messages'))
+        return Response.json({ messages: [] });
+      assert.equal(url.hostname, 'teams.live.com');
+      assert.equal(init?.redirect, 'error');
+      const headers = new Headers(init?.headers);
+      assert.match(headers.get('X-Skypetoken') ?? '', /^header\./);
+      assert.equal(headers.get('X-MS-Client-Consumer-Type'), 'teams4life');
+      const headerId = headers.get('x-ms-endpoint-id');
+      endpoint ??= headerId;
+      assert.equal(headerId, endpoint);
+      assert.notEqual(endpoint, f.messagingEndpoint);
+      assert.match(endpoint ?? '', /^[\da-f-]{36}$/i);
+      const path = url.pathname.slice('/ups/global/v1/me/'.length);
+      methods.push(`${init?.method} ${path}`);
+      if (init?.method === 'PUT') {
+        assert.deepEqual(JSON.parse(String(init.body)), {
+          id: endpoint,
+          availability: 'Available',
+          activity: 'Available',
+          deviceType: 'Web',
+          activityReporting: 'Direct',
+        });
+      } else if (init?.method === 'POST') {
+        assert.deepEqual(JSON.parse(String(init.body)), {
+          endpointId: endpoint,
+          isActive: true,
+        });
+        activities++;
+        if (activities === 1)
+          return new Response(null, {
+            status: 429,
+            headers: { 'Retry-After': '90' },
+          });
+        if (activities === 2) return new Response(null, { status: 404 });
+      } else {
+        assert.equal(path, `endpoints/${endpoint}`);
+        return new Response(null, { status: 404 });
+      }
+      return new Response(null);
+    },
+    wait,
+  );
+  assert.equal(methods.length, 0);
+  await assert.rejects(
+    f.adapter.setPresence!({ state: 'busy' }),
+    /Unsupported Teams presence state/,
+  );
+  await f.adapter.setPresence!({ state: 'online' });
+  await flush();
+  assert.deepEqual(methods, ['PUT endpoints/']);
+  assert.equal(pauses[0]?.ms, 60_000);
+  pauses[0]?.resume();
+  await flush();
+  assert.equal(pauses[1]?.ms, 90_000);
+  pauses[1]?.resume();
+  await flush();
+  assert.deepEqual(methods, [
+    'PUT endpoints/',
+    'POST reportmyactivity/',
+    'POST reportmyactivity/',
+    'PUT endpoints/',
+  ]);
+  assert.equal(pauses[2]?.ms, 60_000);
+  f.sockets[0]?.event('trouter.reconnect', {
+    target: 'host',
+    url: 'wss://next.trouter.skype.com/v4/c',
+  });
+  await flush();
+  assert.equal(pauses[2]?.signal.aborted, true);
+  assert.equal(pauses[3]?.ms, 1000);
+  pauses[3]?.resume();
+  await flush();
+  assert.equal(f.sockets.length, 2);
+  assert.deepEqual(methods.slice(-2), ['PUT endpoints/', 'PUT endpoints/']);
+  await f.adapter.setPresence!({ state: 'offline' });
+  await f.adapter.stop();
+  assert.equal(methods.at(-1), `DELETE endpoints/${endpoint}`);
+  assert.equal(
+    methods.filter((method) => method.startsWith('DELETE')).length,
+    1,
+  );
+  assert.equal(pauses[4]?.signal.aborted, true);
+  assert.deepEqual(f.warnings, [
+    'teams.presence_refresh_failed',
+    'teams.presence_refresh_failed',
+  ]);
 });

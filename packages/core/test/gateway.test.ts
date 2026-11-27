@@ -154,6 +154,10 @@ async function fixture(
     outboundPush?: PlatformCapabilities['outboundPush'];
     platformKind?: string;
     plugins?: PluginDefinition[];
+    presence?: {
+      capability?: PlatformCapabilities['presence'];
+      set: NonNullable<PlatformAdapter['setPresence']>;
+    };
     previews?: { named?: TunnelProvider; quick: TunnelProvider };
     reactions?: true | PlatformAdapter['setApprovalReaction'];
     stickers?: Config['stickers'];
@@ -174,6 +178,10 @@ async function fixture(
     options.outboundPush,
   );
   platform.platform.downloadAttachment = options.downloadAttachment;
+  if (options.presence) {
+    platform.platform.capabilities.presence = options.presence.capability;
+    platform.platform.setPresence = options.presence.set;
+  }
   const platformKind = options.platformKind ?? 'fake';
   platform.platform.kind = platformKind;
   let agentStarts = 0;
@@ -336,6 +344,46 @@ async function fixture(
     },
   };
 }
+
+test('presence is skipped when an adapter does not declare the capability', async (t) => {
+  const calls: string[] = [];
+  const f = await fixture(t, async function* () {}, false, {
+    presence: {
+      set: async ({ state }) => {
+        calls.push(state);
+      },
+    },
+  });
+  await f.gateway.stop();
+  assert.deepEqual(calls, []);
+});
+
+test('presence failure leaves messaging active and shutdown bounds the offline request', async (t) => {
+  const calls: string[] = [];
+  let offlineSignal: AbortSignal | undefined;
+  const f = await fixture(t, async function* () {}, false, {
+    presence: {
+      capability: { states: ['online', 'offline'], text: false },
+      async set({ state }, signal) {
+        calls.push(state);
+        if (state === 'online') throw new Error('Unavailable');
+        offlineSignal = signal;
+        await new Promise<void>(() => {});
+      },
+    },
+  });
+  await f.platform.emit(inbound('1', '/help'));
+  assert.ok(f.platform.sent.length > 0);
+  await f.gateway.stop();
+  assert.deepEqual(calls, ['online', 'offline']);
+  assert.equal(offlineSignal?.aborted, true);
+  assert.deepEqual(
+    f.logs
+      .filter(({ event }) => event === 'platform.presence_failed')
+      .map(({ reason }) => reason),
+    ['online', 'offline'],
+  );
+});
 
 test('chat turns apply model-specific reasoning and fall back from unsupported saved preferences', async (t) => {
   const requests: AgentRequest[] = [];

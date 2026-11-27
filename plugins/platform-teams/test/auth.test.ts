@@ -225,3 +225,65 @@ test('refresh coalesces, atomically rotates the stored grant, and stops after re
   await assert.rejects(session.get(), LoginRequired);
   assert.equal(grants, 2);
 });
+
+test('Graph and chat token grants share rotation while Graph consent failures keep chat signed in', async (t) => {
+  const { credentials } = await fixture(t);
+  const signal = AbortSignal.timeout(3000);
+  await credentials.save({
+    account,
+    refreshToken: 'first',
+    displayName: 'Fixture',
+  });
+  const received: string[] = [];
+  const started = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  const fetch: typeof globalThis.fetch = async (input, init) => {
+    if (String(input).includes('/authz/consumer')) {
+      assert.equal(
+        new Headers(init?.headers).get('Authorization'),
+        'Bearer chat-access',
+      );
+      return Response.json(skypeToken);
+    }
+    const form = init?.body as URLSearchParams;
+    const graph =
+      form.get('scope') === 'https://graph.microsoft.com/Files.ReadWrite';
+    received.push(`${graph ? 'graph' : 'chat'}:${form.get('refresh_token')}`);
+    if (received.length === 1) {
+      started.resolve();
+      await release.promise;
+      return Response.json({
+        access_token: 'graph-access',
+        refresh_token: 'second',
+      });
+    }
+    if (!graph)
+      return Response.json({
+        access_token: 'chat-access',
+        refresh_token: 'third',
+      });
+    return Response.json({ error: 'consent_required' }, { status: 400 });
+  };
+  const session = teamsSession(
+    microsoftAuth(fetch),
+    credentials,
+    account,
+    signal,
+  );
+  const graph = session.getGraph();
+  assert.equal(session.getGraph(), graph);
+  await started.promise;
+  const chat = session.get();
+  assert.deepEqual(received, ['graph:first']);
+  release.resolve();
+  assert.equal((await graph).token, 'graph-access');
+  assert.equal((await chat).token, token);
+  assert.deepEqual(received, ['graph:first', 'chat:second']);
+  assert.equal((await credentials.read())?.refreshToken, 'third');
+  session.invalidateGraph('graph-access');
+  await assert.rejects(session.getGraph(), /Graph file access was denied/);
+  assert.deepEqual(received, ['graph:first', 'chat:second', 'graph:third']);
+  assert.equal(session.required, false);
+  assert.equal((await session.get()).token, token);
+  assert.equal((await credentials.read())?.refreshToken, 'third');
+});

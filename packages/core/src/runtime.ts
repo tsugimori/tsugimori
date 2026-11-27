@@ -54,6 +54,7 @@ type AdapterEntry = {
   failure?: CheckReport;
   inFlight?: Promise<void>;
   notices: PlatformNotice[];
+  presenceStop?: Promise<void>;
   retry?: NodeJS.Timeout;
   retryAt?: number;
   state: 'starting' | 'active' | 'stopped';
@@ -742,6 +743,7 @@ export class Runtime {
     entry.failedAt = undefined;
     entry.availableSince = Date.now();
     entry.state = 'active';
+    void this.#setPresence(adapter, 'online', signal);
     while (buffered.length && !signal.aborted) {
       try {
         await this.#deps.receive(adapter, buffered.shift()!);
@@ -799,7 +801,47 @@ export class Runtime {
     entry.alert.unref();
   }
 
+  async #setPresence(
+    adapter: PlatformAdapter,
+    state: 'online' | 'offline',
+    active?: AbortSignal,
+  ) {
+    if (!adapter.capabilities.presence?.states.includes(state)) return;
+    const setPresence = adapter.setPresence?.bind(adapter);
+    if (!setPresence) return;
+    const deadline = new AbortController();
+    const timer = setTimeout(() => deadline.abort(), 1000);
+    const signal = active
+      ? AbortSignal.any([active, deadline.signal])
+      : deadline.signal;
+    const aborted = Promise.withResolvers<void>();
+    const onAbort = () => aborted.reject(signal.reason);
+    signal.addEventListener('abort', onAbort, { once: true });
+    try {
+      await Promise.race([
+        Promise.resolve().then(() => {
+          signal.throwIfAborted();
+          return setPresence({ state }, signal);
+        }),
+        aborted.promise,
+      ]);
+    } catch {
+      if (!active?.aborted)
+        this.#deps.log({
+          level: 'warn',
+          event: 'platform.presence_failed',
+          adapterId: adapter.id,
+          reason: state,
+        });
+    } finally {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', onAbort);
+    }
+  }
+
   #suspend(entry: AdapterEntry) {
+    if (entry.state === 'active')
+      entry.presenceStop = this.#setPresence(entry.adapter, 'offline');
     entry.state = 'stopped';
     clearTimeout(entry.alert);
     clearTimeout(entry.retry);
@@ -809,6 +851,8 @@ export class Runtime {
 
   async #stopAdapter(entry: AdapterEntry) {
     await entry.inFlight;
+    await entry.presenceStop;
+    entry.presenceStop = undefined;
     if (entry.controller) {
       entry.controller = undefined;
       await entry.adapter.stop();

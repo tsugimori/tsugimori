@@ -2,7 +2,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { gunzipSync } from 'node:zlib';
 
 import type { ChatToken } from './auth.ts';
-import type { Data } from './wire.ts';
+import type { Data, Wait } from './wire.ts';
 
 import { LoginRequired } from './auth.ts';
 import { HttpError, json, object, request, string } from './wire.ts';
@@ -18,7 +18,7 @@ interface Dependencies {
   fetch: typeof globalThis.fetch;
   invalidate(token: string): void;
   receive(body: Data, signal: AbortSignal): Promise<void>;
-  registered(): void;
+  registered(signal: AbortSignal): void;
   socket(url: URL): Socket;
   warn(event: string): void;
 }
@@ -334,7 +334,7 @@ export async function listen(
   deps: Dependencies,
   endpoint: string,
   signal: AbortSignal,
-  wait = (ms: number, signal: AbortSignal) => delay(ms, undefined, { signal }),
+  wait: Wait = (ms, signal) => delay(ms, undefined, { signal }),
 ) {
   let host = entryHost;
   let established = false;
@@ -351,11 +351,9 @@ export async function listen(
         signal,
         async (connectionSignal) => {
           failures = 0;
+          deps.registered(connectionSignal);
           if (established) await deps.catchUp(connectionSignal, false);
-          else {
-            established = true;
-            deps.registered();
-          }
+          else established = true;
         },
         (target) => {
           host = target;

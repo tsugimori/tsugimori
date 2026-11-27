@@ -110,6 +110,7 @@ function entityTags(entity: MarkdownEntity): [string, string] | undefined {
 export function renderText(
   message: OutboundMessage,
   getUser?: AdapterContext['getUser'],
+  allowEmpty = false,
 ) {
   const explicit = new Map(
     message.entities?.map((entity) => [entity.offset, entity]),
@@ -121,7 +122,7 @@ export function renderText(
         })
       : { text: message.text, entities: [...(message.entities ?? [])] };
   const { text } = rendered;
-  if (!text.trim() || text.length > 20_000)
+  if ((!allowEmpty && !text.trim()) || text.length > 20_000)
     throw new Error(
       'Teams requires a nonempty message of at most 20000 characters',
     );
@@ -225,5 +226,9 @@ export function renderText(
   }
   const properties: Record<string, string> = {};
   if (mentions.length) properties.mentions = JSON.stringify(mentions);
-  return { content: content + '</p>', properties };
+  return {
+    content:
+      allowEmpty && !text.trim() && !prefix.length ? '' : content + '</p>',
+    properties,
+  };
 }

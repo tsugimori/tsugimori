@@ -1,12 +1,13 @@
 import type { AdapterContext, OutboundMessage } from '@tsugimori/plugin-sdk';
 
-import { SendFailure } from '@tsugimori/plugin-sdk';
+import { SendFailure, ToolFailure } from '@tsugimori/plugin-sdk';
 import { randomInt } from 'node:crypto';
 
 import type { teamsSession } from './auth.ts';
+import type { Uploaded } from './upload.ts';
 import type { Data } from './wire.ts';
 
-import { author, quoteFreeText } from './inbound.ts';
+import { author, nativeQuote, quoteFreeText } from './inbound.ts';
 import { escapeHtml, renderText, replySchema } from './text.ts';
 import {
   chatKind,
@@ -21,10 +22,31 @@ import {
 const origin = 'https://teams.live.com';
 const conversationPath = '/v1/users/ME/conversations/';
 const chatService = '/api/chatsvc/consumer';
+const reactionKeys = new Map([
+  ['👍', 'like'],
+  ['❤', 'heart'],
+  ['😆', 'laugh'],
+  ['😮', 'surprised'],
+  ['😢', 'sad'],
+  ['😠', 'angry'],
+  ['👎', 'no'],
+  ['🙌', 'handsinair'],
+  ['🔥', 'fire'],
+  ['✋', 'highfive'],
+  ['👊', 'fistbump'],
+  ['✔', '2714_heavycheckmark'],
+  ['👀', '1f440_eyes'],
+]);
 
 function messagePath(chat: string) {
   if (!chatKind(chat)) throw new Error('Invalid Teams conversation ID');
   return `${conversationPath}${encodeURIComponent(chat)}/messages`;
+}
+
+function messageUrl(chat: string, id?: string) {
+  if (id !== undefined && !messageId(id))
+    throw new Error('Invalid Teams message ID');
+  return origin + chatService + messagePath(chat) + (id ? '/' + id : '');
 }
 
 function historyUrl(chat: string, next?: string) {
@@ -115,9 +137,7 @@ export function chatApi(
   }
 
   async function getMessage(chat: string, id: string, signal: AbortSignal) {
-    if (!messageId(id)) throw new Error('Invalid Teams message ID');
-    const url = origin + chatService + messagePath(chat) + '/' + id;
-    const raw = await readJson(await call(url, signal));
+    const raw = await readJson(await call(messageUrl(chat, id), signal));
     const returnedChat = raw.conversationid ?? raw.conversationId;
     if (
       messageId(raw.id) !== id ||
@@ -127,17 +147,29 @@ export function chatApi(
     return raw;
   }
 
+  async function ownMessage(chat: string, id: string, signal: AbortSignal) {
+    const { account } = await auth.get();
+    const raw = await getMessage(chat, id, signal);
+    if (author(raw) !== account)
+      throw new Error('Teams can only modify its own messages');
+    return raw;
+  }
+
   return {
     page,
     async send(
       message: OutboundMessage,
       signal: AbortSignal,
       getUser?: AdapterContext['getUser'],
+      media?: {
+        kind: 'image' | 'file';
+        upload(): Promise<readonly Uploaded[]>;
+      },
     ) {
       const { chatId, replyTo } = message;
-      const url = origin + chatService + messagePath(chatId);
+      const url = messageUrl(chatId);
       const { account, displayName } = await auth.get();
-      const rendered = renderText(message, getUser);
+      const rendered = renderText(message, getUser, Boolean(media));
       if (replyTo) {
         const original = await getMessage(chatId, replyTo, signal);
         const sender = author(original);
@@ -155,6 +187,16 @@ export function chatApi(
           { messageId: replyTo, sender, time: Number(replyTo) },
         ]);
       }
+      let uploads: readonly Uploaded[] | undefined;
+      if (media) {
+        try {
+          uploads = await media.upload();
+        } catch (error) {
+          signal.throwIfAborted();
+          throw new SendFailure({ deliveryUnknown: false, parts: [] }, error);
+        }
+        rendered.content += uploads.map(({ html }) => html).join('');
+      }
       const clientmessageid = String(
         BigInt(Date.now()) * 1_000_000n + BigInt(randomInt(1_000_000)),
       );
@@ -165,9 +207,13 @@ export function chatApi(
             await call(url, signal, 'POST', {
               ...rendered,
               clientmessageid,
-              contenttype: 'text',
+              contenttype: media?.kind === 'image' ? 'Text' : 'text',
               imdisplayname: displayName,
-              messagetype: 'RichText/Html',
+              messagetype:
+                media?.kind === 'file'
+                  ? 'RichText/Media_GenericFile'
+                  : 'RichText/Html',
+              ...(uploads && { amsreferences: uploads.map(({ id }) => id) }),
             }),
             true,
           ),
@@ -206,17 +252,11 @@ export function chatApi(
     },
 
     async deleteOwn(chat: string, id: string, signal: AbortSignal) {
-      const { account } = await auth.get();
-      const original = await getMessage(chat, id, signal);
-      if (author(original) !== account)
-        throw new Error('Teams can only delete its own messages');
+      const original = await ownMessage(chat, id, signal);
       if (object(original.properties)?.deletetime) return;
       try {
         const response = await call(
-          origin +
-            chatService +
-            messagePath(chat) +
-            `/${id}?behavior=softDelete`,
+          messageUrl(chat, id) + '?behavior=softDelete',
           signal,
           'DELETE',
         );
@@ -233,6 +273,75 @@ export function chatApi(
         throw error;
       }
       throw new Error('Teams deletion could not be verified');
+    },
+
+    async editOwn(
+      id: string,
+      message: OutboundMessage,
+      signal: AbortSignal,
+      getUser?: AdapterContext['getUser'],
+    ) {
+      const chat = message.chatId;
+      const original = await ownMessage(chat, id, signal);
+      const originalProperties = object(original.properties);
+      const content = string(original.content) ?? '';
+      if (
+        originalProperties?.deletetime ||
+        !['Text', 'RichText/Html', 'RichText'].includes(
+          String(original.messagetype),
+        ) ||
+        /<(?:img|URIObject)\b/iu.test(content) ||
+        (Array.isArray(original.amsreferences) && original.amsreferences.length)
+      )
+        throw new Error('Teams can only edit active text messages');
+      const rendered = renderText(message, getUser);
+      rendered.content = (nativeQuote(content)?.quote ?? '') + rendered.content;
+      if (originalProperties?.qtdMsgs !== undefined)
+        Object.assign(rendered.properties, {
+          qtdMsgs: originalProperties.qtdMsgs,
+        });
+      const { displayName } = await auth.get();
+      try {
+        const response = await call(messageUrl(chat, id), signal, 'PUT', {
+          ...rendered,
+          id,
+          type: 'Message',
+          conversationid: chat,
+          messagetype: 'RichText/Html',
+          contenttype: 'text',
+          imdisplayname: string(original.imdisplayname) ?? displayName,
+        });
+        await response.body?.cancel();
+        return;
+      } catch {
+        signal.throwIfAborted();
+        // Reconcile an uncertain edit by reading the target again.
+      }
+      if ((await getMessage(chat, id, signal)).content !== rendered.content)
+        throw new Error('Teams edit could not be verified');
+    },
+
+    async react(chat: string, id: string, emoji: string, signal: AbortSignal) {
+      const key = reactionKeys.get(
+        emoji.trim().replace(/[\uFE0E\uFE0F]/gu, ''),
+      );
+      if (!key) throw new ToolFailure('This emoji is unsupported by Teams');
+      const response = await call(
+        messageUrl(chat, id) + '/properties?name=emotions',
+        signal,
+        'PUT',
+        { emotions: { key, value: Date.now() } },
+      );
+      await response.body?.cancel();
+    },
+
+    async typing(chat: string, signal: AbortSignal) {
+      const response = await call(messageUrl(chat), signal, 'POST', {
+        content: '',
+        contenttype: 'Application/Message',
+        messagetype: 'Control/Typing',
+      });
+      await response.body?.cancel();
     },
   };
 }

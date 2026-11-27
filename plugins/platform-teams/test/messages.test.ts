@@ -11,6 +11,7 @@ import { test } from 'node:test';
 
 import type { Data } from '../src/wire.ts';
 
+import { downloadMedia } from '../src/attachments.ts';
 import { microsoftAuth, teamsSession } from '../src/auth.ts';
 import { chatApi } from '../src/chat-api.ts';
 import { credentialStore } from '../src/credentials.ts';
@@ -149,8 +150,14 @@ async function fixtureApi(t: TestContext, respond: typeof globalThis.fetch) {
   });
   const signal = AbortSignal.timeout(3000);
   const fetch: typeof globalThis.fetch = async (input, init) => {
-    if (String(input).includes('oauth2'))
-      return Response.json({ access_token: 'fixture-access' });
+    if (String(input).includes('oauth2')) {
+      const form = init?.body as URLSearchParams;
+      return Response.json({
+        access_token: form.get('scope')?.includes('/Files.ReadWrite')
+          ? 'fixture-graph'
+          : 'fixture-access',
+      });
+    }
     if (String(input).includes('authz/consumer')) {
       const claims = Buffer.from(JSON.stringify({ skypeid: self })).toString(
         'base64url',
@@ -159,14 +166,227 @@ async function fixtureApi(t: TestContext, respond: typeof globalThis.fetch) {
     }
     return respond(input, init);
   };
-  return {
-    api: chatApi(
-      fetch,
-      teamsSession(microsoftAuth(fetch), credentials, self, signal),
-    ),
-    signal,
-  };
+  const auth = teamsSession(microsoftAuth(fetch), credentials, self, signal);
+  return { api: chatApi(fetch, auth), auth, fetch, signal };
 }
+
+test('retains attachment-only messages and separates captions from attachment markup', () => {
+  const image = normalizeMessage(
+    message(group, 1, {
+      content:
+        '<img itemtype="http://schema.skype.com/AMSImage" src="https://us.asm.skype.com/v1/objects/photo/views/imgo" alt="Picture &amp; title" itemscope="png" width="200" height="100">',
+      amsreferences: ['photo'],
+    }),
+    'NewMessage',
+    self,
+  );
+  assert.equal(image?.type, 'message');
+  assert.equal(image.text, '');
+  assert.deepEqual(image.attachments, [
+    {
+      fileId: '{"kind":"asm","id":"photo"}',
+      index: 0,
+      kind: 'image',
+      mime: 'image/png',
+      name: 'Picture & title',
+      width: 200,
+      height: 100,
+    },
+  ]);
+  const refs = normalizeMessage(
+    message(group, 1, {
+      messagetype: 'RichText/Media_Picture',
+      content: '',
+      properties: { amsreferences: '["photo"]' },
+    }),
+    'NewMessage',
+    self,
+  );
+  assert.equal(
+    refs?.type === 'message' && refs.attachments?.[0]?.fileId,
+    image.attachments?.[0]?.fileId,
+  );
+
+  const files = normalizeMessage(
+    message(group, 2, {
+      messagetype: 'RichText/Media_GenericFile',
+      content:
+        '<p>Caption</p><URIObject type="File.1" uri="https://api.asm.skype.com/v1/objects/document"><Title>Filename</Title><OriginalName v="a &amp; b.pdf"/><FileSize v="42"/></URIObject>',
+      properties: {
+        files: JSON.stringify([
+          {
+            title: 'Share.doc',
+            fileInfo: { shareUrl: 'https://1drv.ms/x/fixture' },
+          },
+          {
+            fileName: 'Drive.pdf',
+            fileInfo: {
+              siteUrl: 'https://tenant.sharepoint.com/personal/drive',
+              itemId: 'drive!item',
+            },
+          },
+          {
+            title: 'Unknown',
+            fileInfo: { shareUrl: 'https://sharepoint.com.invalid/sample' },
+          },
+        ]),
+      },
+    }),
+    'NewMessage',
+    self,
+  );
+  assert.equal(files?.type, 'message');
+  assert.equal(files.text, 'Caption');
+  assert.deepEqual(
+    files.attachments?.map(({ name, index, kind, size }) => ({
+      name,
+      index,
+      kind,
+      size,
+    })),
+    [
+      { name: 'a & b.pdf', index: 0, kind: 'file', size: 42 },
+      { name: 'Share.doc', index: 1, kind: 'file', size: undefined },
+      { name: 'Drive.pdf', index: 2, kind: 'file', size: undefined },
+    ],
+  );
+
+  const untrusted = normalizeMessage(
+    message(group, 3, {
+      content:
+        '<img itemtype="http://schema.skype.com/AMSImage" src="https://asm.skype.com.invalid/v1/objects/photo/views/imgo">',
+    }),
+    'NewMessage',
+    self,
+  );
+  assert.equal(untrusted, undefined);
+});
+
+test('downloads ASM originals and Graph shares with isolated credentials and bounded bytes', async (t) => {
+  const calls: string[] = [];
+  let signed = 'https://public.dm.files.1drv.com/signed?fixture=proof';
+  let size = 3;
+  let length: string | undefined;
+  let redirect = false;
+  const { auth, fetch, signal } = await fixtureApi(t, async (input, init) => {
+    const url = new URL(String(input));
+    calls.push(url.hostname);
+    assert.equal(init?.redirect, 'error');
+    const headers = new Headers(init?.headers);
+    if (url.hostname === 'graph.microsoft.com') {
+      assert.equal(headers.get('Authorization'), 'Bearer fixture-graph');
+      assert.equal(headers.get('Prefer'), 'redeemSharingLinkIfNecessary');
+      const path = Buffer.from('https://1drv.ms/x/share', 'utf8').toString(
+        'base64url',
+      );
+      assert.ok(
+        [
+          `/v1.0/shares/u!${path}/driveItem`,
+          '/v1.0/drives/drive/items/drive!item',
+        ].includes(url.pathname),
+      );
+      return Response.json({ size, '@microsoft.graph.downloadUrl': signed });
+    }
+    if (url.hostname === 'api.asm.skype.com') {
+      assert.match(headers.get('Authorization') ?? '', /^skype_token /);
+      assert.ok(
+        [
+          '/v1/objects/abc/views/original',
+          '/v1/objects/abc/views/imgo',
+        ].includes(url.pathname),
+      );
+      return new Response('abc', { headers: { 'Content-Type': 'image/png' } });
+    }
+    assert.equal(url.href, signed);
+    assert.equal(init?.credentials, 'omit');
+    assert.equal(headers.has('Authorization'), false);
+    assert.equal(headers.has('Authentication'), false);
+    if (redirect) return Response.redirect('https://untrusted.invalid/', 302);
+    return new Response(
+      'abc',
+      length ? { headers: { 'Content-Length': length } } : undefined,
+    );
+  });
+  const asm = {
+    index: 0,
+    kind: 'file' as const,
+    fileId: '{"kind":"asm","id":"abc"}',
+  };
+  const share = {
+    index: 1,
+    kind: 'file' as const,
+    fileId: '{"kind":"share","url":"https://1drv.ms/x/share"}',
+  };
+  const drive = {
+    index: 2,
+    kind: 'file' as const,
+    fileId: '{"kind":"drive","drive":"drive","item":"drive!item"}',
+  };
+  for (const attachment of [
+    asm,
+    { ...asm, kind: 'image' as const },
+    share,
+    drive,
+  ]) {
+    const data = await downloadMedia(fetch, auth, attachment, signal);
+    assert.equal(Buffer.from(data.bytes).toString(), 'abc');
+  }
+  assert.deepEqual(calls, [
+    'api.asm.skype.com',
+    'api.asm.skype.com',
+    'graph.microsoft.com',
+    'public.dm.files.1drv.com',
+    'graph.microsoft.com',
+    'public.dm.files.1drv.com',
+  ]);
+  await assert.rejects(
+    downloadMedia(fetch, auth, asm, signal, 2),
+    /download size limit/,
+  );
+  await assert.rejects(
+    downloadMedia(fetch, auth, share, signal, 2),
+    /download size limit/,
+  );
+  assert.equal(
+    calls.at(-1),
+    'graph.microsoft.com',
+    'metadata checks before signed download',
+  );
+  length = '20000000';
+  await assert.rejects(
+    downloadMedia(fetch, auth, drive, signal),
+    /download size limit/,
+  );
+  length = undefined;
+  size = 1;
+  await assert.rejects(
+    downloadMedia(fetch, auth, drive, signal, 2),
+    /download size limit/,
+  );
+  signed = 'https://files.1drv.com.invalid/private';
+  await assert.rejects(
+    downloadMedia(fetch, auth, share, signal),
+    /Untrusted Teams attachment download host/,
+  );
+  assert.equal(calls.at(-1), 'graph.microsoft.com');
+  await assert.rejects(
+    downloadMedia(
+      fetch,
+      auth,
+      {
+        ...share,
+        fileId:
+          '{"kind":"share","url":"https://1drv.ms@untrusted.invalid/sample"}',
+      },
+      signal,
+    ),
+    /Invalid Teams attachment reference/,
+  );
+  signed = 'https://public.dm.files.1drv.com/redirect';
+  redirect = true;
+  await assert.rejects(downloadMedia(fetch, auth, share, signal), /HTTP 302/);
+  assert.equal(calls.at(-1), 'public.dm.files.1drv.com');
+});
 
 test('ambiguous Teams send reads back its reserved ID with native reply metadata', async (t) => {
   let clientId: string | undefined;

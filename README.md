@@ -220,7 +220,7 @@ The gateway shares one loopback listener for webhook platforms. The default is `
 | Plugin                                                   | Purpose                                                                                      |
 | -------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
 | [Telegram](plugins/platform-telegram/README.md)          | Telegram bots via long polling.                                                              |
-| [Teams Personal](plugins/platform-teams/README.md)       | Teams Free text chat with Microsoft device-code login.                                       |
+| [Teams Personal](plugins/platform-teams/README.md)       | Teams Free chat and media with reactions, typing, presence, and device-code login.           |
 | [LINE](plugins/platform-line/README.md)                  | LINE Messaging API via signed webhooks and metered push.                                     |
 | [Codex](plugins/agent-codex/README.md)                   | Agent connector for Codex App Server.                                                        |
 | [Claude Agent SDK](plugins/agent-claude-sdk/README.md)   | Agent connector for Claude through its bundled CLI.                                          |

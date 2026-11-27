@@ -1,30 +1,37 @@
 import type {
   AdapterContext,
-  OutboundMessage,
+  MediaUpload,
   PlatformAdapter,
   PlatformFactory,
+  QueuedMedia,
 } from '@tsugimori/plugin-sdk';
 
 import {
   definePlugin,
   platformHome,
   PlatformStartError,
+  ToolFailure,
 } from '@tsugimori/plugin-sdk';
 import { randomUUID } from 'node:crypto';
 
 import type { Socket } from './trouter.ts';
+import type { Wait } from './wire.ts';
 
+import { downloadMedia, fileMaxBytes, imageMaxBytes } from './attachments.ts';
 import { LoginRequired, microsoftAuth, teamsSession } from './auth.ts';
 import { chatApi } from './chat-api.ts';
 import { credentialStore } from './credentials.ts';
 import { inboundMessages } from './history.ts';
+import { teamsPresence } from './presence.ts';
 import { checks, loginCheck, teamsLogin } from './setup.ts';
 import { listen } from './trouter.ts';
-import { mri } from './wire.ts';
+import { prepareImage, uploadMedia, validateUpload } from './upload.ts';
+import { chatKind, mri, waitFor } from './wire.ts';
 
 interface Dependencies {
   fetch?: typeof globalThis.fetch;
   socket?(url: URL): Socket;
+  wait?: Wait;
 }
 
 export function createTeamsAdapter(
@@ -50,6 +57,12 @@ export function createTeamsAdapter(
     const auth = teamsSession(microsoft, store, account, signal);
     const api = chatApi(fetch, auth);
     const inbound = inboundMessages(ctx, api, account ?? '');
+    const warn = (event: string) => ctx.logWarning?.(event);
+    const presence = teamsPresence(fetch, auth, warn, deps.wait);
+    const images = new WeakMap<
+      QueuedMedia,
+      { message: MediaUpload; size: ReturnType<typeof prepareImage> }
+    >();
     const ready = Promise.withResolvers<void>();
     let gatewayReady = !ctx.ready;
     async function waitForGateway(signal: AbortSignal) {
@@ -80,14 +93,16 @@ export function createTeamsAdapter(
           await waitForGateway(signal);
           await inbound.receive(body, signal);
         },
-        registered: () => {
+        registered: (connection) => {
+          presence.connect(connection);
           login = 'signed-in';
           ready.resolve();
         },
-        warn: (event) => ctx.logWarning?.(event),
+        warn,
       },
       endpoint,
       signal,
+      deps.wait,
     ).then(
       () => {
         ready.reject(signal.reason ?? new Error('Teams receiver stopped'));
@@ -110,19 +125,53 @@ export function createTeamsAdapter(
       auth,
       controller,
       getUser: ctx.getUser,
+      images,
       inbound,
       listening,
+      presence,
       ready: ready.promise,
       signal,
+      warn,
     };
   }
   let active: ReturnType<typeof start> | undefined;
   let stopping: Promise<void> | undefined;
 
+  function operation(signal?: AbortSignal) {
+    if (!active) throw new Error('Teams receiver is stopped');
+    const combined = signal
+      ? AbortSignal.any([active.signal, signal])
+      : active.signal;
+    combined.throwIfAborted();
+    return { session: active, signal: combined };
+  }
+
+  async function typing(chatId: string, signal: AbortSignal) {
+    const current = operation(signal);
+    const wait = deps.wait ?? waitFor;
+    while (!current.signal.aborted) {
+      try {
+        await current.session.api.typing(chatId, current.signal);
+      } catch {
+        if (current.signal.aborted) return;
+        current.session.warn('teams.typing_failed');
+      }
+      await wait(4000, current.signal);
+    }
+  }
+
   return {
     id,
     kind: 'teams',
-    capabilities: { deleteEvents: true, outboundPush: 'free', richText: true },
+    capabilities: {
+      deleteEvents: true,
+      files: { maxBytes: fileMaxBytes },
+      images: { maxBytes: imageMaxBytes, queued: true },
+      outboundPush: 'free',
+      presence: { states: ['online', 'offline'], text: false },
+      reactions: true,
+      richText: true,
+    },
     get login() {
       return active?.auth.required ? 'required' : login;
     },
@@ -139,7 +188,11 @@ export function createTeamsAdapter(
       if (active && !stopping) {
         const current = active;
         current.controller.abort();
-        stopping = Promise.all([current.listening, current.auth.stop()])
+        stopping = Promise.all([
+          current.listening,
+          current.presence.stop(),
+          current.auth.stop(),
+        ])
           .then(() => {
             if (active === current) active = undefined;
           })
@@ -149,23 +202,140 @@ export function createTeamsAdapter(
       }
       await stopping;
     },
-    async send(message: OutboundMessage, options) {
-      if (!active) throw new Error('Teams receiver is stopped');
-      const { api, getUser, inbound, signal } = active;
+    async send(message, options) {
+      const { session, signal } = operation(options?.signal);
+      const { api, auth, getUser, images, inbound } = session;
+      const handles = options?.media ?? [];
+      const queued = [...new Set(handles)].map((handle) => {
+        const item = images.get(handle);
+        if (
+          !item ||
+          item.message.chatId !== message.chatId ||
+          item.message.threadId !== message.threadId ||
+          item.message.replyTo !== message.replyTo
+        )
+          throw new ToolFailure(
+            'Teams queued image belongs to a different reply',
+          );
+        return { ...item, handle };
+      });
+      for (const { handle } of queued) images.delete(handle);
       const receipt = await api.send(
         message,
-        options?.signal ? AbortSignal.any([signal, options.signal]) : signal,
+        signal,
         getUser,
+        queued.length
+          ? {
+              kind: 'image',
+              async upload() {
+                const uploaded = [];
+                for (const {
+                  message: { file },
+                  size,
+                } of queued)
+                  uploaded.push(
+                    await uploadMedia(
+                      fetch,
+                      auth,
+                      message.chatId,
+                      file,
+                      signal,
+                      size,
+                    ),
+                  );
+                return uploaded;
+              },
+            }
+          : undefined,
       );
       inbound.observe(message.chatId);
+      if (queued.length)
+        return {
+          ...receipt,
+          parts: [
+            {
+              messageId: receipt.messageId,
+              mediaIds: queued.map(({ handle }) => handle.id),
+              text: message.text.trim() ? message.text : '[image]',
+            },
+          ],
+        };
       return receipt;
     },
-    async deleteMessage(message) {
-      if (!active) throw new Error('Teams receiver is stopped');
-      await active.api.deleteOwn(
+    async sendImage(message, signal) {
+      const { session } = operation(signal);
+      if (!chatKind(message.chatId))
+        throw new ToolFailure('Invalid Teams conversation ID');
+      const size = prepareImage(message.file);
+      const handle = { id: randomUUID(), queued: true as const };
+      session.images.set(handle, { message, size });
+      return handle;
+    },
+    async sendFile(message, caller) {
+      const { session, signal } = operation(caller);
+      const { api, auth, inbound } = session;
+      const { chatId, file, replyTo, threadId } = message;
+      validateUpload(file, false);
+      const receipt = await api.send(
+        { chatId, replyTo, text: '', threadId },
+        signal,
+        session.getUser,
+        {
+          kind: 'file',
+          upload: async () => [
+            await uploadMedia(fetch, auth, chatId, file, signal),
+          ],
+        },
+      );
+      inbound.observe(chatId);
+      return receipt;
+    },
+    async downloadAttachment(attachment, caller, maxBytes) {
+      const { session, signal } = operation(caller);
+      return downloadMedia(fetch, session.auth, attachment, signal, maxBytes);
+    },
+    async sendReaction(message, caller) {
+      const { session, signal } = operation(caller);
+      await session.api.react(
         message.chatId,
         message.messageId,
-        active.signal,
+        message.emoji,
+        signal,
+      );
+    },
+    typing(chat, signal) {
+      const current = active;
+      if (!current || current.signal.aborted || signal.aborted) return;
+      void typing(chat.chatId, signal).catch(() => {
+        if (!signal.aborted && !current.signal.aborted)
+          current.warn('teams.typing_failed');
+      });
+    },
+    async setPresence({ state, text }, signal) {
+      signal?.throwIfAborted();
+      if (!active) throw new Error('Teams receiver is stopped');
+      if (text !== undefined)
+        throw new ToolFailure('Teams presence does not support status text');
+      if (state === 'offline') {
+        await active.presence.offline(signal ?? AbortSignal.timeout(1000));
+      } else if (state === 'online') {
+        active.signal.throwIfAborted();
+        active.presence.online();
+      } else {
+        throw new ToolFailure('Unsupported Teams presence state');
+      }
+    },
+    async deleteMessage(message) {
+      const { session, signal } = operation();
+      await session.api.deleteOwn(message.chatId, message.messageId, signal);
+    },
+    async updateChoices(update, caller) {
+      const { session, signal } = operation(caller);
+      await session.api.editOwn(
+        update.messageId,
+        update,
+        signal,
+        session.getUser,
       );
     },
   };

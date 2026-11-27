@@ -39,7 +39,12 @@ function fingerprint(event: PlatformInboundEvent) {
     .update(
       JSON.stringify(
         event.type === 'message'
-          ? [event.text, event.mentionsBot, event.replyTo?.id]
+          ? [
+              event.text,
+              event.mentionsBot,
+              event.replyTo?.id,
+              event.attachments,
+            ]
           : [event.type],
       ),
     )

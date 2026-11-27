@@ -105,6 +105,8 @@ export interface PrincipalRef {
   userId: string;
 }
 
+export type PresenceState = 'online' | 'idle' | 'busy' | 'offline';
+
 export interface PlatformCapabilities {
   audio?: {
     /** Maximum bytes accepted for both source and encoded audio. */
@@ -127,6 +129,7 @@ export interface PlatformCapabilities {
   /** Accept owner replies to the bot even in chats outside the allowlist. */
   ownerReplyTriggers?: boolean;
   poll?: boolean;
+  presence?: { states: readonly PresenceState[]; text: boolean };
   reactions?: boolean;
   richText?: boolean;
   stickers?: boolean;
@@ -242,6 +245,8 @@ export interface SendPart {
   chatId?: string;
   /** Identifier returned by an adapter when it queued this media. */
   mediaId?: string;
+  /** Queued identifiers when one native message delivers multiple media items. */
+  mediaIds?: readonly string[];
   messageId: string;
   raw?: unknown;
   text: string;
@@ -391,6 +396,11 @@ export interface PlatformAdapter {
   setCommands?(
     commands: readonly PlatformCommand[],
     scope: PlatformCommandScope,
+  ): Promise<void>;
+  /** Set this instance's presence and manage any platform refresh or reconnect. */
+  setPresence?(
+    presence: { state: PresenceState; text?: string },
+    signal?: AbortSignal,
   ): Promise<void>;
   /** May be retried after cleanup. Honor ctx.signal during startup I/O. */
   start(ctx: AdapterContext): Promise<void>;

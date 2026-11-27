@@ -895,7 +895,10 @@ export class Tasks {
 
   #settleMedia(work: Work, parts: readonly SendPart[], error?: unknown) {
     for (const { detail, handle } of work.mediaQueued ?? []) {
-      const part = parts.find(({ mediaId }) => mediaId === handle.id);
+      const part = parts.find(
+        ({ mediaId, mediaIds }) =>
+          mediaId === handle.id || mediaIds?.includes(handle.id),
+      );
       if (part)
         detail?.finish('ok', {
           messageId: part.messageId,
