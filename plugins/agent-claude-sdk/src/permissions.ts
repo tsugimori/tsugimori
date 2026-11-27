@@ -76,6 +76,7 @@ export function toolPermission(
   runSignal: AbortSignal,
   gatewayTools: ReadonlySet<string> = new Set(),
   denyRead?: readonly string[],
+  web?: { fetch: boolean; search: 'allow' | 'ask' | 'deny' },
 ): CanUseTool {
   return async (toolName, input, { blockedPath, signal, toolUseID }) => {
     const active = AbortSignal.any([runSignal, signal]);
@@ -86,6 +87,12 @@ export function toolPermission(
     if (active.aborted) return deny();
     if (gatewayTools.has(toolName))
       return { behavior: 'allow', updatedInput: input };
+    if (toolName === 'WebSearch') {
+      if (web?.search === 'deny') return deny();
+      if (web?.search === 'allow')
+        return { behavior: 'allow', updatedInput: input };
+    }
+    if (web && toolName === 'WebFetch' && !web.fetch) return deny();
     const path =
       toolName === 'NotebookEdit'
         ? input.notebook_path

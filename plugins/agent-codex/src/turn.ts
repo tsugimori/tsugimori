@@ -6,7 +6,7 @@ import type {
   ContextBlock,
 } from '@tsugimori/plugin-sdk';
 
-import { renderTurnContext } from '@tsugimori/plugin-sdk';
+import { renderTurnContext, webSearchTraceName } from '@tsugimori/plugin-sdk';
 import { createHash } from 'node:crypto';
 
 import type { AppServer, ServerFrame } from './app-server.ts';
@@ -31,7 +31,7 @@ const approvalMethods = new Set([
 const toolNames: Record<string, string> = {
   commandExecution: 'command',
   fileChange: 'file_change',
-  webSearch: 'web_search',
+  webSearch: webSearchTraceName,
   imageView: 'image_view',
   imageGeneration: 'image_generation',
 };

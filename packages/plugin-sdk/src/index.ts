@@ -622,6 +622,52 @@ export type AgentTool = Pick<
 
 export class ToolFailure extends Error {}
 
+export interface AgentWebPolicy {
+  fetch: boolean;
+  search: boolean;
+}
+
+export const webFetchToolName = 'web.fetch';
+export const webSearchTraceName = 'web_search';
+
+export interface WebSearchTraceResult {
+  durationMs?: number;
+  resultCount?: number;
+  status: 'completed' | 'declined' | 'failed';
+  urls?: string[];
+}
+
+export function webSearchTraceStatus(status: 'denied' | 'error' | 'ok') {
+  return status === 'ok'
+    ? 'completed'
+    : status === 'error'
+      ? 'failed'
+      : 'declined';
+}
+
+export function webSearchHits(hits: readonly unknown[]) {
+  const urls: string[] = [];
+  for (const hit of hits) {
+    const url =
+      typeof hit === 'string'
+        ? hit
+        : hit && typeof hit === 'object' && 'url' in hit
+          ? hit.url
+          : undefined;
+    if (typeof url === 'string' && /^https?:\/\//i.test(url)) urls.push(url);
+  }
+  return { resultCount: hits.length, urls: [...new Set(urls)] };
+}
+
+export function agentWebPolicy({
+  purpose,
+  toolsDisabled,
+  web,
+}: Pick<AgentRequest, 'purpose' | 'toolsDisabled' | 'web'>): AgentWebPolicy {
+  if (purpose || toolsDisabled) return { fetch: false, search: false };
+  return web ?? { fetch: true, search: true };
+}
+
 export interface AgentRequest {
   context: ContextBlock[];
   /** Run without retaining a session for later use. */
@@ -639,6 +685,7 @@ export interface AgentRequest {
   thinking?: string;
   tools: readonly AgentTool[];
   toolsDisabled?: boolean;
+  web?: AgentWebPolicy;
   workdir: string;
 }
 
@@ -766,7 +813,12 @@ export interface AgentSettings {
 }
 
 export interface AgentConnector {
-  acceptsSession?(id: string, tools: readonly ToolDefinition[]): boolean;
+  acceptsSession?(
+    id: string,
+    tools: readonly ToolDefinition[],
+    web?: AgentWebPolicy,
+  ): boolean;
+  capabilities?: { webSearch?: 'native' };
   compact?(request: AgentCompactRequest): Promise<AgentCompactResult>;
   /** Describe locally known defaults for the gateway to cache on startup and reload. */
   describeDefaults?(): AgentDefaults | Promise<AgentDefaults>;
@@ -816,6 +868,7 @@ export type AgentInstanceConfig = PluginInstanceConfig & {
   serviceTier?: string;
   thinking?: string;
   version?: string;
+  web?: Partial<AgentWebPolicy>;
 };
 
 export interface PluginFactoryContext {

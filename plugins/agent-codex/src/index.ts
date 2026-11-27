@@ -10,16 +10,19 @@ import type {
   AgentSessionInfo,
   AgentSettings,
   AgentTool,
+  AgentWebPolicy,
   ImageLimits,
   PluginFactoryContext,
 } from '@tsugimori/plugin-sdk';
 
 import {
+  agentWebPolicy,
   defaultCompactAt,
   definePlugin,
   imageLimits,
   ToolFailure,
   toolWireName,
+  webFetchToolName,
 } from '@tsugimori/plugin-sdk';
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -103,6 +106,7 @@ const effortOrder = [
 ];
 
 export class CodexAgent implements AgentConnector {
+  readonly capabilities = { webSearch: 'native' } as const;
   readonly id: string;
   readonly imageLimits: ImageLimits;
   readonly implementation = implementation;
@@ -541,9 +545,16 @@ export class CodexAgent implements AgentConnector {
     Map<string, (frame: ServerFrame) => void>
   >();
 
-  acceptsSession(id: string, tools: readonly AgentTool[]) {
-    const prefix = sessionPrefix(describeTools(tools));
-    return prefix ? id.startsWith(prefix) : !id.startsWith('tools:');
+  acceptsSession(
+    id: string,
+    tools: readonly AgentTool[],
+    web?: AgentWebPolicy,
+  ) {
+    return (
+      id ===
+      sessionPrefix(describeTools(tools), searchMode({ web })) +
+        nativeSessionId(id)
+    );
   }
 
   async #thread(
@@ -561,6 +572,7 @@ export class CodexAgent implements AgentConnector {
     >,
     resumeSessionId?: string,
     dynamicTools?: ReturnType<typeof describeTools>,
+    webSearch?: ReturnType<typeof searchMode>,
   ) {
     request.signal.throwIfAborted();
     if (!this.#lifecycle) await this.start();
@@ -610,6 +622,7 @@ export class CodexAgent implements AgentConnector {
       approvalsReviewer,
       ...(scoped ?? { sandbox: summarize ? 'read-only' : 'workspace-write' }),
       config: {
+        ...(webSearch && { web_search: webSearch }),
         model_reasoning_effort: effort,
         ...compaction.config,
         ...(scope
@@ -697,7 +710,17 @@ export class CodexAgent implements AgentConnector {
 
   async compact(request: AgentCompactRequest): Promise<AgentCompactResult> {
     const nativeId = nativeSessionId(request.sessionId);
-    const { server, signal, threadId } = await this.#thread(request, nativeId);
+    const webSearch = request.sessionId.startsWith('web:disabled:')
+      ? 'disabled'
+      : request.sessionId.startsWith('web:cached:')
+        ? 'cached'
+        : undefined;
+    const { server, signal, threadId } = await this.#thread(
+      request,
+      nativeId,
+      undefined,
+      webSearch,
+    );
     const listeners = this.#listeners.get(server)!;
     if (listeners.has(threadId))
       throw new Error('Codex thread already has an active turn');
@@ -756,12 +779,22 @@ export class CodexAgent implements AgentConnector {
 
   async *run(request: AgentRequest, io: AgentIO): AsyncIterable<AgentEvent> {
     const { workdir, sandbox: scope } = request;
-    const dynamicTools = describeTools(request.tools);
-    const stamp = sessionPrefix(dynamicTools);
+    const web = agentWebPolicy(request);
+    const tools = web.fetch
+      ? request.tools
+      : request.tools.filter(({ name }) => name !== webFetchToolName);
+    const mode = searchMode(request);
+    const dynamicTools = describeTools(tools);
+    const stamp = sessionPrefix(dynamicTools, mode);
+    const matches = (id: string) => id === stamp + nativeSessionId(id);
+    if (request.forkSessionId && !matches(request.forkSessionId))
+      throw new Error(
+        'Codex cannot fork a session with a different tool configuration',
+      );
     const resumeSessionId =
       !request.forkSessionId &&
       request.resumeSessionId &&
-      this.acceptsSession(request.resumeSessionId, request.tools)
+      matches(request.resumeSessionId)
         ? request.resumeSessionId.slice(stamp.length)
         : undefined;
     const {
@@ -776,14 +809,14 @@ export class CodexAgent implements AgentConnector {
       summarize,
       compaction,
       window,
-    } = await this.#thread(request, resumeSessionId, dynamicTools);
+    } = await this.#thread(request, resumeSessionId, dynamicTools, mode);
     const listeners = this.#listeners.get(server)!;
     if (listeners.has(threadId))
       throw new Error('Codex thread already has an active turn');
 
     const frames = new TurnFrames();
     const output = new TurnOutput(
-      new Set(request.tools.map(({ name }) => toolWireName(name))),
+      new Set(tools.map(({ name }) => toolWireName(name))),
     );
     const compactions = new TurnCompactions(
       this.#threadContexts.get(server)?.get(threadId)?.tokens,
@@ -902,9 +935,7 @@ export class CodexAgent implements AgentConnector {
             frame.params.turnId === turnId
           ) {
             const name = frame.params.tool;
-            const tool = request.tools.find(
-              (tool) => toolWireName(tool.name) === name,
-            );
+            const tool = tools.find((tool) => toolWireName(tool.name) === name);
             let result: string;
             let success = false;
             try {
@@ -1011,14 +1042,31 @@ function describeTools(tools: readonly AgentTool[]) {
   return specs;
 }
 
-function sessionPrefix(tools: ReturnType<typeof describeTools>) {
-  return tools.length
+function searchMode(
+  request: Pick<AgentRequest, 'purpose' | 'toolsDisabled' | 'web'>,
+) {
+  if (!agentWebPolicy(request).search) return 'disabled';
+  if (request.web) return 'cached';
+}
+
+function sessionPrefix(
+  tools: ReturnType<typeof describeTools>,
+  mode: ReturnType<typeof searchMode>,
+) {
+  // A warm resume can keep the loaded thread's config. A policy change
+  // needs a fresh thread with the gateway's rebuilt conversation context.
+  const web = mode ? `web:${mode}:` : '';
+  const dynamic = tools.length
     ? `tools:${createHash('sha256').update(JSON.stringify(tools)).digest('hex')}:`
     : '';
+  return web + dynamic;
 }
 
 function nativeSessionId(sessionId: string) {
-  return sessionId.replace(/^tools:[a-f0-9]{64}:/, '');
+  return sessionId.replace(
+    /^(?:web:(?:cached|disabled):)?(?:tools:[a-f0-9]{64}:)?/,
+    '',
+  );
 }
 
 export default definePlugin({

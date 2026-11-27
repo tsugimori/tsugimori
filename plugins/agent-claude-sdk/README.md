@@ -35,6 +35,10 @@ Add an entry under `agents` in `tsugimori.json`.
 
 Choose the credential option for your authentication method and omit the other from the example. Credentials can come from the process environment or workspace `.env`. For browser sign-in, the wizard configures both credential options as `null`, which uses the login in `claudeHome` and suppresses the implicit API key. The SDK supplies the CLI version, so a workspace `version` field does not pin Claude.
 
+## Web capabilities
+
+Set `agentWeb.search` and `agentWeb.fetch` globally or override either under this agent's `web` object. Both default to `true`. Anthropic runs native `WebSearch` even in gateway execution scopes when search is enabled. The gateway provides `web.fetch` with public-address checks and response limits. Native Claude `WebFetch` is available only outside gateway execution scopes and only when fetch is enabled. It makes requests from the host with the existing approval flow. [Agent web capabilities](../../README.md#agent-web-capabilities)
+
 ## Guided setup
 
 Run `corepack pnpm exec tsugimori add agent claude-sdk --dir ./ws` or `/add agent claude-sdk [--id <id>]` as the owner. For an existing instance, use `/login <id>` or `corepack pnpm exec tsugimori setup login <id> --dir ./ws`.

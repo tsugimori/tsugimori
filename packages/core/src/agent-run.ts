@@ -14,7 +14,11 @@ import type {
 import type { ApprovalContinuation, TraceSpan } from '@tsugimori/storage';
 import type { Tracer } from '@tsugimori/trace';
 
-import { renderStableInstructions } from '@tsugimori/plugin-sdk';
+import {
+  agentWebPolicy,
+  renderStableInstructions,
+  webFetchToolName,
+} from '@tsugimori/plugin-sdk';
 import { Ajv } from 'ajv';
 import { createHash } from 'node:crypto';
 
@@ -128,6 +132,17 @@ export async function runAgent(
   io: AgentIO,
 ) {
   const { signal, taskId } = task;
+  const web = agentWebPolicy({
+    ...request,
+    toolsDisabled: incognito || request.toolsDisabled,
+  });
+  request = {
+    ...request,
+    web,
+    tools: web.fetch
+      ? request.tools
+      : request.tools.filter(({ name }) => name !== webFetchToolName),
+  };
   const attrs = {
     taskId,
     agentId: agent.id,

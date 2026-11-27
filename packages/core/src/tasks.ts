@@ -61,6 +61,7 @@ import {
   modelThinkingLevels,
   resolveAgentSetting,
 } from './agent-settings.ts';
+import { resolveAgentWeb } from './agent-web.ts';
 import { approvalMessages, approvalPrompt } from './approval-messages.ts';
 import {
   attachmentTool,
@@ -76,6 +77,7 @@ import { Supplements } from './supplements.ts';
 import { systemMessages } from './system-messages.ts';
 import { silentReason, TaskRecorder } from './task-recorder.ts';
 import { canTrigger } from './trigger.ts';
+import { webFetchTool } from './web-fetch.ts';
 import { prepareWorkspace, recordWorkspace } from './workspace-files.ts';
 
 interface TaskDependencies {
@@ -953,14 +955,25 @@ export class Tasks {
       },
     ].map(({ mode, incognito, sendAllowed }) => ({
       mode,
-      definitions: this.#toolDefinitions(adapter, incognito, { sendAllowed }),
+      definitions: this.#toolDefinitions(adapter, incognito, {
+        sendAllowed,
+        webFetch: !incognito,
+      }),
     }));
   }
 
   #toolDefinitions(
     adapter: PlatformAdapter,
     incognito: boolean,
-    { work, sendAllowed = true }: { sendAllowed?: boolean; work?: Work } = {},
+    {
+      work,
+      sendAllowed = true,
+      webFetch = false,
+    }: {
+      sendAllowed?: boolean;
+      webFetch?: boolean;
+      work?: Work;
+    } = {},
   ) {
     const { store, context, toolDetails } = this.#deps;
     const scheduled = work?.input.scheduled;
@@ -977,6 +990,7 @@ export class Tasks {
       ),
       ...(adapter.tools?.() ?? []),
       ...this.#deps.stickers.tools(adapter),
+      ...(webFetch ? [webFetchTool] : []),
       ...(sendAllowed
         ? sendTools(
             { ...this.#deps, workdir: (chat) => context.workdir(chat) },
@@ -1023,6 +1037,11 @@ export class Tasks {
     const { model } = settings;
     const m = systemMessages(runtime.config.locale);
     if (!agent.compact) return m.compactUnsupported;
+    const web = resolveAgentWeb(
+      runtime.config,
+      agent,
+      incognitoId !== undefined || runtime.disabled('exec'),
+    );
     const session = store.getSession(
       chat,
       agent.id,
@@ -1032,7 +1051,10 @@ export class Tasks {
       !session ||
       agent.acceptsSession?.(
         session.sessionId,
-        this.#toolDefinitions(adapter, incognitoId !== undefined),
+        this.#toolDefinitions(adapter, incognitoId !== undefined, {
+          webFetch: web.fetch,
+        }),
+        web,
       ) === false
     )
       return m.compactNoSession;
@@ -1155,11 +1177,18 @@ export class Tasks {
       principal: { adapterId: chat.adapterId, userId: input.message.userId },
     };
     const attrs = { ...chat, taskId: id };
+    const toolsDisabled = runtime.disabled('exec');
+    const web = resolveAgentWeb(
+      runtime.config,
+      agent,
+      incognitoId !== undefined || toolsDisabled,
+    );
     const definitions = this.#toolDefinitions(
       adapter,
       incognitoId !== undefined,
       {
         work,
+        webFetch: web.fetch,
         sendAllowed:
           !input.scheduled ||
           (input.message.chatId === input.scheduled.target.chatId &&
@@ -1179,7 +1208,8 @@ export class Tasks {
         : undefined;
     const compatibleSession =
       storedSession &&
-      agent.acceptsSession?.(storedSession.sessionId, definitions) !== false
+      agent.acceptsSession?.(storedSession.sessionId, definitions, web) !==
+        false
         ? storedSession
         : undefined;
     const forkSessionId =
@@ -1479,7 +1509,8 @@ export class Tasks {
           {
             ...settings,
             exec: this.#deps.backend(),
-            toolsDisabled: runtime.disabled('exec'),
+            toolsDisabled,
+            web,
             sandbox: this.#deps.scope(assembled.workdir),
             context: blocks,
             ...(ephemeral && { ephemeral }),

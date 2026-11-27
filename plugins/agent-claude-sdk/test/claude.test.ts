@@ -810,3 +810,76 @@ test(
     assert.ok(events.some((event) => event.type === 'usage'));
   },
 );
+
+test('Claude native search records the shared web_search trace shape', async () => {
+  const agent = new ClaudeAgent(
+    {
+      async *query() {
+        yield frame({
+          type: 'assistant',
+          parent_tool_use_id: null,
+          message: {
+            content: [
+              {
+                type: 'tool_use',
+                id: 'search-1',
+                name: 'WebSearch',
+                input: { query: 'example domain' },
+              },
+            ],
+          },
+        });
+        yield frame({
+          type: 'user',
+          message: {
+            content: [
+              {
+                type: 'tool_result',
+                tool_use_id: 'search-1',
+                content: 'Search summary',
+              },
+            ],
+          },
+          tool_use_result: {
+            query: 'example domain',
+            durationSeconds: 0.125,
+            results: [
+              {
+                tool_use_id: 'search-1',
+                content: [{ title: 'Example', url: 'https://example.com/' }],
+              },
+              'Search summary',
+            ],
+          },
+        });
+        yield success;
+      },
+    },
+    'claude',
+    null,
+  );
+  const events = await collect(agent.run(request(process.cwd()), io));
+  const args = { type: 'search', query: 'example domain' };
+  assert.deepEqual(
+    events.filter(
+      (event) =>
+        event.type === 'tool.started' || event.type === 'tool.finished',
+    ),
+    [
+      { type: 'tool.started', callId: 'search-1', name: 'web_search', args },
+      {
+        type: 'tool.finished',
+        callId: 'search-1',
+        name: 'web_search',
+        args,
+        status: 'ok',
+        result: {
+          status: 'completed',
+          durationMs: 125,
+          resultCount: 1,
+          urls: ['https://example.com/'],
+        },
+      },
+    ],
+  );
+});

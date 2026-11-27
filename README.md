@@ -53,7 +53,7 @@ Run `corepack pnpm exec tsugimori prompt-report ./ws [--json]` under the running
 
 The report shows the rolling summary available to carry over after `/new`, its serialized block size, and the 4,000-character limit. Its token estimate divides UTF-8 bytes by four, rounded up. Each chat includes up to ten persisted runs, recorded compactions and explicit resets, and the active agent's `compactAt`. The p50, p90, and max use the latest run with input usage in that window from each chat. A missing provider metric is shown as a dash in text and `null` in JSON.
 
-The console also shows raw Telegram and LINE message payloads when available. Private commands omit their raw payload. Agent text, visible reasoning, and tool details use secret redaction. Stored tool arguments and results are capped at 64 KiB per field, with a 4 KiB cap for web search results. Codex web search records include the item duration and any result data Codex exposes. `web.toolDetails.maxChars` controls how much the console displays.
+The console also shows raw Telegram and LINE message payloads when available. Private commands omit their raw payload. Agent text, visible reasoning, and tool details use secret redaction. Stored tool arguments and results are capped at 64 KiB per field, with a 4 KiB cap for web search results. Both agents record native search as `web_search`, with the query, outcome, duration, and result counts and URLs when the provider supplies them. `web.toolDetails.maxChars` controls how much the console displays.
 
 `records.maxBytes` defaults to 2 GiB (2,147,483,648 bytes). The gateway checks usage one minute after startup and hourly thereafter. When usage exceeds the cap, it prunes the oldest transcripts and task input/output, then raw message payloads, then unreferenced guideline blobs and summary versions. It aims for 90% of the cap and keeps task outcomes, message text, and tool-call metadata. Records have no age limit.
 
@@ -64,6 +64,14 @@ Owners are identified by native platform user ID. Set `owner` by adapter ID or p
 The gateway resumes an existing agent session when possible, using new chat content since its previous turn. Chat overrides take precedence over approved chat workspace settings, then the agent entry, then provider defaults. Codex and Claude support changing model, thinking, and fast settings on the next turn of an existing session. Switching agents or changing an option that requires a fresh session rebuilds context from that chat's stored history.
 
 Claude keeps workspace and platform guidance in the system prompt across chat turns. Both adapters put trusted instructions for a single turn after the conversation input in a delimited section. The recorded instruction hash measures the stable guidance.
+
+### Agent web capabilities
+
+Set `agentWeb.search` and `agentWeb.fetch` in `tsugimori.json` to change the workspace defaults. Each defaults to `true`. An agent entry can override either field under `agents[].web`. For example, `"agentWeb": { "fetch": false }` disables gateway fetch by default, and `"web": { "fetch": true }` on an agent entry re-enables it for that agent. The chat's selected agent determines the policy for all members. Incognito, background purpose runs, and runs with tools disabled omit both web capabilities.
+
+Native search runs at OpenAI for Codex and Anthropic for Claude. Codex uses its cached search mode. The gateway offers its read-only `web.fetch` tool to both agents. Claude's native `WebFetch` is available only outside gateway execution scopes, where it makes requests from the host, keeps its existing approval flow, and follows the fetch setting.
+
+`web.fetch` makes an HTTP or HTTPS GET from the gateway, rejects URL credentials and non-public IP addresses, and validates DNS at every hop before connecting directly to a vetted address. It allows three redirects and has a 10-second deadline, a 512 KiB body limit, and a 12,000-character text limit. It extracts text from HTML and returns plain text, JSON, and XML as text. Other media types and encoded bodies return metadata only. Results include the final URL, HTTP status, content type, and truncation flag. Page text is marked as untrusted external content.
 
 ### Context and summaries
 

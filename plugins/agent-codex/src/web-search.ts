@@ -1,3 +1,7 @@
+import type { WebSearchTraceResult } from '@tsugimori/plugin-sdk';
+
+import { webSearchHits, webSearchTraceStatus } from '@tsugimori/plugin-sdk';
+
 import { asRecord } from './app-server.ts';
 
 type Fields = Record<string, unknown>;
@@ -71,12 +75,7 @@ export function webSearchResult(
   const error = item.error ?? undefined;
   return {
     // Item completion alone describes the lifecycle, even for hosted calls with no result payload.
-    status:
-      status === 'ok'
-        ? 'completed'
-        : status === 'error'
-          ? 'failed'
-          : 'declined',
+    status: webSearchTraceStatus(status),
     durationMs:
       startedAt === undefined
         ? undefined
@@ -93,5 +92,10 @@ export function webSearchResult(
     sources,
     result,
     error,
-  };
+    ...(Array.isArray(results)
+      ? webSearchHits(results)
+      : Array.isArray(sources)
+        ? webSearchHits(sources)
+        : {}),
+  } satisfies WebSearchTraceResult & Fields;
 }

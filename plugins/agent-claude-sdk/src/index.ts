@@ -22,6 +22,7 @@ import type {
 } from '@tsugimori/plugin-sdk';
 
 import {
+  agentWebPolicy,
   defaultCompactAt,
   definePlugin,
   imageLimits,
@@ -30,6 +31,8 @@ import {
   renderStableInstructions,
   renderTurnContext,
   toolWireName,
+  webFetchToolName,
+  webSearchTraceName,
 } from '@tsugimori/plugin-sdk';
 import { mkdir, realpath } from 'node:fs/promises';
 
@@ -47,6 +50,7 @@ import {
   oauthTokenName,
 } from './setup.ts';
 import { gatewayTools } from './tools.ts';
+import { searchArgs, searchResult } from './web-search.ts';
 
 type Query = (args: Parameters<typeof query>[0]) => AsyncIterable<SDKMessage>;
 
@@ -105,6 +109,7 @@ const quotaWindows = { five_hour: 300, seven_day: 10_080 };
 type QuotaWindow = keyof typeof quotaWindows;
 
 export class ClaudeAgent implements AgentConnector {
+  readonly capabilities = { webSearch: 'native' } as const;
   readonly id: string;
   readonly imageLimits: ImageLimits;
   readonly implementation = implementation;
@@ -329,10 +334,14 @@ export class ClaudeAgent implements AgentConnector {
           ? ({ source }) => source === 'message'
           : (block) => !isStableInstruction(block),
       );
-      const registered = request.tools.length
+      const web = agentWebPolicy(request);
+      const tools = web.fetch
+        ? request.tools
+        : request.tools.filter(({ name }) => name !== webFetchToolName);
+      const registered = tools.length
         ? gatewayTools(
             (await import('@anthropic-ai/claude-agent-sdk')).createSdkMcpServer,
-            request.tools,
+            tools,
           )
         : undefined;
       const options: Options = {
@@ -352,19 +361,16 @@ export class ClaudeAgent implements AgentConnector {
         tools:
           request.purpose !== undefined || request.toolsDisabled
             ? []
-            : request.sandbox
-              ? ['Read', 'Glob', 'Grep']
-              : [
-                  'Read',
-                  'Glob',
-                  'Grep',
-                  'Bash',
-                  'Edit',
-                  'Write',
-                  'NotebookEdit',
-                  'WebFetch',
-                  'WebSearch',
-                ],
+            : [
+                'Read',
+                'Glob',
+                'Grep',
+                ...(request.sandbox
+                  ? []
+                  : ['Bash', 'Edit', 'Write', 'NotebookEdit']),
+                ...(web.fetch && !request.sandbox ? ['WebFetch'] : []),
+                ...(web.search ? ['WebSearch'] : []),
+              ],
         env: {
           ...claudeEnvironment(),
           CLAUDE_CONFIG_DIR: this.#home,
@@ -387,6 +393,14 @@ export class ClaudeAgent implements AgentConnector {
               signal,
               new Set(registered?.allowedTools),
               request.sandbox?.denyRead,
+              {
+                search: !web.search
+                  ? 'deny'
+                  : request.sandbox
+                    ? 'allow'
+                    : 'ask',
+                fetch: web.fetch && !request.sandbox,
+              },
             )
           : async () => ({ behavior: 'deny', message: 'Permission denied.' }),
         includePartialMessages: true,
@@ -548,7 +562,7 @@ export class ClaudeAgent implements AgentConnector {
     let sawNativeCompaction = false;
     let result:
       Extract<SDKMessage, { subtype: 'success'; type: 'result' }> | undefined;
-    const tools = new Map<string, string>();
+    const tools = new Map<string, { name: string; searchStarted?: number }>();
     const frameworkTools = new Set(
       request.tools.map(({ name }) => `mcp__tsugimori__${toolWireName(name)}`),
     );
@@ -600,12 +614,16 @@ export class ClaudeAgent implements AgentConnector {
         ) {
           const { id: callId, name, input } = part.content_block;
           if (!frameworkTools.has(name)) {
-            tools.set(callId, name);
+            const search = name === 'WebSearch';
+            tools.set(callId, {
+              name,
+              searchStarted: search ? performance.now() : undefined,
+            });
             yield {
               type: 'tool.started',
               callId,
-              name,
-              ...(input === undefined ? {} : { args: input }),
+              name: search ? webSearchTraceName : name,
+              args: search ? searchArgs(input) : input,
             };
           }
         }
@@ -634,16 +652,21 @@ export class ClaudeAgent implements AgentConnector {
             yield { type: 'reasoning', text: block.thinking };
           if (block.type !== 'tool_use' || frameworkTools.has(block.name))
             continue;
+          const search = block.name === 'WebSearch';
+          const args = search ? searchArgs(block.input) : block.input;
           if (tools.has(block.id)) {
-            if (block.input !== undefined)
-              yield { type: 'tool.input', callId: block.id, args: block.input };
+            if (args !== undefined)
+              yield { type: 'tool.input', callId: block.id, args };
           } else {
-            tools.set(block.id, block.name);
+            tools.set(block.id, {
+              name: block.name,
+              searchStarted: search ? performance.now() : undefined,
+            });
             yield {
               type: 'tool.started',
               callId: block.id,
-              name: block.name,
-              ...(block.input === undefined ? {} : { args: block.input }),
+              name: search ? webSearchTraceName : block.name,
+              args,
             };
           }
         }
@@ -659,15 +682,23 @@ export class ClaudeAgent implements AgentConnector {
         for (const block of event.message.content) {
           if (block.type !== 'tool_result') continue;
           const callId = block.tool_use_id;
-          const name = tools.get(callId);
-          if (!name) continue;
+          const tool = tools.get(callId);
+          if (!tool) continue;
           tools.delete(callId);
+          const search = tool.searchStarted !== undefined;
+          const status = block.is_error ? 'error' : 'ok';
+          const output = event.tool_use_result;
+          const args = search ? searchArgs(output) : undefined;
           yield {
             type: 'tool.finished',
             callId,
-            name,
-            status: block.is_error ? 'error' : 'ok',
-            ...(block.content === undefined ? {} : { result: block.content }),
+            name: search ? webSearchTraceName : tool.name,
+            status,
+            ...(args?.query !== undefined && { args }),
+            result:
+              tool.searchStarted === undefined
+                ? block.content
+                : searchResult(output, tool.searchStarted, status),
           };
         }
       } else if (event.type === 'system' && event.subtype === 'init') {

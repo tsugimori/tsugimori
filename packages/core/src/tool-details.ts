@@ -2,6 +2,8 @@ import type { WorkspaceConfig } from '@tsugimori/config';
 import type { ToolCallStatus, ToolContext } from '@tsugimori/plugin-sdk';
 import type { Store, ToolCallRecord } from '@tsugimori/storage';
 
+import { webFetchToolName } from '@tsugimori/plugin-sdk';
+
 import type { Logger } from './hooks.ts';
 
 const redacted = '[redacted]';
@@ -38,7 +40,7 @@ function redactText(text: string) {
     );
 }
 
-function mediaToolArguments(args: unknown) {
+function redactToolUrls(args: unknown) {
   if (!args || typeof args !== 'object') return args;
   const clean = { ...args } as Record<string, unknown>;
   for (const key of ['url', 'path']) {
@@ -205,8 +207,10 @@ export class ToolDetails {
     if (!format) return;
     const input = (args: unknown) =>
       format.field(
-        name === 'send.image' || name === 'send.audio'
-          ? mediaToolArguments(args)
+        name === 'send.image' ||
+          name === 'send.audio' ||
+          name === webFetchToolName
+          ? redactToolUrls(args)
           : args,
       );
     const resultLimit = name === 'web_search' ? 4 * 1024 : undefined;
@@ -245,7 +249,12 @@ export class ToolDetails {
         update({
           status: denied && status === 'error' ? 'denied' : status,
           endedAt: Date.now(),
-          result: format.field(result, resultLimit),
+          result: format.field(
+            name === webFetchToolName && !(result instanceof Error)
+              ? redactToolUrls(result)
+              : result,
+            resultLimit,
+          ),
         }),
       input: (args) => update({ args: input(args) }),
       pending: (approvalId) =>

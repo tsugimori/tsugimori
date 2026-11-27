@@ -71,6 +71,8 @@ test('records hosted and standalone web search from Codex app-server notificatio
         result: {
           status: 'completed',
           durationMs: 14,
+          resultCount: 1,
+          urls: ['https://example.com/'],
           results: [
             {
               type: 'text_result',
@@ -126,6 +128,8 @@ test('records additional web search fields if the server supplies them', () => {
       result: {
         status: 'failed',
         durationMs: 30,
+        resultCount: 1,
+        urls: ['https://example.com/'],
         pageContentBytes: 3,
         sources,
         error: 'Read interrupted',

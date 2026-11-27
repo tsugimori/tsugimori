@@ -35,6 +35,10 @@ Add an entry under `agents` in `tsugimori.json`.
 
 Codex's native defaults come from the top-level `model`, `model_reasoning_effort`, and `service_tier` keys in its home directory's `config.toml`. The gateway refreshes those values on workspace reload. The child process also inherits `OPENAI_API_KEY`, `CODEX_API_KEY`, and `OPENAI_BASE_URL` when set in the process environment. Guided setup uses ChatGPT device sign-in and stores login credentials in the instance home.
 
+## Web capabilities
+
+Set `agentWeb.search` and `agentWeb.fetch` globally or override either under this agent's `web` object. Both default to `true`. Codex applies `config.web_search` to its App Server threads, using `cached` for provider-side search or `disabled` when search is off. Policy changes that affect the thread's tool set cause the gateway to rebuild context in a fresh thread. The gateway's `web.fetch` uses its own public-address checks and response limits. [Agent web capabilities](../../README.md#agent-web-capabilities)
+
 ## Guided setup
 
 Run `corepack pnpm exec tsugimori add agent codex --dir ./ws` or `/add agent codex [--id <id>]` as the owner.

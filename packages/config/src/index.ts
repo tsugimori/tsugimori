@@ -1,5 +1,6 @@
 import type {
   AgentInstanceConfig,
+  AgentWebPolicy,
   PlatformInstanceConfig,
   WebhookConfig,
 } from '@tsugimori/plugin-sdk';
@@ -30,6 +31,7 @@ export class ConfigError extends Error {}
 export interface Config {
   $schema?: string;
   agents: AgentInstanceConfig[];
+  agentWeb?: Partial<AgentWebPolicy>;
   context: {
     recentMessages: number;
     summary?: {
