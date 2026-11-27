@@ -165,17 +165,6 @@ export class ToolDetails {
     return serializer(this.#deps.snapshot()).redact;
   }
 
-  error(error: unknown) {
-    const snapshot = this.#deps.snapshot();
-    if (snapshot.config.web?.toolDetails?.enabled === false) return null;
-    return capToolDetail(
-      serializer(snapshot).redact(
-        error instanceof Error ? error.message : 'Task failed',
-      ),
-      400,
-    );
-  }
-
   begin(
     taskId: string,
     name: string,

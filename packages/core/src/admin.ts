@@ -96,12 +96,14 @@ function taskDetails(
     .error;
   return {
     ...task,
-    silent: spans.some(
-      ({ attrs, name }) =>
-        name === 'outbound.silent' &&
-        attrs.reply === 'silent' &&
-        !attrs.fallback,
-    ),
+    silent:
+      task.status === 'completed' &&
+      spans.some(
+        ({ attrs, name }) =>
+          name === 'outbound.silent' &&
+          attrs.reply === 'silent' &&
+          !attrs.fallback,
+      ),
     tools: tools.sort(
       (a, b) =>
         a.startedAt - b.startedAt ||

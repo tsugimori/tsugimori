@@ -1,3 +1,5 @@
+import { redactPairingCodes } from './inbound-message.ts';
+
 const tokenPattern = /\bbot\d+:[\w-]+/g;
 
 /** Returns a short, secret-free description of an error for structured logs. */
@@ -9,4 +11,34 @@ export function describeError(error: unknown, redact = (text: string) => text) {
       .replace(/https?:\/\/api\.telegram\.org\/[^\s<>"']*/gi, '<redacted URL>')
       .replace(tokenPattern, 'bot<redacted>'),
   ).slice(0, 500);
+}
+
+export function describeTaskError(
+  error: unknown,
+  redact?: (text: string) => string,
+) {
+  return redactPairingCodes(describeError(error, redact))
+    .split(/[\r\n\u2028\u2029]/u, 1)[0]!
+    .slice(0, 300);
+}
+
+export function describeStickerError(
+  error: unknown,
+  redact: (text: string) => string,
+) {
+  return describeTaskError(error, (text) =>
+    redact(text)
+      .replace(
+        /\bDescribe the first \d+ cells of this sticker sheet[^\r\n\u2028\u2029]*/u,
+        '[redacted prompt]',
+      )
+      .replace(
+        /\bdata:image\/[^\s"',)]+,[A-Za-z0-9+/_=%-]+|[A-Za-z0-9+/]{64,}={0,2}/gu,
+        '[redacted image]',
+      )
+      .replace(
+        /'(?:file:\/\/|\/|[a-z]:[\\/]|\\\\)[^']*'|"(?:file:\/\/|\/|[a-z]:[\\/]|\\\\)[^"]*"|(?:file:\/\/|\/|[a-z]:[\\/]|\\\\)[^\s"'`<>),;]+/giu,
+        '[redacted path]',
+      ),
+  );
 }

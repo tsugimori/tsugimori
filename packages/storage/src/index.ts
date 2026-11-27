@@ -437,7 +437,20 @@ export interface Store {
     ref: ChatRef,
     seq: number,
     revision?: number,
-  ): string | undefined;
+  ):
+    | Pick<
+        MessageRecord,
+        | 'albumId'
+        | 'displayName'
+        | 'messageId'
+        | 'metadata'
+        | 'migratedFromChatId'
+        | 'recordedAt'
+        | 'replyTo'
+        | 'text'
+        | 'userId'
+      >
+    | undefined;
   countPendingApprovals(now: number): number;
   createApproval(approval: ApprovalRecord): void;
   createSchedule(schedule: ScheduleRecord, limit: number): boolean;

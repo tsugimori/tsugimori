@@ -166,6 +166,7 @@ export type TaskContextRef =
   | { kind: 'summary' }
   | {
       kind: 'history';
+      message?: ContextBlock['message'];
       revision?: number;
       seq: number;
       trust: ContextBlock['trust'];
@@ -248,6 +249,7 @@ export interface TaskExecution {
 export interface AdminTaskRecord extends Partial<TaskExecution> {
   context: readonly {
     kind: 'fixed' | 'history' | 'summary' | 'new';
+    message?: ContextBlock['message'];
     ref: string;
     text?: string;
     title: string;

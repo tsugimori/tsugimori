@@ -619,22 +619,14 @@ export class Tasks {
       recorder.output(result.text);
       work.acceptsSupplements = false;
       abort.signal.throwIfAborted();
-      const fallback = work.pendingApprovalFallback;
       const reason = silentReason(result.text, redactor);
       const silent = reason !== undefined;
+      // The approval notice still matters after a sticker or other media.
+      const fallback = work.pendingApprovalFallback;
       const text = [silent ? '' : result.text, fallback]
         .filter(Boolean)
         .join('\n\n');
-      if (silent) {
-        outcome.silentReason = reason;
-        this.#deps.trace.record('outbound.silent', {
-          ...chat,
-          taskId: id,
-          reply: 'silent',
-          silentReason: outcome.silentReason,
-          fallback: Boolean(fallback),
-        });
-      }
+      if (silent) outcome.silentReason = reason;
       if (text || work.mediaQueued?.length) {
         const scheduled = input.scheduled;
         const output = scheduled
@@ -658,6 +650,13 @@ export class Tasks {
         outcome.kind = 'delivered';
       } else {
         outcome.kind = 'silent';
+        if (silent)
+          this.#deps.trace.record('outbound.silent', {
+            ...chat,
+            taskId: id,
+            reply: 'silent',
+            silentReason: reason,
+          });
         await this.#deps.trace.flush().catch(() => {
           log({ level: 'error', event: 'trace.flush_failed', taskId: id });
         });
@@ -718,7 +717,10 @@ export class Tasks {
           'task.failed',
           {
             taskId: id,
-            error: this.#deps.toolDetails.error(error),
+            error:
+              runtime.config.web?.toolDetails?.enabled === false
+                ? null
+                : outcome.error.message,
           },
           0,
           'error',

@@ -13,7 +13,7 @@ import type { Store } from '@tsugimori/storage';
 
 import type { Logger } from './hooks.ts';
 
-import { describeError } from './errors.ts';
+import { describeError, describeTaskError } from './errors.ts';
 import { ruleReferences } from './record-context.ts';
 import { buildInfo } from './version.ts';
 
@@ -156,6 +156,11 @@ export class TaskRecorder {
               seq,
               trust: block.trust,
               revision,
+              // Album membership can change independently of this message's revision.
+              ...(block.message &&
+                (block.message.albumId || block.message.replyTo?.albumId) && {
+                  message: block.message,
+                }),
             });
           }
           break;
@@ -338,6 +343,15 @@ export class TaskRecorder {
       );
   }
 
+  errorMessage(error: unknown) {
+    const { sessionId, previousSessionId } = this.#refs.session;
+    return describeTaskError(error, (text) => {
+      for (const id of [sessionId, previousSessionId])
+        if (id) text = text.replaceAll(id, '[redacted session]');
+      return this.#deps.redact(text);
+    });
+  }
+
   error(error: unknown, stage: OutcomeError['stage']): OutcomeError {
     const code =
       error instanceof Error
@@ -347,7 +361,7 @@ export class TaskRecorder {
         : 'Error';
     const data = {
       code: this.#deps.redact(code).slice(0, 100),
-      message: describeError(error, this.#deps.redact),
+      message: this.errorMessage(error),
       stage,
     };
     this.event({ kind: 'error', data });

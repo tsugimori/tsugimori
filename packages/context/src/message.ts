@@ -38,8 +38,9 @@ function publicReply(
   reply: ReplyTarget,
   attachments = reply.attachments,
 ): ContextMessage['replyTo'] {
-  const { id, quote, sender, text } = reply;
+  const { albumId, id, quote, sender, text } = reply;
   return {
+    ...(albumId !== undefined && { albumId }),
     id,
     sender,
     text,
@@ -78,6 +79,7 @@ export function messageContext(
     ? repliedAlbum.map(({ attachment }) => attachment)
     : reply?.attachments;
   return {
+    ...(message.albumId != null && { albumId: message.albumId }),
     id: messageId,
     at: metadata?.at ?? message.recordedAt,
     sender: {

@@ -25,8 +25,7 @@ import type { ToolDetails } from './tool-details.ts';
 import { untilAborted } from './abort.ts';
 import { runAgent } from './agent-run.ts';
 import { modelThinkingLevels } from './agent-settings.ts';
-import { describeError } from './errors.ts';
-import { redactPairingCodes } from './inbound-message.ts';
+import { describeStickerError } from './errors.ts';
 import { findFfmpeg, prepareImage, prepareStickerGrid } from './media.ts';
 
 interface Dependencies {
@@ -53,25 +52,6 @@ const retryDelayMs = 10 * 60_000;
 
 function botId(adapter: PlatformAdapter) {
   return adapter.botIdentity?.id ?? adapter.id;
-}
-
-function stickerError(error: unknown, redact: (text: string) => string) {
-  return describeError(error, (text) =>
-    redactPairingCodes(redact(text))
-      .split(/[\r\n\u2028\u2029]/u, 1)[0]!
-      .replace(
-        /\bDescribe the first \d+ cells of this sticker sheet.*$/u,
-        '[redacted prompt]',
-      )
-      .replace(
-        /\bdata:image\/[^\s"',)]+,[A-Za-z0-9+/_=%-]+|[A-Za-z0-9+/]{64,}={0,2}/gu,
-        '[redacted image]',
-      )
-      .replace(
-        /'(?:file:\/\/|\/|[a-z]:[\\/]|\\\\)[^']*'|"(?:file:\/\/|\/|[a-z]:[\\/]|\\\\)[^"]*"|(?:file:\/\/|\/|[a-z]:[\\/]|\\\\)[^\s"'`<>),;]+/giu,
-        '[redacted path]',
-      ),
-  ).slice(0, 300);
 }
 
 export class StickerIndex {
@@ -293,7 +273,7 @@ export class StickerIndex {
         } catch (error) {
           if (!this.#stop.signal.aborted && !abort.signal.aborted) {
             this.#retryAfter.set(job.name, Date.now() + retryDelayMs);
-            attrs.error = stickerError(error, toolDetails.redactor());
+            attrs.error = describeStickerError(error, toolDetails.redactor());
             log({
               level: 'warn',
               event: 'sticker.index_failed',

@@ -59,6 +59,7 @@ import {
   lte,
   max,
   min,
+  ne,
   notInArray,
   or,
   sql,
@@ -1735,7 +1736,7 @@ export class SqliteStore implements Store {
           and json_type(${traceSpans.attrs}, '$.error') = 'text'
           order by ${traceSpans.startedAt} desc, ${traceSpans.id} desc limit 1
         )`,
-        silent: sql<number>`exists (
+        silent: sql<number>`${tasks.status} = 'completed' and exists (
           select 1 from ${traceSpans} where ${traceTask}
             and ${traceSpans.name} = 'outbound.silent'
             and json_extract(${traceSpans.attrs}, '$.reply') = 'silent'
@@ -2012,6 +2013,7 @@ export class SqliteStore implements Store {
       .from(traceSpans)
       .where(
         and(
+          ne(traceSpans.name, 'agent.run'),
           eq(sessionScope(traceSpans.attrs), scope),
           metric === 'compaction'
             ? and(
@@ -3083,20 +3085,41 @@ export class SqliteStore implements Store {
 
   contextMessage(ref: ChatRef, seq: number, revision = 0) {
     const row = this.#db
-      .select({ text: messages.text, revision: messages.revision })
+      .select({
+        albumId: messages.albumId,
+        displayName: users.display,
+        messageId: messages.messageId,
+        metadata: messages.metadata,
+        migratedFromChatId: messages.migratedFromChatId,
+        recordedAt: messages.recordedAt,
+        replyTo: messages.replyTo,
+        revision: messages.revision,
+        text: messages.text,
+        userId: messages.userId,
+      })
       .from(messages)
+      .leftJoin(
+        users,
+        and(
+          eq(users.adapterId, messages.adapterId),
+          eq(users.userId, messages.userId),
+        ),
+      )
       .where(
         and(chatScope(messages, this.resolveChat(ref)), eq(messages.seq, seq)),
       )
       .get();
-    if (!row || row.revision === revision) return row?.text;
-    return this.#db
-      .select({ text: messageEdits.text })
+    if (!row || row.revision === revision) return row;
+    const edit = this.#db
+      .select({ metadata: messageEdits.metadata, text: messageEdits.text })
       .from(messageEdits)
       .where(
         and(eq(messageEdits.seq, seq), eq(messageEdits.revision, revision)),
       )
-      .get()?.text;
+      .get();
+    return (
+      edit && { ...row, ...edit, replyTo: edit.metadata?.replyTo?.id ?? null }
+    );
   }
 
   saveTrigger(decision: TriggerDecision, messageSeq?: number) {

@@ -31,6 +31,8 @@ import { findFfmpeg, prepareImage } from './media.ts';
 
 const string = { type: 'string', minLength: 1, maxLength: 1024 };
 const id = { type: 'string', minLength: 1, maxLength: 512 };
+const completeReply =
+  ' If this completes your reply, finish with NO_REPLY: <short reason>. Add text only if it adds something.';
 const properties = (
   properties: Record<string, unknown>,
   required: string[],
@@ -100,7 +102,8 @@ export function sendTools(
     tools.push({
       name: 'send.reaction',
       description:
-        'React with a platform-supported emoji to a message in this chat. Omit messageId to react to the triggering message.',
+        'React with a platform-supported emoji to a message in this chat. Omit messageId to react to the triggering message.' +
+        completeReply,
       schema: properties(
         { emoji: { ...string, maxLength: 32 }, messageId: id },
         ['emoji'],
@@ -145,7 +148,8 @@ export function sendTools(
     tools.push({
       name: 'send.sticker',
       description:
-        'Send a sticker to this chat. Use fileId from sticker.search and include packageId when returned.',
+        'Send a sticker to this chat. Use fileId from sticker.search and include packageId when returned.' +
+        completeReply,
       schema: properties({ fileId: id, packageId: id }, ['fileId']),
       run: (args, task) => {
         const { fileId, packageId } = args as {
@@ -170,7 +174,9 @@ export function sendTools(
     if (!capability || !upload) continue;
     tools.push({
       name: `send.${kind}`,
-      description: `Send ${kind === 'image' ? 'an image' : adapter.kind === 'line' ? 'an MP4 video' : 'a file or MP4 video'} to this chat from a path in the chat workspace or an attachment reference from this chat. Provide exactly one source.`,
+      description:
+        `Send ${kind === 'image' ? 'an image' : adapter.kind === 'line' ? 'an MP4 video' : 'a file or MP4 video'} to this chat from a path in the chat workspace or an attachment reference from this chat. Provide exactly one source.` +
+        completeReply,
       schema: uploadSchema,
       async run(args, task) {
         current();

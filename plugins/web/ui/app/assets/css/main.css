@@ -857,7 +857,7 @@ input[type='date'],
 .context-row:last-child {
   border-bottom: 0;
 }
-.context-row summary {
+.context-row > summary {
   display: flex;
   align-items: center;
   gap: 7px;
@@ -865,15 +865,15 @@ input[type='date'],
   min-height: 34px;
   font-size: 12px;
 }
-.context-row summary::after {
+.context-row > summary::after {
   content: '⌄';
   margin-left: auto;
   color: var(--muted);
 }
-.context-row[open] summary::after {
+.context-row[open] > summary::after {
   content: '⌃';
 }
-.context-row summary code {
+.context-row > summary code {
   margin-left: auto;
   text-align: right;
 }
@@ -1403,7 +1403,7 @@ input[type='date'],
   }
   .drawer-nav a,
   .jump-links a,
-  .context-row summary,
+  .context-row > summary,
   .tool-card summary,
   .chat-tool summary,
   .span-row summary {
@@ -1650,10 +1650,10 @@ input[type='date'],
   background: transparent;
   border: 0;
 }
-.context-row summary code {
+.context-row > summary code {
   margin-inline: auto 0;
 }
-.context-row summary::after {
+.context-row > summary::after {
   margin-left: 1px;
 }
 .chat-task-table :is(td, th) {

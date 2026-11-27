@@ -40,6 +40,7 @@ export class Tracer {
 
   latestSessionSpan(scope: string, metric: SessionMetric) {
     const matches = (span: TraceSpan) =>
+      span.name !== 'agent.run' &&
       span.attrs.sessionScope === scope &&
       (metric === 'compaction'
         ? span.name === 'agent.compaction' && span.status === 'ok'

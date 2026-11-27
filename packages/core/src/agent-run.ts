@@ -1,6 +1,7 @@
 import type {
   AgentCompactionEvent,
   AgentConnector,
+  AgentEvent,
   AgentIO,
   AgentRequest,
   AgentTool,
@@ -9,7 +10,7 @@ import type {
   ToolContext,
   ToolDefinition,
 } from '@tsugimori/plugin-sdk';
-import type { ApprovalContinuation } from '@tsugimori/storage';
+import type { ApprovalContinuation, TraceSpan } from '@tsugimori/storage';
 import type { Tracer } from '@tsugimori/trace';
 
 import { Ajv } from 'ajv';
@@ -20,6 +21,7 @@ import type { TaskRecorder } from './task-recorder.ts';
 import type { ToolDetail, ToolDetails } from './tool-details.ts';
 
 import { untilAborted } from './abort.ts';
+import { describeStickerError, describeTaskError } from './errors.ts';
 
 interface AgentRunDependencies {
   approvalPending?: AbortSignal;
@@ -42,6 +44,15 @@ export function sessionScope(
   return createHash('sha256')
     .update(JSON.stringify([adapterId, chatId, agentId, model, sessionId]))
     .digest('hex');
+}
+
+function isPendingApproval(result: unknown) {
+  return (
+    result &&
+    typeof result === 'object' &&
+    'pending' in result &&
+    result.pending === true
+  );
 }
 
 export async function runAgent(
@@ -68,18 +79,16 @@ export async function runAgent(
     ...(request.purpose && { purpose: request.purpose }),
   };
   const scope = (id: string) =>
-    request.purpose
-      ? null
-      : sessionScope(
-          scopeChatId && id === request.resumeSessionId
-            ? { ...task.chat, chatId: scopeChatId }
-            : task.chat,
-          agent.id,
-          id === request.resumeSessionId
-            ? (scopeModel ?? request.model)
-            : request.model,
-          id,
-        );
+    sessionScope(
+      scopeChatId && id === request.resumeSessionId
+        ? { ...task.chat, chatId: scopeChatId }
+        : task.chat,
+      agent.id,
+      id === request.resumeSessionId
+        ? (scopeModel ?? request.model)
+        : request.model,
+      id,
+    );
   let activeScope = request.resumeSessionId
     ? scope(request.resumeSessionId)
     : null;
@@ -88,7 +97,8 @@ export async function runAgent(
       'agent.compaction',
       {
         ...attrs,
-        sessionScope: event.status === 'error' ? null : activeScope,
+        sessionScope:
+          request.purpose || event.status === 'error' ? null : activeScope,
         trigger: event.trigger,
         contextTokens: event.tokensAfter ?? null,
         tokensBefore: event.tokensBefore ?? null,
@@ -104,8 +114,8 @@ export async function runAgent(
     });
     io.reportCompaction?.(event);
   };
-  return trace.span('agent.run', attrs, async () => {
-    signal.throwIfAborted();
+  const runAttrs: TraceSpan['attrs'] = { ...attrs };
+  return trace.span('agent.run', runAttrs, async () => {
     const tools = new Map<
       string,
       {
@@ -116,27 +126,23 @@ export async function runAgent(
     >();
     const denying = new Set<string>();
     const approvals = new Map<string, { id: string; waiting: boolean }>();
-    const events = agent.run(request, {
-      ...io,
-      reportCompaction,
-      reportToolDenial: (callId) => denying.add(callId),
-      requestApproval: async (approval, callId) => {
-        if (callId === undefined) return io.requestApproval(approval);
-        const allowed = await io.requestApproval(approval, callId, (id) => {
-          approvals.set(callId, { id, waiting: true });
-          tools.get(callId)?.detail?.pending(id);
-        });
-        const tracked = approvals.get(callId);
-        if (tracked && !approvalPending?.aborted) {
-          tracked.waiting = false;
-          if (allowed) tools.get(callId)?.detail?.resume();
-        }
-        return allowed;
-      },
-    });
-    const iterator = events[Symbol.asyncIterator]();
-    const firstText = trace.begin('agent.first_text', attrs);
+    let toolCalls = 0;
+    let toolErrors = 0;
+    let usage: Record<
+      'contextTokens' | 'inputTokens' | 'outputTokens',
+      number | null
+    > = { contextTokens: null, inputTokens: null, outputTokens: null };
+    let resolvedModel: string | undefined;
+    let complete = false;
+    let failure: unknown;
+    let deltas = '';
+    let final: string | undefined;
+    let sessionId: string | undefined;
+    let iterator: AsyncIterator<AgentEvent> | undefined;
+    let outcome: 'ok' | 'error' | 'aborted' | 'pending-approval' = 'ok';
+    const firstTextAttrs: TraceSpan['attrs'] = { ...attrs };
     const startTool = (callId: string, name: string, args: unknown) => {
+      toolCalls++;
       const detail = toolDetails?.begin(taskId, name, args, callId);
       const approval = approvals.get(callId);
       if (approval) {
@@ -161,6 +167,7 @@ export async function runAgent(
       status: ToolCallStatus,
       result?: unknown,
     ) => {
+      if (status !== 'ok') toolErrors++;
       const tool = tools.get(callId);
       tool?.timed?.();
       tool?.detail?.finish(status, result);
@@ -171,14 +178,58 @@ export async function runAgent(
       approvals.delete(callId);
       denying.delete(callId);
     };
-    let complete = false;
-    let failure: unknown;
-    let deltas = '';
-    let final: string | undefined;
-    let sessionId: string | undefined;
     try {
+      signal.throwIfAborted();
+      request.signal.throwIfAborted();
+      const events = agent.run(
+        {
+          ...request,
+          tools: request.tools.map((tool) => ({
+            ...tool,
+            async run(...args) {
+              toolCalls++;
+              try {
+                const result = await tool.run(...args);
+                if (isPendingApproval(result)) toolErrors++;
+                return result;
+              } catch (error) {
+                toolErrors++;
+                throw error;
+              }
+            },
+          })),
+        },
+        {
+          ...io,
+          reportCompaction,
+          reportToolDenial: (callId) => denying.add(callId),
+          requestApproval: async (approval, callId) => {
+            if (callId === undefined) return io.requestApproval(approval);
+            const allowed = await io.requestApproval(approval, callId, (id) => {
+              approvals.set(callId, { id, waiting: true });
+              tools.get(callId)?.detail?.pending(id);
+            });
+            const tracked = approvals.get(callId);
+            if (tracked && !approvalPending?.aborted) {
+              tracked.waiting = false;
+              if (allowed) tools.get(callId)?.detail?.resume();
+            }
+            return allowed;
+          },
+        },
+      );
+      const stream = (iterator = events[Symbol.asyncIterator]());
+      const firstText = trace.begin('agent.first_text', firstTextAttrs);
+      let seenText = false;
+      const recordFirstText = (text: string) => {
+        if (!text || seenText) return;
+        seenText = true;
+        if (resolvedModel !== undefined)
+          firstTextAttrs.resolvedModel = resolvedModel;
+        firstText();
+      };
       for (;;) {
-        const next = await untilAborted(request.signal, () => iterator.next());
+        const next = await untilAborted(request.signal, () => stream.next());
         signal.throwIfAborted();
         if (next.done) {
           complete = true;
@@ -191,23 +242,28 @@ export async function runAgent(
             recorder?.text('reasoning', event.text);
             break;
           case 'model':
+            resolvedModel = event.model;
+            runAttrs.resolvedModel = resolvedModel;
+            if (event.reasoning !== undefined)
+              runAttrs.reasoning = event.reasoning;
+            else delete runAttrs.reasoning;
             recorder?.model(event.model, event.reasoning);
             break;
           case 'text.delta':
             recorder?.text('text', event.text);
-            if (event.text) firstText();
+            recordFirstText(event.text);
             deltas += event.text;
             break;
           case 'text.final':
             if (!deltas.endsWith(event.text))
               recorder?.text('text', event.text);
-            if (event.text) firstText();
+            recordFirstText(event.text);
             final = event.text;
             break;
           case 'sessionId': {
             sessionId = event.sessionId;
             const nextScope = scope(sessionId);
-            if (nextScope && nextScope !== activeScope)
+            if (!request.purpose && nextScope !== activeScope)
               trace.record('agent.session.created', {
                 ...attrs,
                 sessionScope: nextScope,
@@ -253,19 +309,23 @@ export async function runAgent(
                 ? tokens
                 : null;
             const contextWindow = event.contextWindow;
+            usage = {
+              contextTokens,
+              inputTokens: event.inputTokens ?? null,
+              outputTokens: event.outputTokens ?? null,
+            };
             trace.record('agent.usage', {
               ...attrs,
               sessionScope:
-                contextTokens === null && contextWindow === undefined
+                request.purpose ||
+                (contextTokens === null && contextWindow === undefined)
                   ? null
                   : activeScope,
-              contextTokens,
+              ...usage,
               ...(contextWindow === undefined ? {} : { contextWindow }),
-              inputTokens: event.inputTokens ?? null,
               ...(request.purpose === 'sticker-index' && {
                 costUsd: event.costUsd ?? null,
               }),
-              outputTokens: event.outputTokens ?? null,
             });
             break;
           }
@@ -278,7 +338,25 @@ export async function runAgent(
       }
     } catch (error) {
       failure = error;
-      if (signal.aborted || !approvalPending?.aborted) throw error;
+      if (signal.aborted || !approvalPending?.aborted) {
+        outcome =
+          signal.aborted || request.signal.aborted ? 'aborted' : 'error';
+        if (outcome === 'error' && recorder)
+          runAttrs.error = recorder.errorMessage(error);
+        else if (outcome === 'error') {
+          const redactSecrets = toolDetails?.redactor();
+          const redact = (text: string) => {
+            for (const id of [sessionId, request.resumeSessionId])
+              if (id) text = text.replaceAll(id, '[redacted session]');
+            return redactSecrets?.(text) ?? text;
+          };
+          runAttrs.error =
+            request.purpose === 'sticker-index'
+              ? describeStickerError(error, redact)
+              : describeTaskError(error, redact);
+        }
+        throw error;
+      }
     } finally {
       for (const [id] of tools) {
         const status =
@@ -289,9 +367,19 @@ export async function runAgent(
               : 'error';
         finishTool(id, status, status === 'error' ? failure : undefined);
       }
-      if (!complete) {
+      Object.assign(runAttrs, usage, {
+        sessionScope: activeScope,
+        toolCalls,
+        toolErrors,
+        outputChars: outcome === 'ok' ? (final ?? deltas).length : 0,
+        outcome:
+          outcome === 'ok' && approvalPending?.aborted
+            ? 'pending-approval'
+            : outcome,
+      });
+      if (!complete && iterator) {
         void Promise.resolve()
-          .then(() => iterator.return?.())
+          .then(() => iterator?.return?.())
           .catch(() => {
             log({
               level: 'error',
@@ -391,13 +479,7 @@ export function protectTools(
                 : task;
             result = await tool.run(args, invocation);
           }
-          status =
-            result &&
-            typeof result === 'object' &&
-            'pending' in result &&
-            result.pending === true
-              ? 'pending-approval'
-              : 'ok';
+          status = isPendingApproval(result) ? 'pending-approval' : 'ok';
         } catch (error) {
           result = error;
           throw error;

@@ -181,6 +181,32 @@ async function fixture() {
             ],
             context: [
               { kind: 'new', title: 'Owner message', ref: '1', text: payload },
+              {
+                kind: 'new',
+                title: 'message · owner',
+                ref: '2',
+                text: '[sticker]',
+                message: {
+                  at: 2,
+                  id: 'sticker-message',
+                  sender: { id: 'owner', name: null },
+                  attachments: [
+                    {
+                      index: 0,
+                      kind: 'sticker',
+                      set: '11537',
+                      stickerId: '52002734',
+                      keywords: [
+                        'over board',
+                        'Sparkle',
+                        'emo',
+                        'Satisfied',
+                        'good',
+                      ],
+                    },
+                  ],
+                },
+              },
             ],
             outcome: { kind: 'delivered' },
             output: 'Agent reply',
@@ -387,6 +413,14 @@ test('offers the APIs before the UI is built and redirects bookmarked routes', a
   const execution = await (await fetch(taskUrl, { headers })).json();
   assert.equal(execution.task.model, 'resolved');
   assert.equal(execution.context[0].text, payload);
+  assert.equal(execution.context[1].text, '[sticker]');
+  assert.deepEqual(execution.context[1].message.attachments[0].keywords, [
+    'over board',
+    'Sparkle',
+    'emo',
+    'Satisfied',
+    'good',
+  ]);
   assert.equal(execution.events[0].data.text, execution.output);
   assert.deepEqual(await (await fetch(rawUrl, { headers })).json(), {
     payload,

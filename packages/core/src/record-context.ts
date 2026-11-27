@@ -9,6 +9,8 @@ import type { Store, TaskRecord } from '@tsugimori/storage';
 import {
   guidelineBlock,
   guidelineFileBlock,
+  messageAlbumLookup,
+  messageContext,
   telegramTableBlocks,
 } from '@tsugimori/context';
 import { scheduleReplyStyle } from '@tsugimori/scheduler';
@@ -108,6 +110,7 @@ export async function reconstructContext(
       };
     }),
   );
+  const album = messageAlbumLookup(store, task);
   return refs.order.flatMap((entry): AdminTaskRecord['context'] => {
     switch (entry.kind) {
       case 'system': {
@@ -137,15 +140,18 @@ export async function reconstructContext(
         const section = fixed[entry.index];
         return section ? [section] : [];
       }
-      case 'history':
+      case 'history': {
+        const row = store.contextMessage(task, entry.seq, entry.revision);
         return [
           {
             kind: 'history',
             title: `Message #${entry.seq}`,
             ref: String(entry.seq),
-            text: store.contextMessage(task, entry.seq, entry.revision),
+            text: row?.text,
+            message: entry.message ?? (row && messageContext(row, album)),
           },
         ];
+      }
       case 'summary':
         return [
           {
@@ -171,6 +177,7 @@ export async function reconstructContext(
             title: block ? `${block.source} · ${block.trust}` : 'New input',
             ref: String(entry.index + 1),
             text: block?.content,
+            message: block?.source === 'message' ? block.message : undefined,
           },
         ];
       }

@@ -36,6 +36,7 @@ import { setTimeout as delay, setImmediate } from 'node:timers/promises';
 
 import type { Logger } from '../src/index.ts';
 
+import { sessionScope } from '../src/agent-run.ts';
 import {
   decideTrigger,
   Gateway,
@@ -808,9 +809,16 @@ async function until(t: TestContext, condition: () => boolean) {
   while (!condition()) await delay(10, undefined, { signal: t.signal });
 }
 
-for (const outboundPush of ['free', 'metered', 'none'] as const) {
+for (const [outboundPush, stickerReply] of [
+  ['free', false],
+  ['metered', false],
+  ['none', false],
+  ['metered', true],
+] as const) {
   test(
-    `uses the same pending approval line with ${outboundPush} push`,
+    stickerReply
+      ? 'a sticker reply still sends the pending approval line'
+      : `uses the same pending approval line with ${outboundPush} push`,
     { timeout: 5_000 },
     async (t) => {
       const wait = new AbortController();
@@ -823,12 +831,22 @@ for (const outboundPush of ['free', 'metered', 'none'] as const) {
         async function* (request) {
           const tool = request.tools.find(({ name }) => name === 'scoped_tool');
           assert.ok(tool);
+          if (stickerReply)
+            await request.tools
+              .find(({ name }) => name === 'send.sticker')!
+              .run({ fileId: 'sticker' });
           yield { type: 'text.final', text: 'NO_REPLY: Approval is pending' };
           await tool.run({ id: 'pending' });
         },
         true,
         { locale: 'zh-TW', outboundPush },
       );
+      if (stickerReply) {
+        f.platform.platform.capabilities.stickers = true;
+        f.platform.platform.sendSticker = async () => ({
+          messageId: 'sticker',
+        });
+      }
       await f.platform.emit(inbound('pending', 'Use the scoped tool'));
       await until(t, () =>
         f.store.listApprovals().some(({ promptMessageId }) => promptMessageId),
@@ -846,6 +864,12 @@ for (const outboundPush of ['free', 'metered', 'none'] as const) {
       const task = f.store
         .listChatTasks(chat)
         .find(({ sourceMessageId }) => sourceMessageId === 'pending')!;
+      const run = f.trace.recent.find(
+        ({ name, attrs }) => name === 'agent.run' && attrs.taskId === task.id,
+      );
+      assert.equal(run?.attrs.outcome, 'pending-approval');
+      assert.equal(run?.attrs.toolCalls, stickerReply ? 2 : 1);
+      assert.equal(run?.attrs.toolErrors, 1);
       assert.equal(
         f.store.getTaskExecution(task.id)?.outcome.kind,
         'delivered',
@@ -856,10 +880,10 @@ for (const outboundPush of ['free', 'metered', 'none'] as const) {
       );
       assert.deepEqual(
         f.store.getTaskExecution(task.id)?.outcome.delivery?.parts,
-        [
-          { messageId: prompt!.messageId, ok: true },
-          { messageId: replies[0]!.messageId, ok: true },
-        ],
+        (stickerReply
+          ? ['sticker', prompt!.messageId, replies[0]!.messageId]
+          : [prompt!.messageId, replies[0]!.messageId]
+        ).map((messageId) => ({ messageId, ok: true })),
       );
     },
   );
@@ -1240,6 +1264,10 @@ test(
     assert.equal(signal.aborted, true);
     assert.equal(f.store.getMessage(chat, 'source')?.deleted, true);
     assert.deepEqual(f.platform.sent, []);
+    assert.equal(
+      f.trace.recent.find(({ name }) => name === 'agent.run')?.attrs.outcome,
+      'aborted',
+    );
   },
 );
 
@@ -3863,6 +3891,7 @@ test('disabled tool details keep names in trace and skip argument and result sto
   );
   await f.platform.emit(inbound('capture-disabled', 'Capture this'));
   await f.gateway.idle();
+  await f.trace.flush();
   const [task] = f.store.listChatTasks(chat);
   assert.ok(task);
   assert.deepEqual(f.store.taskToolCalls([task.id]), []);
@@ -4150,8 +4179,23 @@ test(
       { durable: true },
     );
     const group = { chatKind: 'group', userId: 'member' } as const;
+    const sticker = {
+      index: 0,
+      kind: 'sticker',
+      set: '11537',
+      stickerId: '52002734',
+      stickerFormat: 'static',
+      emoji: '✨',
+      keywords: ['over board', 'Sparkle', 'emo', 'Satisfied', 'good'],
+    } as const;
+    const attachment = { ...sticker, keywords: [...sticker.keywords] };
     await f.platform.emit(inbound('summarized', 'Summarized message', group));
-    await f.platform.emit(inbound('history', 'Historical message', group));
+    await f.platform.emit(
+      inbound('history', 'Historical message', {
+        ...group,
+        attachments: [{ ...attachment, fileId: 'private-history-file' }],
+      }),
+    );
     const historical = f.store.getMessage(chat, 'history')!;
     const first = f.store.beginSummary(chat);
     assert.ok(
@@ -4164,9 +4208,11 @@ test(
     const summary = f.store.getSummary(chat)!;
     f.store.setChatRoute(chat, { model: 'default' });
     await f.platform.emit(
-      inbound('request', 'Check this', {
+      inbound('request', '', {
         chatKind: 'group',
         mentionsBot: true,
+        attachments: [{ ...attachment, fileId: 'private-new-file' }],
+        replyTo: { id: 'history', quote: 'Historical message' },
       }),
     );
     await waiting.promise;
@@ -4208,14 +4254,24 @@ test(
     });
     assert.deepEqual(
       execution.input?.map(({ content }) => content),
-      ['Check this', 'One more detail'],
+      ['[sticker]', 'One more detail'],
     );
     assert.equal(execution.refs?.summary?.revision, summary.revision);
     assert.deepEqual(execution.refs?.history.seqs, [historical.seq]);
     assert.equal(execution.refs?.session.sessionId, 'session-demo');
-    assert.equal(
-      execution.context.find(({ kind }) => kind === 'history')?.text,
-      'Historical message',
+    const historyBlock = execution.context.find(
+      ({ kind }) => kind === 'history',
+    );
+    assert.equal(historyBlock?.text, 'Historical message');
+    assert.deepEqual(historyBlock.message?.attachments, [attachment]);
+    const newBlock = execution.context.find(({ kind }) => kind === 'new');
+    assert.equal(newBlock?.text, '[sticker]');
+    assert.deepEqual(newBlock.message?.attachments, [attachment]);
+    assert.deepEqual(newBlock.message?.replyTo?.attachments, [attachment]);
+    assert.equal(newBlock.message?.replyTo?.quote, 'Historical message');
+    assert.doesNotMatch(
+      JSON.stringify(execution),
+      /fileId|private-(?:history|new)-file/,
     );
     assert.equal(
       execution.context.find(({ kind }) => kind === 'summary')?.text,
@@ -4252,6 +4308,150 @@ test(
     assert.ok(execution.timing?.firstTokenMs !== undefined);
   },
 );
+
+test('agent run spans summarize the last usage, native and framework tools, and returned text', async (t) => {
+  const f = await fixture(t, async function* (request) {
+    yield { type: 'sessionId', sessionId: 'private-session' };
+    yield { type: 'model', model: 'resolved-model', reasoning: 'high' };
+    yield { type: 'usage', inputTokens: 9, outputTokens: 3 };
+    yield { type: 'text.delta', text: 'private draft' };
+    yield {
+      type: 'tool.started',
+      callId: 'first',
+      name: 'native',
+      args: 'private args',
+    };
+    yield {
+      type: 'tool.finished',
+      callId: 'first',
+      name: 'native',
+      status: 'ok',
+      result: 'private result',
+    };
+    yield {
+      type: 'tool.finished',
+      callId: 'second',
+      name: 'native',
+      status: 'denied',
+    };
+    await request.tools
+      .find(({ name }) => name === 'send.reaction')!
+      .run({ emoji: '👍' });
+    yield {
+      type: 'usage',
+      inputTokens: 42,
+      outputTokens: 5,
+      contextTokens: 40,
+    };
+    yield { type: 'text.final', text: 'Final reply' };
+  });
+  f.platform.platform.capabilities.reactions = true;
+  f.platform.platform.sendReaction = async () => {};
+  await f.platform.emit(
+    inbound('history', 'Earlier message', {
+      chatKind: 'group',
+      userId: 'member',
+    }),
+  );
+  f.store.setChatRoute(chat, { model: 'default' });
+  await f.platform.emit(
+    inbound('usage', 'private prompt', {
+      chatKind: 'group',
+      mentionsBot: true,
+    }),
+  );
+  await f.gateway.idle();
+  await f.trace.flush();
+
+  const task = f.store.listChatTasks(chat)[0]!;
+  const spans = f.store.taskTrace(task.id);
+  const attrs = { taskId: task.id, agentId: 'test', model: 'default' };
+  const run = spans.find(({ name }) => name === 'agent.run');
+  const scope = sessionScope(chat, 'test', 'default', 'private-session');
+  assert.equal(run?.status, 'ok');
+  assert.deepEqual(run?.attrs, {
+    ...attrs,
+    resolvedModel: 'resolved-model',
+    reasoning: 'high',
+    sessionScope: scope,
+    toolCalls: 3,
+    toolErrors: 1,
+    inputTokens: 42,
+    outputTokens: 5,
+    contextTokens: 40,
+    outputChars: 'Final reply'.length,
+    outcome: 'ok',
+  });
+  assert.deepEqual(
+    spans.find(({ name }) => name === 'agent.first_text')?.attrs,
+    {
+      ...attrs,
+      resolvedModel: 'resolved-model',
+    },
+  );
+  const children = spans.filter(({ name }) => name === 'agent.tool');
+  assert.equal(children.length, 2);
+  for (const child of children)
+    assert.deepEqual(child.attrs, {
+      ...attrs,
+      name: 'native',
+      toolCallSeq: child.attrs.toolCallSeq,
+    });
+  assert.equal(
+    f.trace.latestSessionSpan(scope, 'context')?.name,
+    'agent.usage',
+  );
+  assert.doesNotMatch(
+    JSON.stringify(spans.map(({ attrs }) => attrs)),
+    /private (?:draft|args|result|prompt)|private-session|Final reply/,
+  );
+});
+
+test('failed agent run records the same short redacted error as the task outcome', async (t) => {
+  const f = await fixture(t, async function* () {
+    yield { type: 'sessionId', sessionId: 'private-session' };
+    yield { type: 'model', model: 'resolved-model' };
+    yield { type: 'text.delta', text: 'unfinished' };
+    yield {
+      type: 'error',
+      error: new Error(
+        'provider failed private-session secret=fixture-secret ' +
+          'x'.repeat(320) +
+          '\nsecond line',
+      ),
+    };
+  });
+  await f.platform.emit(inbound('error', 'Prompt'));
+  await f.gateway.idle();
+  const task = f.store.listChatTasks(chat)[0]!;
+  assert.equal(task.status, 'failed');
+  const run = f.trace.recent.find(
+    ({ name, attrs }) => name === 'agent.run' && attrs.taskId === task.id,
+  );
+  assert.equal(run?.status, 'error');
+  assert.equal(run.attrs.outcome, 'error');
+  assert.equal(run.attrs.resolvedModel, 'resolved-model');
+  assert.equal(run.attrs.inputTokens, null);
+  assert.equal(run.attrs.outputTokens, null);
+  assert.equal(run.attrs.contextTokens, null);
+  assert.equal(run.attrs.outputChars, 0);
+  const error = run.attrs.error;
+  assert.ok(typeof error === 'string');
+  assert.equal(error.length, 300);
+  assert.match(
+    error,
+    /provider failed \[redacted session\] secret=\[redacted\]/,
+  );
+  assert.doesNotMatch(error, /fixture-secret|private-session|second line/);
+  assert.equal(
+    f.store.getTaskExecution(task.id)?.outcome.error?.message,
+    error,
+  );
+  assert.equal(
+    f.trace.recent.find(({ name }) => name === 'task.failed')?.attrs.error,
+    error,
+  );
+});
 
 test('stores trigger reasons for skipped messages, duplicates, deletions and commands without private raw data', async (t) => {
   const f = await fixture(t, async function* () {});
@@ -4768,9 +4968,11 @@ test('media-only rounds record queued IDs with their tool call and complete imme
       ({ source }) => source === 'message',
     )?.content;
     await tool.run({ fileId: source }, undefined, 'sticker-call');
-    yield { type: 'text.final', text: 'NO_REPLY' };
+    yield { type: 'text.final', text: 'NO_REPLY: Sticker sent' };
   });
   const platform = f.platform.platform;
+  const typing: AbortSignal[] = [];
+  platform.typing = (_message, signal) => typing.push(signal);
   platform.capabilities.stickers = true;
   platform.sendSticker = async ({ fileId }) =>
     fileId === 'queued'
@@ -4800,6 +5002,7 @@ test('media-only rounds record queued IDs with their tool call and complete imme
   await f.gateway.idle();
   await f.platform.emit(inbound('immediate-round', 'immediate'));
   await f.gateway.idle();
+  await f.trace.flush();
   const tasks = f.store.listChatTasks(chat);
   assert.equal(tasks.length, 2);
   for (const [source, messageId] of [
@@ -4815,12 +5018,27 @@ test('media-only rounds record queued IDs with their tool call and complete imme
     assert.deepEqual(execution.outcome.delivery?.parts, [
       { messageId, ok: true },
     ]);
+    assert.equal(
+      f.store.taskTrace(task.id).some(({ name }) => name === 'outbound.silent'),
+      false,
+    );
+    // Older tasks may already have the silent trace marker even though they sent media.
+    f.trace.record('outbound.silent', { taskId: task.id, reply: 'silent' });
+    await f.trace.flush();
+    assert.equal((await f.gateway.admin.task(task.id))?.task.silent, false);
+    assert.equal(
+      f.gateway.admin.tasks({ limit: 10 }).find(({ id }) => id === task.id)
+        ?.silent,
+      false,
+    );
     const [call] = f.store.taskToolCalls([task.id]);
     assert.equal(call?.name, 'send.sticker');
     assert.equal(call.status, 'ok');
     assert.equal(JSON.parse(call.result!).messageId, messageId);
   }
   assert.deepEqual(f.platform.sent, []);
+  assert.equal(typing.length, 2);
+  assert.ok(typing.every(({ aborted }) => aborted));
 });
 
 test(
@@ -5084,6 +5302,9 @@ test(
     const span = f.trace.recent.find(({ name }) => name === 'sticker.index');
     assert.equal(span?.status, 'error');
     assert.equal(span?.attrs.error, message);
+    const run = f.trace.recent.find(({ name }) => name === 'agent.run');
+    assert.equal(run?.attrs.purpose, 'sticker-index');
+    assert.equal(run?.attrs.error, message);
     assert.equal(f.store.hasStickerSet('retry_set', adapterId), false);
 
     t.mock.timers.tick(10 * 60_000 - 1);

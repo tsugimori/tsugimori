@@ -118,6 +118,11 @@ const tools = computed(
   () => new Map(task.value?.tools.map((tool) => [tool.seq, tool])),
 );
 const relatedChat = computed(() => trace.value?.chat ?? task.value);
+const sentIds = computed(() =>
+  (data.value?.outcome?.delivery?.parts ?? []).flatMap(({ messageId, ok }) =>
+    ok && messageId ? [messageId] : [],
+  ),
+);
 useFragment(() => Boolean(data.value) || Boolean(trace.value));
 useHead({
   title: computed(() =>
@@ -171,6 +176,12 @@ useHead({
           >{{ tokenPair(task.inputTokens, task.outputTokens) }}
           {{ m.tokens }}</span
         >
+      </p>
+      <p v-if="sentIds.length" class="muted delivery-ids">
+        <span>{{ t('Sent message IDs', '已傳送訊息 ID') }}</span>
+        <code v-for="(messageId, index) in sentIds" :key="index">{{
+          messageId
+        }}</code>
       </p>
     </div>
     <nav
@@ -269,6 +280,10 @@ useHead({
             <p v-else class="detail-inset muted">
               {{ m.unavailable }} · {{ context.ref }}
             </p>
+            <ContextMessageDetails
+              v-if="context.message"
+              :message="context.message"
+            />
           </details>
           <p v-if="!data.context.length" class="empty">{{ m.unavailable }}</p>
         </ConsolePanel>
@@ -598,3 +613,16 @@ useHead({
     </aside>
   </div>
 </template>
+
+<style scoped>
+.delivery-ids {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  margin-top: 4px;
+  overflow-wrap: anywhere;
+}
+.delivery-ids code {
+  min-width: 0;
+}
+</style>

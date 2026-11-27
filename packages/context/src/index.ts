@@ -81,7 +81,7 @@ export const guidelineBlock: ContextBlock = {
   source: 'system',
   trust: 'trusted',
   content:
-    'Older conversation history is available in storage. Workspace guideline files follow; AGENTS.md lists further guideline files that you can read with the guide.read tool when a task needs them. Apply rules in specificity order: workspace, platform, then conversation.\nIf the latest message does not need a reply from you, answer exactly `NO_REPLY: <short reason>` (one line, no other text).',
+    'Older conversation history is available in storage. Workspace guideline files follow; AGENTS.md lists further guideline files that you can read with the guide.read tool when a task needs them. Apply rules in specificity order: workspace, platform, then conversation.\nAdd text after using a send tool only if it adds something to what you sent. If the latest message needs no reply or a send tool already delivered the whole reply, answer exactly `NO_REPLY: <short reason>` (one line, no other text).',
 };
 
 export const telegramTableBlocks = {

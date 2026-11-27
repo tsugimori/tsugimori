@@ -111,10 +111,11 @@ export function imageLimits(
 }
 
 export interface ContextMessage {
+  albumId?: string;
   at: number | null;
   attachments: AttachmentMetadata[];
   id: string;
-  replyTo?: Omit<ReplyTarget, 'albumId' | 'attachments'> & {
+  replyTo?: Omit<ReplyTarget, 'attachments'> & {
     attachments: AttachmentMetadata[];
   };
   sender: { id: string | null; name: string | null };
