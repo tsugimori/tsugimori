@@ -13,6 +13,7 @@ import type { Tracer } from '@tsugimori/trace';
 import { ConfigError, parseConfig } from '@tsugimori/config';
 import { PlatformStartError } from '@tsugimori/plugin-sdk';
 import { resolve } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import { isDeepStrictEqual } from 'node:util';
 
 import type { CheckReport, EnvironmentChecks } from './checks.ts';
@@ -122,7 +123,27 @@ export class Runtime {
       ({ enabled, id }): AttachmentStatus => {
         if (enabled === false) return { id, state: 'disabled' };
         const entry = this.#adapters.get(id);
-        if (entry?.state === 'active') return { id, state: 'running' };
+        if (entry?.state === 'active') {
+          if (entry.adapter.login !== 'required')
+            return { id, state: 'running' };
+          return {
+            id,
+            state: 'unavailable',
+            failure: {
+              id: 'platform-login',
+              target: `platform/${id}`,
+              status: 'fail',
+              title: 'Platform sign-in',
+              detail: `Sign-in required. Run /login ${id} from another platform or the terminal.`,
+              localized: {
+                'zh-TW': {
+                  title: '平台登入',
+                  hint: `請從另一個平台或終端機執行 /login ${id}。`,
+                },
+              },
+            },
+          };
+        }
         if (entry?.retryAt !== undefined)
           return {
             id,
@@ -171,7 +192,29 @@ export class Runtime {
 
   getAdapter(id: string) {
     const entry = this.#adapters.get(id);
-    if (entry?.state === 'active') return entry.adapter;
+    if (entry?.state === 'active' && entry.adapter.login !== 'required')
+      return entry.adapter;
+  }
+
+  async waitForPlatformDetach(id: string, signal?: AbortSignal) {
+    const timeout = AbortSignal.timeout(15_000);
+    const wait = signal ? AbortSignal.any([signal, timeout]) : timeout;
+    // The entry leaves the map after stop has settled, including in-flight startup.
+    while (this.#adapters.has(id)) await delay(50, undefined, { signal: wait });
+  }
+
+  adminPlatforms() {
+    return this.attachments.platforms.map(({ id, state }) => ({
+      id,
+      kind: this.adapterKind(id)!,
+      state,
+      login:
+        this.#adapters.get(id)?.adapter.login ??
+        this.reports.find(
+          (item) => item.target === `platform/${id}` && item.login,
+        )?.login ??
+        ('unknown' as const),
+    }));
   }
 
   availableSince(id: string) {

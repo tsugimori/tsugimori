@@ -24,6 +24,7 @@ type WebhookInfo = ReturnType<Gateway['webhookInfo']>;
 interface Controller {
   execute(plan: RemovalPlan): Promise<string>;
   plan(target: RemovalTarget): Promise<RemovalPlan>;
+  waitForPlatformDetach?(id: string): Promise<void>;
   webhookInfo?(platformId?: string): Promise<WebhookInfo>;
 }
 
@@ -31,7 +32,8 @@ type Response =
   | { locale: RemovalPlan['locale']; plan: string }
   | { error: string }
   | { result: string }
-  | { webhook: WebhookInfo };
+  | { webhook: WebhookInfo }
+  | { detached: true };
 
 type SocketClaim =
   | { close?: never; socket: Socket }
@@ -129,6 +131,19 @@ async function serve(socket: Socket, controller: Controller) {
       socket.end(
         JSON.stringify({ webhook: await controller.webhookInfo(id) }) + '\n',
       );
+      return;
+    }
+    if (
+      payload &&
+      typeof payload === 'object' &&
+      'action' in payload &&
+      payload.action === 'wait-for-platform-detach' &&
+      'id' in payload &&
+      typeof payload.id === 'string' &&
+      controller.waitForPlatformDetach
+    ) {
+      await controller.waitForPlatformDetach(payload.id);
+      socket.end(JSON.stringify({ detached: true }) + '\n');
       return;
     }
     const plan = await controller.plan(removeTarget(payload));
@@ -256,10 +271,12 @@ export async function listenForRemoval(
   return claimed.close;
 }
 
-export async function readGatewayWebhook(
+async function requestGateway(
   workspace: string,
-  platformId?: string,
-) {
+  payload: object,
+  timeout: number,
+  signal?: AbortSignal,
+): Promise<Response | undefined> {
   let socket: Socket;
   try {
     const { directoryHandle, path } = await endpoint(workspace, false);
@@ -273,23 +290,52 @@ export async function readGatewayWebhook(
     throw error;
   }
   const input = createInterface({ input: socket, crlfDelay: Infinity });
-  socket.setTimeout(2_000, () => socket.destroy());
+  socket.setTimeout(timeout, () => socket.destroy());
+  const abort = () => socket.destroy();
+  signal?.addEventListener('abort', abort, { once: true });
   try {
-    socket.write(
-      JSON.stringify({ action: 'webhook-status', platformId }) + '\n',
-    );
+    signal?.throwIfAborted();
+    socket.write(JSON.stringify(payload) + '\n');
     const line = await input[Symbol.asyncIterator]().next();
-    if (!line.done) {
-      const response: Response = JSON.parse(line.value);
-      if ('webhook' in response) return response.webhook;
-    }
-    throw new SetupError(
-      'Could not read webhook status from the running gateway.',
-    );
+    signal?.throwIfAborted();
+    return line.done
+      ? { error: 'Gateway did not respond' }
+      : JSON.parse(line.value);
   } finally {
+    signal?.removeEventListener('abort', abort);
     input.close();
     socket.destroy();
   }
+}
+
+export async function readGatewayWebhook(
+  workspace: string,
+  platformId?: string,
+) {
+  const response = await requestGateway(
+    workspace,
+    { action: 'webhook-status', platformId },
+    2_000,
+  );
+  if (!response || 'webhook' in response) return response?.webhook;
+  throw new SetupError(
+    'Could not read webhook status from the running gateway.',
+  );
+}
+
+export async function waitForGatewayPlatformDetach(
+  workspace: string,
+  id: string,
+  signal: AbortSignal,
+) {
+  const response = await requestGateway(
+    workspace,
+    { action: 'wait-for-platform-detach', id },
+    16_000,
+    signal,
+  );
+  if (response && !('detached' in response))
+    throw new SetupError('Could not stop the platform in the running gateway.');
 }
 
 async function confirm(locale: RemovalPlan['locale'], yes: boolean) {

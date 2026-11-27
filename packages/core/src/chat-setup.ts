@@ -24,7 +24,7 @@ import { failureText } from './checks.ts';
 import { describeError } from './errors.ts';
 import { conversationId } from './outbound.ts';
 import { pairingContact } from './pairing.ts';
-import { SetupCancelled } from './setup.ts';
+import { loginTarget, SetupCancelled } from './setup.ts';
 import { systemMessages } from './system-messages.ts';
 import { reply } from './tasks.ts';
 
@@ -253,12 +253,10 @@ export class ChatSetup {
       (message.chatKind === 'dm' ? m.directMessage : origin)
     ).replace(/\s+/gu, ' ');
     let promptClosed: Promise<void> | undefined;
-    const category = request.mode === 'add' ? request.category : 'agent';
-    const kind =
-      request.mode === 'add'
-        ? request.kind
-        : (runtime.config.agents.find(({ id }) => id === request.id)?.kind ??
-          'unknown');
+    let setupTarget: { category: string; kind: string } = {
+      category: 'unknown',
+      kind: 'unknown',
+    };
     const secrets = new Set<string>();
     const errorText = (error: unknown) =>
       describeError(error, (text) => {
@@ -270,7 +268,12 @@ export class ChatSetup {
     let tracedError: unknown;
     const done = (async () => {
       try {
+        setupTarget =
+          request.mode === 'login'
+            ? loginTarget(runtime.config, request.id, locale)
+            : { category: request.category, kind: request.kind };
         const result = await setup.run(request, {
+          originAdapterId: adapterId,
           locale,
           show,
           signal: this.#shutdown.signal,
@@ -279,8 +282,7 @@ export class ChatSetup {
             step = name;
             const attrs = {
               adapterId,
-              category,
-              kind,
+              ...setupTarget,
               step,
               error: null as string | null,
             };
@@ -308,7 +310,9 @@ export class ChatSetup {
               if (signal.aborted) throw error;
             }
           },
-          waitForDetach: async (id) => {
+          waitForDetach: async (id, category) => {
+            if (category === 'platform')
+              return runtime.waitForPlatformDetach(id, signal);
             const wait = AbortSignal.any([signal, AbortSignal.timeout(15_000)]);
             while (runtime.getAgent(id))
               await delay(50, undefined, { signal: wait });
@@ -540,8 +544,7 @@ export class ChatSetup {
           if (!(error instanceof SetupError)) {
             const attrs = {
               adapterId,
-              category,
-              kind,
+              ...setupTarget,
               step,
               error: errorText(error),
             };

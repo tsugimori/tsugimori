@@ -3,6 +3,7 @@ import type {
   AdminAgentRun,
   AdminChat,
   AdminEvent,
+  AdminPlatform,
   AdminReader,
   AdminTask,
   AdminToolCall,
@@ -36,6 +37,7 @@ interface Dependencies {
     state: 'ready' | 'disabled' | 'error';
   };
   config(): Config;
+  platforms(): readonly AdminPlatform[];
   reloadListeners: Set<(event: AdminEvent) => void>;
   route: Tasks['route'];
   store: Store;
@@ -245,6 +247,7 @@ export function adminReader({
   agentInfo,
   config,
   reloadListeners,
+  platforms,
   webhook,
   route,
   store,
@@ -403,6 +406,7 @@ export function adminReader({
         .sort((a, b) => (b.lastActivity ?? 0) - (a.lastActivity ?? 0));
       return {
         chats: chats.slice(0, 200),
+        platforms: platforms(),
         webhook: webhook(),
         records: {
           ...store.recordUsage(),

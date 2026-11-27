@@ -132,7 +132,7 @@ sticker catalog.
 | `/pair <code>`                                   | Pairing code holder, in a DM to an unowned bot            | Claims ownership using an unexpired code.                                                                   |
 | `/pair new <adapterId>`                          | Owner, in a DM to a bot they own                          | Issues a fresh pairing code for an unowned platform.                                                        |
 | `/add <agent\|platform> <kind> [--id <id>]`      | Owner                                                     | Runs guided setup for a plugin instance.                                                                    |
-| `/login <agentId>`                               | Owner                                                     | Signs an existing agent in again.                                                                           |
+| `/login <id>`                                    | Owner                                                     | Signs a configured agent or platform in again.                                                              |
 | `/remove <platform\|agent> <id>`                 | Owner                                                     | Lists categories or IDs when omitted, and asks for confirmation before removal.                             |
 | `/cancel`                                        | Owner in the originating chat or setup's secret-prompt DM | Cancels guided setup or a pending removal.                                                                  |
 | `/previews`                                      | Owner                                                     | Lists open previews on this adapter.                                                                        |
@@ -162,13 +162,13 @@ Ask the agent to create or manage a schedule in the conversation where it belong
 
 ## Guided setup
 
-Run `/add <agent|platform> <kind> [--id <id>]` or `/login <agentId>` as an owner. In a terminal, use `corepack pnpm exec tsugimori add <agent|platform> <kind> [--id <id>] [--dir <dir>]` (also available as `tsugimori setup <agent|platform> <kind> ...`) or `corepack pnpm exec tsugimori setup login <agentId> [--dir <dir>]`. Without `--id`, setup first asks for an instance name. Reply `default` or `-` to accept the suggestion: a random six-character hex ID for platforms, and the plugin kind for agents (`<kind>-2` and up when taken).
+Run `/add <agent|platform> <kind> [--id <id>]` or `/login <id>` as an owner. In a terminal, use `corepack pnpm exec tsugimori add <agent|platform> <kind> [--id <id>] [--dir <dir>]` (also available as `tsugimori setup <agent|platform> <kind> ...`) or `corepack pnpm exec tsugimori setup login <id> [--dir <dir>]`. Platform sign-in stops the target instance during setup. Run it from a different platform or the terminal. An ID shared by an agent and a platform is ambiguous. Without `--id`, setup first asks for an instance name. Reply `default` or `-` to accept the suggestion: a random six-character hex ID for platforms, and the plugin kind for agents (`<kind>-2` and up when taken).
 
 The wizard begins with a plan showing the steps, what each asks for, and when it saves credentials and configuration. Follow numbered progress in the originating conversation and reply directly to each prompt. Secret prompts go to the owner's DM and identify the origin. The gateway excludes secret replies from message history and attempts deletion where supported. Enter secrets in an interactive terminal to hide input there.
 
-Guided setup offers buttons for preset answers on supported platforms and displays typed choices on LINE and in the terminal.
+Guided setup offers buttons for preset answers on supported platforms and displays typed choices on LINE, Teams, and in the terminal.
 
-Rerun the same command and ID to resume an interrupted attempt from its saved checkpoint. To cancel, send `/cancel` in the originating chat or in the DM with the pending secret prompt. In a terminal, enter `/cancel` or press Ctrl+C. Cancellation reports credentials saved and any agent it left disabled. An explicitly cancelled attempt starts again at step 1. Re-login temporarily disables an enabled agent. If cancelled, that agent stays disabled until sign-in succeeds again. Successful setup saves configuration for the running gateway to reload.
+Rerun the same command and ID to resume an interrupted attempt from its saved checkpoint. To cancel, send `/cancel` in the originating chat or in the DM with the pending secret prompt. In a terminal, enter `/cancel` or press Ctrl+C. Cancellation reports credentials saved and any instance it left disabled. An explicitly cancelled attempt starts again at step 1. Re-login temporarily disables an enabled instance. If cancelled, that instance stays disabled until sign-in succeeds again. Successful setup saves configuration for the running gateway to reload.
 
 ### Remove an instance
 
@@ -214,6 +214,7 @@ The gateway shares one loopback listener for webhook platforms. The default is `
 | Plugin                                                   | Purpose                                                                                      |
 | -------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
 | [Telegram](plugins/platform-telegram/README.md)          | Telegram bots via long polling.                                                              |
+| [Teams Personal](plugins/platform-teams/README.md)       | Teams Free text chat with Microsoft device-code login.                                       |
 | [LINE](plugins/platform-line/README.md)                  | LINE Messaging API via signed webhooks and metered push.                                     |
 | [Codex](plugins/agent-codex/README.md)                   | Agent connector for Codex App Server.                                                        |
 | [Claude Agent SDK](plugins/agent-claude-sdk/README.md)   | Agent connector for Claude through its bundled CLI.                                          |

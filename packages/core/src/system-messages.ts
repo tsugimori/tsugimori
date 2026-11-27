@@ -58,7 +58,7 @@ const messages = {
     },
     addUsage:
       'Usage: /add <agent|platform> <kind> [--id <id>]. Omit --id to choose a name during setup.',
-    loginUsage: 'Usage: /login <agentId>',
+    loginUsage: 'Usage: /login <id>',
     allowlisted: 'Chat allowlisted.',
     removedFromAllowlist: 'Chat removed from the allowlist.',
     agentUnavailable: 'That agent is not attached.',
@@ -156,7 +156,8 @@ const messages = {
       hiddenInput: ' (hidden input)',
       savesAfter: (step: number, text: string) => `Step ${step}: ${text}`,
       savesConfig: 'workspace configuration after all steps and checks pass',
-      disablesAgent: 'the agent is disabled in tsugimori.json before sign-in',
+      disablesForLogin: (category: 'agent' | 'platform') =>
+        `the ${category} is disabled in tsugimori.json before sign-in`,
       saving: (details: string[]) => `Saves: ${details.join(' · ')}.`,
       canCancel: 'Send /cancel at any time to cancel setup.',
       progress: (step: number, total: number) => `(${step}/${total})`,
@@ -204,7 +205,11 @@ const messages = {
       failed:
         'Setup could not complete. Check the workspace and rerun the command to resume.',
       invalidId: 'Use a valid plugin instance ID.',
-      agentMissing: 'No configured agent has that ID.',
+      loginMissing: 'No configured agent or platform has that ID.',
+      ambiguousLogin:
+        'That ID matches an agent and a platform. Rename one instance before signing in.',
+      loginFromAnotherPlatform:
+        'Signing in stops this platform. Run /login from another platform or the terminal.',
       noSteps: (login: boolean, category: string, kind: string) =>
         `No ${login ? 'login step' : 'guided setup'} is registered for ${category} ${kind}.`,
       pendingId:
@@ -213,7 +218,6 @@ const messages = {
         'That plugin ID is already configured. Choose a different ID.',
       busy: 'Another setup is in progress. Retry once it has finished.',
       leaseExpired: 'The setup lease expired. Rerun the setup command.',
-      changedAgent: 'The configured agent changed during sign-in.',
       missingCheck: (id: string) => `The plugin did not report check ${id}.`,
       changedConfig: 'The configuration changed during setup.',
       testFailed:
@@ -272,7 +276,7 @@ const messages = {
     },
     addUsage:
       '用法：/add <agent|platform> <kind> [--id <id>]。省略 --id 可在設定時選擇名稱。',
-    loginUsage: '用法：/login <agentId>',
+    loginUsage: '用法：/login <id>',
     allowlisted: '已將此聊天室加入允許清單。',
     removedFromAllowlist: '已將此聊天室移出允許清單。',
     agentUnavailable: '該代理程式尚未接上。',
@@ -362,7 +366,8 @@ const messages = {
       hiddenInput: '（隱藏輸入）',
       savesAfter: (step: number, text: string) => `第 ${step} 步${text}`,
       savesConfig: '所有步驟及檢查通過後儲存工作區設定',
-      disablesAgent: '登入前先在 tsugimori.json 停用代理程式',
+      disablesForLogin: (category: 'agent' | 'platform') =>
+        `登入前先在 tsugimori.json 停用${category === 'agent' ? '代理程式' : '平台'}`,
       saving: (details: string[]) => `儲存時機：${details.join('；')}。`,
       canCancel: '隨時可以傳 /cancel 取消',
       progress: (step: number, total: number) => `（${step}/${total}）`,
@@ -402,7 +407,11 @@ const messages = {
       checkStatus: '請執行 /status 查看最新狀態。',
       failed: '無法完成設定。請檢查工作區後重新執行指令繼續。',
       invalidId: '請使用有效的插件實例識別碼。',
-      agentMissing: '找不到使用此識別碼的代理程式。',
+      loginMissing: '找不到使用此識別碼的代理程式或平台。',
+      ambiguousLogin:
+        '代理程式和平台使用了相同的識別碼。請先變更其中一個識別碼再登入。',
+      loginFromAnotherPlatform:
+        '登入會停止此平台。請從另一個平台或終端機執行 /login。',
       noSteps: (login: boolean, category: string, kind: string) =>
         `${category === 'agent' ? '代理程式' : '平台'} ${kind} 沒有提供${login ? '登入步驟' : '引導設定'}。`,
       pendingId:
@@ -410,7 +419,6 @@ const messages = {
       configuredId: '此插件識別碼已在設定中使用。請選擇不同的識別碼。',
       busy: '另一個設定流程正在進行。請等它完成後再試。',
       leaseExpired: '設定工作已逾時。請重新執行設定指令。',
-      changedAgent: '登入期間，代理程式的設定已變更。',
       missingCheck: (id: string) => `插件未回報檢查項目 ${id}。`,
       changedConfig: '設定流程進行期間，工作區設定已變更。',
       testFailed:

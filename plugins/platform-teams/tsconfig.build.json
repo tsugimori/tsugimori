@@ -1,0 +1,9 @@
+{
+  "extends": "../../tsconfig.package.json",
+  "include": ["src/**/*.ts"],
+  "references": [
+    {
+      "path": "../../packages/plugin-sdk/tsconfig.build.json"
+    }
+  ]
+}

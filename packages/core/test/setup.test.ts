@@ -39,12 +39,14 @@ function fixturePlatform({
   kind = 'chat',
   onSend,
   onStart,
+  onStop,
   setupSteps,
 }: {
   contactLink?: string;
   kind?: string;
   onSend?(message: OutboundMessage): void;
   onStart?(): void;
+  onStop?(): void | Promise<void>;
   setupSteps?: PluginDefinition['setupSteps'];
 } = {}) {
   let callback: AdapterContext | undefined;
@@ -71,6 +73,7 @@ function fixturePlatform({
           },
           async stop() {
             callback = undefined;
+            await onStop?.();
           },
           async deleteMessage({ messageId }) {
             removed.push(messageId);
@@ -1105,4 +1108,148 @@ test('completed steps and the setup lease survive reopening SQLite', async (t) =
   assert.equal(executions, 1);
   assert.equal((await loadSettings(workspace, registry)).agents[0]?.model, 'm');
   assert.equal(reopened.getSetupRun(key)?.status, 'complete');
+});
+
+test('platform /login refuses the origin and waits for complete detachment before prompting', async (t) => {
+  const origin = fixturePlatform();
+  let starts = 0;
+  let stops = 0;
+  let logins = 0;
+  const enteredStop = Promise.withResolvers<void>();
+  const allowStop = Promise.withResolvers<void>();
+  t.after(() => allowStop.resolve());
+  const target = fixturePlatform({
+    kind: 'login-platform',
+    onStart() {
+      starts++;
+    },
+    async onStop() {
+      stops++;
+      enteredStop.resolve();
+      await allowStop.promise;
+    },
+    setupSteps: [
+      {
+        id: 'refresh',
+        runOnLogin: true,
+        title: 'Confirm login',
+        async run(ctx) {
+          logins++;
+          const answer = await ctx.prompt({
+            text: 'Confirm this platform account',
+          });
+          assert.equal(answer, 'yes');
+        },
+      },
+    ],
+  });
+  const registry = new PluginRegistry([origin.plugin, target.plugin]);
+  const { workspace, gateway, store } = await fixture(t, registry, {
+    owner: { chat: ownerId, target: ownerId },
+    platforms: [
+      { id: 'chat', kind: 'chat' },
+      { id: 'target', kind: 'login-platform' },
+    ],
+  });
+  await target.receive('same', '/login target');
+  await until(() =>
+    target.sent.find(({ text }) =>
+      text.includes('another platform or the terminal'),
+    ),
+  );
+  assert.equal(stops, 0);
+  assert.equal(logins, 0);
+
+  await origin.receive('cross', '/login target');
+  await enteredStop.promise;
+  assert.equal(logins, 0);
+  assert.equal(starts, 1);
+  assert.equal(
+    (await loadSettings(workspace, registry)).platforms[1]?.enabled,
+    false,
+  );
+  allowStop.resolve();
+  const prompt = await until(() =>
+    origin.sent.find(({ text }) =>
+      text.includes('Confirm this platform account'),
+    ),
+  );
+  await origin.receive('confirm', 'yes', { replyTo: { id: prompt.messageId } });
+  await until(() =>
+    origin.sent.find(({ text }) => text.includes('target is attached')),
+  );
+  assert.equal(starts, 2);
+  assert.equal(logins, 1);
+  assert.equal(
+    gateway.admin.overview(Date.now()).platforms?.[1]?.state,
+    'running',
+  );
+
+  await origin.receive('cross-again', '/login target');
+  await until(
+    () =>
+      origin.sent.filter(({ text }) =>
+        text.includes('Confirm this platform account'),
+      )[1],
+  );
+  await origin.receive('cancel-target', '/cancel');
+  await until(() =>
+    origin.sent.find(({ text }) => text.includes('Setup cancelled')),
+  );
+  assert.equal(starts, 2);
+  assert.equal(stops, 2);
+  assert.equal(
+    (await loadSettings(workspace, registry)).platforms[1]?.enabled,
+    false,
+  );
+  assert.equal(
+    store.getSetupRun(JSON.stringify(['login', 'platform', 'target']))?.status,
+    'cancelled',
+  );
+
+  await origin.receive('resume', '/login target');
+  const resumed = await until(
+    () =>
+      origin.sent.filter(({ text }) =>
+        text.includes('Confirm this platform account'),
+      )[2],
+  );
+  await origin.receive('resume-yes', 'yes', {
+    replyTo: { id: resumed.messageId },
+  });
+  await until(() => (starts === 3 ? true : undefined));
+  assert.equal(
+    (await loadSettings(workspace, registry)).platforms[1]?.enabled,
+    true,
+  );
+});
+
+test('platform and agent IDs are ambiguous for /login', async (t) => {
+  const platform = fixturePlatform();
+  const registry = new PluginRegistry([
+    platform.plugin,
+    {
+      name: 'agent',
+      agents: {
+        stub: ({ id }) => ({
+          id,
+          kind: 'stub',
+          loop: 'external',
+          async *run() {},
+        }),
+      },
+    },
+  ]);
+  const { workspace } = await fixture(t, registry, {
+    agents: [{ id: 'chat', kind: 'stub' }],
+  });
+  await platform.receive('ambiguous', '/login chat');
+  await until(() =>
+    platform.sent.find(({ text }) =>
+      text.includes('matches an agent and a platform'),
+    ),
+  );
+  const config = await loadSettings(workspace, registry);
+  assert.equal(config.agents[0]?.enabled, true);
+  assert.equal(config.platforms[0]?.enabled, true);
 });

@@ -19,7 +19,7 @@ import {
   webhookListen,
   writeCredential,
 } from '@tsugimori/config';
-import { SetupError } from '@tsugimori/plugin-sdk';
+import { platformHomes, SetupError } from '@tsugimori/plugin-sdk';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -38,12 +38,13 @@ export interface SetupIO {
   cancelSignal?: AbortSignal;
   locale?: Config['locale'];
   measure?<T>(step: string, run: () => Promise<T>): Promise<T>;
+  originAdapterId?: string;
   prompt(options: SetupPrompt, progress: string): Promise<string>;
   secretInput?: 'terminal';
   show(text: string): Promise<void>;
   signal: AbortSignal;
   waitForAttach?(id: string): Promise<void>;
-  waitForDetach?(id: string): Promise<void>;
+  waitForDetach?(id: string, category: 'agent' | 'platform'): Promise<void>;
   webhookStatus?(): Promise<WebhookStatus>;
 }
 
@@ -72,6 +73,21 @@ function entries(config: Config, category: Category) {
       : [];
 }
 
+export function loginTarget(
+  config: Config,
+  id: string,
+  locale: Config['locale'],
+) {
+  const agent = config.agents.find((entry) => entry.id === id);
+  const platform = config.platforms.find((entry) => entry.id === id);
+  const m = systemMessages(locale).setup;
+  if (!validId.test(id)) throw new SetupError(m.invalidId);
+  if (agent && platform) throw new SetupError(m.ambiguousLogin);
+  if (agent) return { category: 'agent' as const, kind: agent.kind };
+  if (platform) return { category: 'platform' as const, kind: platform.kind };
+  throw new SetupError(m.loginMissing);
+}
+
 function suggestedId(config: Config, category: Category, kind: string) {
   const used = new Set(entries(config, category).map(({ id }) => id));
   if (category === 'platform') {
@@ -90,12 +106,12 @@ function planText(
   steps: readonly Pick<SetupStep, 'asks' | 'localized' | 'saves' | 'title'>[],
   start: number,
   locale: Config['locale'],
-  disableAgent: boolean,
+  disabledCategory: 'agent' | 'platform' | undefined,
   secretInput?: SetupIO['secretInput'],
 ) {
   const m = systemMessages(locale).setup;
   const lines = [m.plan];
-  const saves = disableAgent ? [m.disablesAgent] : [];
+  const saves = disabledCategory ? [m.disablesForLogin(disabledCategory)] : [];
   const privateInput = secretInput === 'terminal' ? m.hiddenInput : m.private;
   for (const [index, step] of steps.entries()) {
     if (index < start) continue;
@@ -161,12 +177,8 @@ export class GuidedSetup {
     let id = request.id;
     if (id !== undefined && !validId.test(id))
       throw new SetupError(m.invalidId);
-    const category = mode === 'login' ? 'agent' : request.category;
-    const kind =
-      mode === 'login'
-        ? config.agents.find((item) => item.id === id)?.kind
-        : request.kind;
-    if (!kind) throw new SetupError(m.agentMissing);
+    const { category, kind } =
+      mode === 'login' ? loginTarget(config, request.id, locale) : request;
     const webhook = category === 'webhook';
     if (webhook) id = 'webhooks';
     const provider = webhook ? webhooks?.provider(kind) : undefined;
@@ -176,6 +188,12 @@ export class GuidedSetup {
     );
     if (!steps.length)
       throw new SetupError(m.noSteps(mode === 'login', category, kind));
+    if (
+      mode === 'login' &&
+      category === 'platform' &&
+      id === io.originAdapterId
+    )
+      throw new SetupError(m.loginFromAnotherPlatform);
     const requiresWebhook =
       category === 'platform' && registry.requiresWebhook(kind);
     const webhookMessage = systemMessages(locale).webhook;
@@ -222,14 +240,16 @@ export class GuidedSetup {
     const showPlan = (
       signal: AbortSignal,
       start: number,
-      disableAgent: boolean,
+      disabledCategory: 'agent' | 'platform' | undefined,
     ) =>
       untilAborted(signal, () =>
-        io.show(planText(plan, start, locale, disableAgent, io.secretInput)),
+        io.show(
+          planText(plan, start, locale, disabledCategory, io.secretInput),
+        ),
       );
     if (id === undefined) {
       try {
-        await showPlan(inputSignal, 0, false);
+        await showPlan(inputSignal, 0, undefined);
         const suggested = suggestedId(config, category, kind);
         const progress = m.progress(1, plan.length);
         let reason: string | undefined;
@@ -393,27 +413,39 @@ export class GuidedSetup {
               !requiresWebhook || !item.capabilities?.includes('webhook'),
           );
     try {
-      const disableAgent = mode === 'login' && existing?.enabled !== false;
-      if (!nameQuestion) await showPlan(signal, run.step, disableAgent);
+      const disabledCategory =
+        mode === 'login' &&
+        category !== 'webhook' &&
+        existing?.enabled !== false
+          ? category
+          : undefined;
+      if (!nameQuestion) await showPlan(signal, run.step, disabledCategory);
       if (mode === 'add' && !existing) {
         const current = await loadSettings(workspace, registry);
         if (entries(current, category).some((item) => item.id === id))
           throw new SetupError(m.configuredId);
       }
-      if (mode === 'login') {
-        if (disableAgent) {
+      if (mode === 'login' && category !== 'webhook') {
+        if (disabledCategory) {
           await updateSettings(workspace, registry, (config) => {
             signal.throwIfAborted();
-            const target = config.agents.find(
-              (agent) => agent.id === id && agent.kind === kind,
+            const current = loginTarget(config, id, locale);
+            const target = entries(config, category).find(
+              (entry) => entry.id === id,
             );
-            if (!target) throw new SetupError(m.changedAgent);
+            if (
+              !target ||
+              current.category !== category ||
+              current.kind !== kind
+            )
+              throw new SetupError(m.changedConfig);
             target.enabled = false;
           });
           disabledId = id;
         }
         const waitForDetach = io.waitForDetach;
-        if (waitForDetach) await untilAborted(signal, () => waitForDetach(id));
+        if (waitForDetach)
+          await untilAborted(signal, () => waitForDetach(id, category));
       }
       for (const step of steps.slice(run.step)) {
         const current = await snapshot();
@@ -567,6 +599,11 @@ export class GuidedSetup {
       let ownedPlatform = false;
       await updateSettings(workspace, registry, (config) => {
         signal.throwIfAborted();
+        if (mode === 'login') {
+          const current = loginTarget(config, id, locale);
+          if (current.category !== category || current.kind !== kind)
+            throw new SetupError(m.changedConfig);
+        }
         const list = entries(config, category);
         const index = list.findIndex((item) => item.id === id);
         if (index < 0 && mode === 'add') list.push(run.draft.entry);
@@ -690,7 +727,11 @@ export class GuidedSetup {
             sandbox: {
               workdir,
               writable: [],
-              denyRead: [join(workspace, '.env'), join(workspace, 'agents')],
+              denyRead: [
+                join(workspace, '.env'),
+                join(workspace, 'agents'),
+                platformHomes(workspace),
+              ],
               network: 'none',
             },
             signal,

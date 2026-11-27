@@ -226,6 +226,7 @@ export class Gateway {
       workspace,
       config: () => this.#runtime.config,
       agentInfo: (id) => this.#runtime.adminAgentInfo(id),
+      platforms: () => this.#runtime.adminPlatforms(),
       reloadListeners: this.#adminReload,
       webhook: () => this.#webhooks.status(),
       route: (chat, current) => this.#tasks.route(chat, current),
@@ -559,6 +560,10 @@ export class Gateway {
         if (this.#state === 'running') this.#scheduleRecordPrune(60 * 60_000);
       }
     }, delay).unref();
+  }
+
+  waitForPlatformDetach(id: string) {
+    return this.#runtime.waitForPlatformDetach(id);
   }
 
   #reload(removal?: { current: Config; next: Config; plan: RemovalPlan }) {

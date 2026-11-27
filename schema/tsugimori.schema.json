@@ -131,6 +131,24 @@
                 }
               }
             }
+          },
+          {
+            "if": {
+              "properties": { "kind": { "const": "teams" } }
+            },
+            "then": {
+              "properties": {
+                "options": {
+                  "type": "object",
+                  "properties": {
+                    "accountMri": {
+                      "type": "string",
+                      "pattern": "^8:[A-Za-z0-9_.:-]{1,200}$"
+                    }
+                  }
+                }
+              }
+            }
           }
         ]
       }

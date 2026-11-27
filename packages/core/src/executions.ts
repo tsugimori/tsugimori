@@ -9,7 +9,7 @@ import type {
 } from '@tsugimori/plugin-sdk';
 import type { Store, WorkspaceSettings } from '@tsugimori/storage';
 
-import { agentHome, ToolFailure } from '@tsugimori/plugin-sdk';
+import { agentHome, platformHomes, ToolFailure } from '@tsugimori/plugin-sdk';
 import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -44,6 +44,7 @@ export function sandboxScope(
       join(workspace, 'data', '.remove'),
       join(workspace, 'data', 'backups'),
       join(workspace, 'agents'),
+      platformHomes(workspace),
       ...agents.map(({ id }) => agentHome(workspace, id)),
       ...agents.flatMap((agent) =>
         ['codexHome', 'claudeHome'].flatMap((key) => {

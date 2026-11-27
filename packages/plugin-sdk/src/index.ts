@@ -45,7 +45,14 @@ export type {
   SetupPrompt,
   SetupStep,
 } from './setup.ts';
-export { agentHome, credentialKey, SetupError, yesNoChoices } from './setup.ts';
+export {
+  agentHome,
+  credentialKey,
+  platformHome,
+  platformHomes,
+  SetupError,
+  yesNoChoices,
+} from './setup.ts';
 import type { WebhookIngress, WebhookProvider } from './webhooks.ts';
 
 export {
@@ -355,6 +362,7 @@ export interface PlatformAdapter {
   getStickerSet?(name: string, signal: AbortSignal): Promise<PlatformSticker[]>;
   id: string;
   kind: string;
+  readonly login?: 'signed-in' | 'required';
   respondToApproval?(feedback: ApprovalFeedback): Promise<void>;
   searchStickers?(query: string, limit: number): readonly StickerChoice[];
   send(
@@ -851,6 +859,7 @@ export type {
   AdminEvent,
   AdminModelGap,
   AdminOverview,
+  AdminPlatform,
   AdminPromptComposition,
   AdminReader,
   AdminSchedules,

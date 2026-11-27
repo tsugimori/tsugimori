@@ -60,6 +60,7 @@ export interface CheckItem {
   fix?: { command?: string[]; hint?: string; sudo?: boolean };
   id: string;
   localized?: { 'zh-TW'?: { detail?: string; hint: string; title: string } };
+  login?: 'signed-in' | 'required';
   status: 'ok' | 'warn' | 'fail';
   title: string;
 }
@@ -137,6 +138,16 @@ export class SetupError extends Error {}
 
 export function agentHome(workspace: string, id: string, override?: string) {
   return resolve(workspace, override ?? join('agents', id, 'home'));
+}
+
+export function platformHomes(workspace: string) {
+  return resolve(workspace, 'data', 'platforms');
+}
+
+export function platformHome(workspace: string, id: string) {
+  if (!/^[A-Za-z0-9_][A-Za-z0-9_.:-]*$/.test(id))
+    throw new SetupError('Invalid platform instance ID');
+  return join(platformHomes(workspace), id, 'home');
 }
 
 export function credentialKey(prefix: string, id: string) {

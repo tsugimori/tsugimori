@@ -26,6 +26,7 @@ import {
 import { SetupError } from '@tsugimori/core';
 import sandbox from '@tsugimori/exec-local-sandbox';
 import line from '@tsugimori/platform-line';
+import teams from '@tsugimori/platform-teams';
 import telegram from '@tsugimori/platform-telegram';
 import { SqliteStore } from '@tsugimori/storage-sqlite';
 import tunnel, { NamedTunnel, QuickTunnel } from '@tsugimori/tunnel-cloudflare';
@@ -35,11 +36,16 @@ import { dirname, join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { isDeepStrictEqual, parseArgs } from 'node:util';
 
-import { listenForRemoval, readGatewayWebhook, runRemoval } from './removal.ts';
+import {
+  listenForRemoval,
+  readGatewayWebhook,
+  runRemoval,
+  waitForGatewayPlatformDetach,
+} from './removal.ts';
 import { doctorText, runSetup, terminalIO } from './setup.ts';
 
 const usage =
-  'Usage: tsugimori init [dir] | start [dir] | pair [dir] --adapter <id> | previews [dir] | doctor [dir] [--json] | setup [dir] [--yes] [--upgrade] | add <agent|platform> <kind> [--id <id>] [--dir <dir>] | setup <agent|platform> <kind> [--id <id>] [--dir <dir>] | setup login <agentId> [--dir <dir>] | remove <platform|agent> <id> [--dir <dir>] [--yes]';
+  'Usage: tsugimori init [dir] | start [dir] | pair [dir] --adapter <id> | previews [dir] | doctor [dir] [--json] | setup [dir] [--yes] [--upgrade] | add <agent|platform> <kind> [--id <id>] [--dir <dir>] | setup <agent|platform> <kind> [--id <id>] [--dir <dir>] | setup login <id> [--dir <dir>] | remove <platform|agent> <id> [--dir <dir>] [--yes]';
 
 class UsageError extends Error {}
 
@@ -48,6 +54,7 @@ export async function main(
   registry = new PluginRegistry([
     telegram,
     line,
+    teams,
     codex,
     claude,
     sandbox,
@@ -181,6 +188,10 @@ export async function main(
         ...io,
         webhookStatus: webhook?.status,
         waitForAttach: webhook?.waitForAttach,
+        waitForDetach: async (id, category) => {
+          if (category === 'platform')
+            await waitForGatewayPlatformDetach(workspace, id, io.signal);
+        },
       });
       console.log(
         [
@@ -396,6 +407,8 @@ async function start(
     plan: async (target) => (await gateway()).removal.plan(target),
     execute: async (plan) => (await gateway()).removeInstance(plan),
     webhookInfo: async (id) => (await gateway()).webhookInfo(id),
+    waitForPlatformDetach: async (id) =>
+      (await gateway()).waitForPlatformDetach(id),
   });
   try {
     await startGateway(workspace, registry, deps, ready.resolve);

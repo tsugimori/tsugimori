@@ -39,7 +39,7 @@ const descriptions = {
     en: 'Toggle incognito mode (on or off)',
     'zh-TW': '切換無痕模式（on 開啟、off 關閉）',
   },
-  login: { en: 'Sign in to an agent', 'zh-TW': '登入代理' },
+  login: { en: 'Sign in to an agent or platform', 'zh-TW': '登入代理或平台' },
   model: {
     en: 'Choose a provider and model (default to reset)',
     'zh-TW': '選擇供應商和模型（default 還原）',

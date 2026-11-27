@@ -373,8 +373,16 @@ export interface AdminWorkspace {
   timezone: string;
 }
 
+export interface AdminPlatform {
+  id: string;
+  kind: string;
+  login: 'signed-in' | 'required' | 'unknown';
+  state: 'running' | 'disabled' | 'starting' | 'retrying' | 'unavailable';
+}
+
 export interface AdminOverview {
   chats: readonly AdminChat[];
+  platforms?: readonly AdminPlatform[];
   records: { bytes: number; maxBytes: number; oldestFullTaskAt?: number };
   totals: {
     chats: number;
