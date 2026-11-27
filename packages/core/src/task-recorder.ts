@@ -91,6 +91,7 @@ export class TaskRecorder {
   #output: string | null = null;
   #delivery?: Delivery;
   #agentStarted?: number;
+  #ephemeralSessionId?: string;
 
   constructor(deps: Dependencies, queuedMs: number) {
     this.#deps = deps;
@@ -203,6 +204,10 @@ export class TaskRecorder {
 
   sessionId(id: string) {
     const previous = this.#refs.session;
+    if (previous.mode === 'ephemeral') {
+      this.#ephemeralSessionId = id;
+      return;
+    }
     this.#refs.session =
       previous.mode === 'resumed' && previous.sessionId !== id
         ? {
@@ -354,7 +359,7 @@ export class TaskRecorder {
   errorMessage(error: unknown) {
     const { sessionId, previousSessionId } = this.#refs.session;
     return describeTaskError(error, (text) => {
-      for (const id of [sessionId, previousSessionId])
+      for (const id of [sessionId, previousSessionId, this.#ephemeralSessionId])
         if (id) text = text.replaceAll(id, '[redacted session]');
       return this.#deps.redact(text);
     });

@@ -10,6 +10,10 @@ const descriptions = {
     en: 'Allow members to use the bot here',
     'zh-TW': '允許成員在此使用機器人',
   },
+  btw: {
+    en: 'Ask a one-off question (<message>)',
+    'zh-TW': '問一個臨時問題（<訊息>）',
+  },
   cancel: { en: 'Cancel guided setup', 'zh-TW': '取消引導設定' },
   compact: {
     en: 'Compact this chat’s context',
@@ -28,6 +32,10 @@ const descriptions = {
   model: {
     en: 'Show or set the model (default to reset)',
     'zh-TW': '查看或設定模型（default 還原）',
+  },
+  new: {
+    en: 'Start a new conversation ([message])',
+    'zh-TW': '開始新對話（[訊息]）',
   },
   pair: {
     en: 'Get a new pairing code in DM (/pair new <adapterId>)',

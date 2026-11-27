@@ -114,7 +114,14 @@ export async function runAgent(
     });
     io.reportCompaction?.(event);
   };
-  const runAttrs: TraceSpan['attrs'] = { ...attrs };
+  const runAttrs: TraceSpan['attrs'] = {
+    ...attrs,
+    sessionMode: request.ephemeral
+      ? 'ephemeral'
+      : request.resumeSessionId
+        ? 'resume'
+        : 'new',
+  };
   return trace.span('agent.run', runAttrs, async () => {
     const tools = new Map<
       string,
@@ -262,7 +269,7 @@ export async function runAgent(
             break;
           case 'sessionId': {
             sessionId = event.sessionId;
-            const nextScope = scope(sessionId);
+            const nextScope = request.ephemeral ? null : scope(sessionId);
             if (!request.purpose && nextScope !== activeScope)
               trace.record('agent.session.created', {
                 ...attrs,

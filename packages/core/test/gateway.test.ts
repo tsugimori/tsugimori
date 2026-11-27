@@ -472,6 +472,190 @@ test(
   },
 );
 
+test('/new clears the active session and rebuilds context with or without a prompt', async (t) => {
+  const requests: AgentRequest[] = [];
+  const { gateway, platform, store, trace } = await fixture(
+    t,
+    async function* (request) {
+      requests.push(request);
+      yield { type: 'sessionId', sessionId: `backend-${requests.length}` };
+      yield { type: 'text.final', text: 'reply' };
+    },
+    true,
+    { agentSettings: () => ({ perTurn: ['model'] }) },
+  );
+  await platform.emit(inbound('first', 'Prior conversation'));
+  await gateway.idle();
+  await platform.emit(inbound('model', '/model second'));
+  assert.equal(store.getSession(chat, 'test', 'first')?.sessionId, 'backend-1');
+
+  await platform.emit(inbound('reset', '/new'));
+  assert.equal(store.getSession(chat, 'test'), undefined);
+  assert.equal(requests.length, 1);
+  assert.equal(
+    platform.sent.at(-1)?.text,
+    'Started a new conversation. Your next message will use a new session.',
+  );
+  assert.deepEqual(
+    trace.recent.find(({ name }) => name === 'session.reset')?.attrs,
+    { sessionScope: sessionScope(chat, 'test', 'first', 'backend-1') },
+  );
+
+  await platform.emit(inbound('fresh', 'Next message'));
+  await gateway.idle();
+  assert.equal(requests[1]?.resumeSessionId, undefined);
+  assert.equal(requests[1]?.model, 'second');
+  assert.ok(
+    requests[1]?.context.some(
+      ({ content }) => content === 'Prior conversation',
+    ),
+  );
+
+  await platform.emit(inbound('prompt', '/new Start here\nwith another line'));
+  await gateway.idle();
+  assert.equal(requests.length, 3);
+  assert.equal(requests[2]?.resumeSessionId, undefined);
+  assert.ok(
+    requests[2]?.context.some(({ content }) => content === 'Next message'),
+  );
+  assert.equal(
+    requests[2]?.context.at(-1)?.content,
+    'Start here\nwith another line',
+  );
+  assert.equal(
+    store.getMessage(chat, 'prompt')?.text,
+    '/new Start here\nwith another line',
+  );
+  assert.equal(
+    store.getSession(chat, 'test', 'second')?.sessionId,
+    'backend-3',
+  );
+  assert.equal(platform.sent.at(-1)?.replyTo, 'prompt');
+  assert.deepEqual(
+    trace.recent
+      .filter(({ name }) => name === 'agent.run')
+      .map(({ attrs }) => attrs.sessionMode),
+    ['new', 'new', 'new'],
+  );
+});
+
+test('/btw uses one-off tasks and preserves the active session after success or failure', async (t) => {
+  const requests: AgentRequest[] = [];
+  const { gateway, platform, store, trace } = await fixture(
+    t,
+    async function* (request) {
+      requests.push(request);
+      yield {
+        type: 'sessionId',
+        sessionId: request.ephemeral ? 'one-off' : 'ongoing',
+      };
+      if (request.context.at(-1)?.content === 'Fail here')
+        throw new Error('One-off failure');
+      yield { type: 'text.final', text: 'reply' };
+    },
+  );
+  await platform.emit(inbound('original', 'Earlier context'));
+  await gateway.idle();
+  const original = store.getSession(chat, 'test', 'first');
+  assert.equal(original?.sessionId, 'ongoing');
+  await platform.emit(inbound('btw', '/btw Side question'));
+  await gateway.idle();
+  assert.equal(requests[1]?.resumeSessionId, undefined);
+  assert.equal(requests[1]?.ephemeral, true);
+  assert.ok(
+    requests[1]?.context.some(({ content }) => content === 'Earlier context'),
+  );
+  assert.equal(requests[1]?.context.at(-1)?.content, 'Side question');
+  assert.deepEqual(
+    requests[1]?.tools.map(({ name }) => name),
+    requests[0]?.tools.map(({ name }) => name),
+  );
+  assert.equal(platform.sent.at(-1)?.replyTo, 'btw');
+  assert.deepEqual(store.getSession(chat, 'test'), original);
+  const task = store
+    .listChatTasks(chat)
+    .find(({ sourceMessageId }) => sourceMessageId === 'btw');
+  assert.ok(task);
+  const execution = await gateway.admin.task(task.id);
+  assert.deepEqual(execution?.refs?.session, { mode: 'ephemeral' });
+
+  await platform.emit(inbound('btw-failed', '/btw Fail here'));
+  await gateway.idle();
+  assert.equal(
+    store
+      .listChatTasks(chat)
+      .find(({ sourceMessageId }) => sourceMessageId === 'btw-failed')?.status,
+    'failed',
+  );
+  assert.deepEqual(store.getSession(chat, 'test'), original);
+
+  await platform.emit(inbound('resume', 'Resume the conversation'));
+  await gateway.idle();
+  assert.equal(requests[3]?.resumeSessionId, 'ongoing');
+  assert.deepEqual(
+    trace.recent
+      .filter(({ name }) => name === 'agent.run')
+      .map(({ attrs }) => attrs.sessionMode),
+    ['new', 'ephemeral', 'ephemeral', 'resume'],
+  );
+});
+
+test(
+  'session commands honor the allowlist and localize usage and busy replies',
+  { timeout: 5_000 },
+  async (t) => {
+    const started = Promise.withResolvers<void>();
+    const finish = Promise.withResolvers<void>();
+    const { gateway, platform, store, trace } = await fixture(
+      t,
+      async function* () {
+        started.resolve();
+        await finish.promise;
+        yield { type: 'sessionId', sessionId: 'active' };
+        yield { type: 'text.final', text: 'reply' };
+      },
+      true,
+      { locale: 'zh-TW' },
+    );
+    const member = { chatKind: 'group', userId: 'member' } as const;
+    await platform.emit(inbound('denied-new', '/new Disallowed', member));
+    await platform.emit(inbound('denied-btw', '/btw', member));
+    assert.equal(platform.sent.length, 0);
+    assert.equal(store.listChatTasks(chat).length, 0);
+    assert.equal(
+      trace.recent.some(({ name }) => name === 'session.reset'),
+      false,
+    );
+
+    await platform.emit(inbound('allow', '/allow', { chatKind: 'group' }));
+    await platform.emit(inbound('usage', '/btw', member));
+    assert.equal(platform.sent.at(-1)?.text, '用法：/btw <訊息>');
+    await platform.emit(inbound('member-task', '/btw Question', member));
+    try {
+      await started.promise;
+      await platform.emit(inbound('busy', '/new Wait', member));
+      assert.equal(
+        platform.sent.at(-1)?.text,
+        '此聊天室還有任務未完成，請等任務結束後再使用 /new。',
+      );
+      assert.equal(store.listChatTasks(chat).length, 1);
+      assert.equal(
+        trace.recent.some(({ name }) => name === 'session.reset'),
+        false,
+      );
+    } finally {
+      finish.resolve();
+    }
+    await gateway.idle();
+    assert.equal(platform.sent.at(-1)?.replyTo, 'member-task');
+    await platform.emit(inbound('member-reset', '/new', member));
+    assert.equal(
+      platform.sent.at(-1)?.text,
+      '已開始新對話，下一則訊息會用新的 session。',
+    );
+  },
+);
+
 test('localizes /compact when the selected agent has no compaction capability', async (t) => {
   const { gateway, platform } = await fixture(
     t,
@@ -4390,6 +4574,7 @@ test('agent run spans summarize the last usage, native and framework tools, and 
     resolvedModel: 'resolved-model',
     reasoning: 'high',
     sessionScope: scope,
+    sessionMode: 'new',
     toolCalls: 3,
     toolErrors: 1,
     inputTokens: 42,

@@ -544,6 +544,7 @@ export class CodexAgent implements AgentConnector {
   async #thread(
     request: Pick<
       AgentRequest,
+      | 'ephemeral'
       | 'model'
       | 'purpose'
       | 'sandbox'
@@ -629,16 +630,16 @@ export class CodexAgent implements AgentConnector {
         })
       : await server.request('thread/start', {
           ...threadOptions,
-          ephemeral: summarize || undefined,
+          ephemeral: request.ephemeral || summarize || undefined,
           dynamicTools: dynamicTools?.length ? dynamicTools : undefined,
         });
-    signal.throwIfAborted();
     const threadId = asRecord(result.thread).id;
     if (
       typeof threadId !== 'string' ||
       (resumeSessionId && threadId !== resumeSessionId)
     )
       throw new Error('Codex returned an invalid thread ID');
+    if (!request.ephemeral) signal.throwIfAborted();
     const reportedTier = result.serviceTier;
     const resolvedModel =
       typeof result.model === 'string' ? result.model : model;
@@ -780,6 +781,7 @@ export class CodexAgent implements AgentConnector {
     };
     request.signal.addEventListener('abort', interrupt, { once: true });
     try {
+      signal.throwIfAborted();
       const started = await server.request('turn/start', {
         threadId,
         cwd: workdir,
@@ -954,6 +956,19 @@ export class CodexAgent implements AgentConnector {
       interrupt();
       listeners.delete(threadId);
       await interruption;
+      if (request.ephemeral) {
+        if (!server.signal.aborted) {
+          try {
+            await server.request('thread/unsubscribe', { threadId }, 5_000, {
+              failOnTimeout: false,
+            });
+          } catch (error) {
+            if (!(error instanceof RpcError && error.code === -32601))
+              debug('Could not unload an ephemeral thread');
+          }
+        }
+        this.#threadContexts.get(server)?.delete(threadId);
+      }
     }
   }
 }

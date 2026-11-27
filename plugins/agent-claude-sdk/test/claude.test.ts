@@ -229,6 +229,29 @@ test('Claude applies model, effort and fast mode to a resumed query', async () =
   ]);
 });
 
+test('Claude keeps normal tools for ephemeral queries and discards their session metadata', async () => {
+  const agent = new ClaudeAgent(
+    {
+      async *query({ options }) {
+        assert.equal(options?.persistSession, false);
+        assert.equal(options?.resume, undefined);
+        assert.ok(
+          Array.isArray(options?.tools) && options.tools.includes('Read'),
+        );
+        yield frame({ type: 'system', subtype: 'init', model: 'fake-model' });
+        yield success;
+      },
+    },
+    'claude',
+    null,
+  );
+  const events = await collect(
+    agent.run({ ...request(tmpdir()), ephemeral: true }, io),
+  );
+  assert.deepEqual(events.at(-1), { type: 'text.final', text: 'pong' });
+  assert.equal(agent.describeSession('claude-native'), undefined);
+});
+
 test(
   'Claude isolates settings, routes tool permissions and streams typed SDK events',
   { timeout: 5_000 },

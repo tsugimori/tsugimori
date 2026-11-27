@@ -344,7 +344,8 @@ export class ClaudeAgent implements AgentConnector {
         cwd: workdir,
         model: request.model === 'default' ? undefined : request.model,
         maxTurns: command ? 1 : undefined,
-        persistSession: request.purpose !== undefined ? false : undefined,
+        persistSession:
+          request.ephemeral || request.purpose ? false : undefined,
         resume: request.resumeSessionId,
         effort: effortLevels.find((level) => level === request.thinking),
         systemPrompt: instructions.length ? render(instructions) : undefined,
@@ -460,6 +461,7 @@ export class ClaudeAgent implements AgentConnector {
         if (
           !command &&
           !request.purpose &&
+          !request.ephemeral &&
           event.type === 'system' &&
           event.subtype === 'init'
         ) {
@@ -497,6 +499,7 @@ export class ClaudeAgent implements AgentConnector {
     try {
       await slot?.ready;
       yield* this.#runTurn(request, io, (sessionId, tokensBefore) => {
+        if (request.ephemeral) return;
         if (!slot) slot = this.#reserveSession(sessionId);
         if (tokensBefore === undefined || this.#compactions.has(sessionId))
           return;

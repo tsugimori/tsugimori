@@ -145,12 +145,19 @@ for await (const line of createInterface({ input: process.stdin })) {
       assert.equal(params.approvalPolicy, 'on-request');
     }
     const threadId = params.threadId ?? 'thread-' + ++next;
-    threads.set(threadId, { scoped, resumed: method === 'thread/resume' });
-    if (params.threadId) assert.equal(params.excludeTurns, true);
+    if (params.threadId) {
+      assert.equal(params.excludeTurns, true);
+      assert.equal([...threads.values()].some(({ ephemeral }) => ephemeral), false);
+    }
+    threads.set(threadId, { scoped, resumed: method === 'thread/resume', ephemeral: params.ephemeral });
     answer({
       thread: { id: threadId },
       serviceTier: method === 'thread/start' ? 'fast' : params.threadId === 'thread-null' ? null : 'default',
     });
+  } else if (method === 'thread/unsubscribe') {
+    assert.equal(threads.get(params.threadId)?.ephemeral, true);
+    threads.delete(params.threadId);
+    answer({ status: 'unsubscribed' });
   } else if (method === 'thread/compact/start') {
     const { threadId } = params;
     assert.ok(threads.get(threadId)?.resumed);
@@ -246,7 +253,8 @@ for await (const line of createInterface({ input: process.stdin })) {
     if (input === 'auto compact') compact(800);
     if (input === 'async compact') compact(260000);
     if (input === 'native compact') compact(405000);
-    if (input === 'scheduled tools') {
+    if (input === 'scheduled tools' || input === 'ephemeral tools') {
+      assert.equal(thread.ephemeral ?? false, input === 'ephemeral tools');
       answer({ turn: { id: turnId, status: 'inProgress' } });
       approvals.set('dynamic-1', (result) => {
         assert.deepEqual(result, { success: true, contentItems: [{ type: 'inputText', text: '["cached"]' }] });
@@ -872,7 +880,7 @@ test(
 );
 
 test(
-  'scoped Codex threads expose framework tools and resume with the same tool definitions',
+  'scoped Codex threads expose framework tools, unload one-off threads and resume durable threads',
   { timeout: 5000 },
   async (t) => {
     const agent = new CodexAgent(
@@ -917,11 +925,26 @@ test(
     assert.equal(calls, 1);
     assert.equal(agent.acceptsSession(first.sessionId, scoped.tools), true);
     assert.equal(agent.acceptsSession(first.sessionId, []), false);
+    const oneOff = await collect(
+      agent.run(
+        {
+          ...scoped,
+          ...request('ephemeral tools'),
+          tools: scoped.tools,
+          ephemeral: true,
+        },
+        io,
+      ),
+    );
+    const temporary = oneOff.find((event) => event.type === 'sessionId');
+    assert.ok(temporary);
+    assert.notEqual(temporary.sessionId, first.sessionId);
+    assert.equal(agent.describeSession(temporary.sessionId), undefined);
     const resumed = await collect(
       agent.run({ ...scoped, resumeSessionId: first.sessionId }, io),
     );
     assert.deepEqual(resumed.at(0), first);
-    assert.equal(calls, 2);
+    assert.equal(calls, 3);
   },
 );
 

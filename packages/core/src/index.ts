@@ -1980,7 +1980,8 @@ export class Gateway {
       }
       return;
     }
-    if (!owner) return;
+    const sessionCommand = name === 'new' || name === 'btw';
+    if (!owner && !(sessionCommand && this.#auth.isAllowlisted(chat))) return;
     const isCurrentOwner = () =>
       !this.#isStopping() &&
       this.#runtime.getAdapter(adapter.id) === adapter &&
@@ -2285,6 +2286,33 @@ export class Gateway {
             adapter,
             chat,
             { message, seq, compact: true },
+            onTask,
+          );
+        break;
+      case 'new':
+      case 'btw':
+        if (
+          this.#removingPlatform(adapter.id) ||
+          this.#removingAgentRoute(chat)
+        )
+          break;
+        if (name === 'new' && !this.#tasks.resetSession(chat)) {
+          await send(m.newBusy);
+          break;
+        }
+        if (!args) await send(name === 'new' ? m.newSuccess : m.btwUsage);
+        else
+          this.#tasks.dispatch(
+            adapter,
+            chat,
+            {
+              message,
+              seq,
+              sessionCommand: {
+                mode: name === 'new' ? 'new' : 'ephemeral',
+                prompt: redactPairingCodes(args),
+              },
+            },
             onTask,
           );
         break;

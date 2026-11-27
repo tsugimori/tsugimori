@@ -302,6 +302,26 @@ export class Tasks {
     );
   }
 
+  resetSession(chat: ChatRef) {
+    const { store, trace } = this.#deps;
+    chat = store.resolveChat(chat);
+    if (this.#queues.has(chatKey(chat))) return false;
+    const agentId = store.getChat(chat)?.sessionAgentId;
+    const session = agentId ? store.getSession(chat, agentId) : undefined;
+    store.clearSession(chat);
+    trace.record('session.reset', {
+      sessionScope: session
+        ? sessionScope(
+            { ...chat, chatId: session.scopeChatId ?? chat.chatId },
+            session.agentId,
+            session.model,
+            session.sessionId,
+          )
+        : null,
+    });
+    return true;
+  }
+
   dispatch(
     adapter: PlatformAdapter,
     chat: ChatRef,
@@ -316,6 +336,7 @@ export class Tasks {
     if (
       !input.compact &&
       !input.scheduled &&
+      !input.sessionCommand &&
       !input.message.migratedFromChatId &&
       running?.acceptsSupplements &&
       !running.input.message.migratedFromChatId &&
@@ -508,6 +529,7 @@ export class Tasks {
     const { store, auth, runtime, log, toolDetails, workspace } = this.#deps;
     const { adapter, input, abort, id } = work;
     const { message } = input;
+    const ephemeral = input.sessionCommand?.mode === 'ephemeral';
     const activity = new AbortController();
     const finish = (status: TaskRecord['status']) =>
       store.updateTask(id, { status, finishedAt: Date.now() });
@@ -517,6 +539,7 @@ export class Tasks {
       Math.max(0, work.progress.startedAt - work.createdAt),
     );
     work.recorder = recorder;
+    if (ephemeral) recorder.session({ mode: 'ephemeral' });
     let outcome: TaskOutcome = { kind: 'cancelled' };
     let ranAgent = false;
     let delivered = false;
@@ -540,7 +563,7 @@ export class Tasks {
       if (
         input.compact
           ? !owner
-          : input.scheduled
+          : input.scheduled || input.sessionCommand
             ? !owner && !allowlisted
             : !canTrigger(message, owner, allowlisted)
       ) {
@@ -573,7 +596,7 @@ export class Tasks {
       if (!selected || model === null) {
         outcome = { kind: 'no-agent' };
         if (input.scheduled) finish('failed');
-        else if (owner) {
+        else if (owner || input.sessionCommand) {
           await this.#deliver(
             work,
             reply(
@@ -669,24 +692,25 @@ export class Tasks {
         finish('completed');
       }
 
-      if (input.scheduled) {
-        store.clearSession(chat);
-      } else if (
-        !abort.signal.aborted &&
-        work.sessionValid &&
-        result.sessionId
-      ) {
-        store.setSession({
-          ...chat,
-          agentId: selected.agent.id,
-          model: result.scopeModel ?? model,
-          sessionId: result.sessionId,
-          scopeChatId: result.scopeChatId,
-          throughSeq: input.seq,
-          seenAfter: result.seenAfter,
-        });
-      } else {
-        store.clearSession(chat);
+      if (!ephemeral) {
+        if (
+          !input.scheduled &&
+          !abort.signal.aborted &&
+          work.sessionValid &&
+          result.sessionId
+        ) {
+          store.setSession({
+            ...chat,
+            agentId: selected.agent.id,
+            model: result.scopeModel ?? model,
+            sessionId: result.sessionId,
+            scopeChatId: result.scopeChatId,
+            throughSeq: input.seq,
+            seenAfter: result.seenAfter,
+          });
+        } else {
+          store.clearSession(chat);
+        }
       }
       if (!abort.signal.aborted)
         this.#deps.summarize({
@@ -715,7 +739,7 @@ export class Tasks {
                 ? 'other'
                 : stage,
       );
-      if (ranAgent) store.clearSession(work.chat);
+      if (ranAgent && !ephemeral) store.clearSession(work.chat);
       if (!delivered && !(error instanceof DeliveryError))
         finish(abort.signal.aborted ? 'cancelled' : 'failed');
       if (!abort.signal.aborted || error instanceof DeliveryError) {
@@ -972,6 +996,7 @@ export class Tasks {
     const { store, auth, context, runtime, trace, hooks, stickers } =
       this.#deps;
     const { chat, input, id, abort, supplements, adapter } = work;
+    const ephemeral = input.sessionCommand?.mode === 'ephemeral';
     const { signal } = abort;
     const approvalPending = work.endForApproval.signal;
     const { model } = settings;
@@ -997,10 +1022,9 @@ export class Tasks {
     };
     const attrs = { ...chat, taskId: id };
     const definitions = this.#toolDefinitions(adapter, work);
-    const current = store.getChat(chat);
-    const previousSession = current?.sessionAgentId
-      ? store.getSession(chat, current.sessionAgentId)
-      : store.getSession(chat, agent.id);
+    const previousSession = ephemeral
+      ? undefined
+      : store.getSession(chat, store.getChat(chat)?.sessionAgentId ?? agent.id);
     const storedSession =
       !input.scheduled &&
       previousSession?.agentId === agent.id &&
@@ -1013,30 +1037,32 @@ export class Tasks {
       agent.acceptsSession?.(storedSession.sessionId, definitions) !== false
         ? storedSession
         : undefined;
-    recorder.session(
-      session
-        ? {
-            mode: 'resumed',
-            sessionId: session.sessionId,
-            previousSessionId: session.sessionId,
-          }
-        : {
-            mode: 'new',
-            previousSessionId: previousSession?.sessionId,
-            reason: input.scheduled
-              ? 'scheduled'
-              : storedSession
-                ? 'connector-rejected-session'
-                : previousSession
-                  ? 'agent-or-model-changed'
-                  : 'no-session',
-          },
-    );
-    if (!session && !input.scheduled) store.clearSession(chat);
+    if (!ephemeral)
+      recorder.session(
+        session
+          ? {
+              mode: 'resumed',
+              sessionId: session.sessionId,
+              previousSessionId: session.sessionId,
+            }
+          : {
+              mode: 'new',
+              previousSessionId: previousSession?.sessionId,
+              reason: input.scheduled
+                ? 'scheduled'
+                : storedSession
+                  ? 'connector-rejected-session'
+                  : previousSession
+                    ? 'agent-or-model-changed'
+                    : 'no-session',
+            },
+      );
+    if (!session && !input.scheduled && !input.sessionCommand)
+      store.clearSession(chat);
     work.sessionId = session?.sessionId;
     work.sessionScopeChatId = session?.scopeChatId;
     work.sessionScopeModel = session?.model;
-    work.acceptsSupplements = true;
+    work.acceptsSupplements = !ephemeral;
     if (
       input.message.albumId &&
       agent.imageLimits &&
@@ -1078,7 +1104,14 @@ export class Tasks {
                 'Return the scheduled response without textual mentions. The platform adds any approved recipients separately.',
             },
           });
-        for (const { block } of entries) {
+        for (const entry of entries) {
+          const { block } = entry;
+          if (
+            entry.kind === 'new' &&
+            entry.seq === input.seq &&
+            input.sessionCommand
+          )
+            block.content = input.sessionCommand.prompt;
           const { message } = block;
           if (!message) continue;
           message.attachments = describe(message.attachments);
@@ -1211,17 +1244,18 @@ export class Tasks {
                 : undefined,
             scopeModel:
               sessionId === session?.sessionId ? session?.model : undefined,
-            onSession: input.scheduled
-              ? undefined
-              : (sessionId) => {
-                  work.sessionId = sessionId;
-                  work.sessionScopeChatId =
-                    sessionId === session?.sessionId
-                      ? session?.scopeChatId
-                      : undefined;
-                  work.sessionScopeModel =
-                    sessionId === session?.sessionId ? session?.model : model;
-                },
+            onSession:
+              input.scheduled || ephemeral
+                ? undefined
+                : (sessionId) => {
+                    work.sessionId = sessionId;
+                    work.sessionScopeChatId =
+                      sessionId === session?.sessionId
+                        ? session?.scopeChatId
+                        : undefined;
+                    work.sessionScopeModel =
+                      sessionId === session?.sessionId ? session?.model : model;
+                  },
           },
           agent,
           {
@@ -1230,6 +1264,7 @@ export class Tasks {
             toolsDisabled: runtime.disabled('exec'),
             sandbox: this.#deps.scope(assembled.workdir),
             context: blocks,
+            ...(ephemeral && { ephemeral }),
             ...(images.length && { images }),
             resumeSessionId: sessionId,
             signal: passSignal,

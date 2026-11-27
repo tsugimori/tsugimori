@@ -503,6 +503,8 @@ export class ToolFailure extends Error {}
 
 export interface AgentRequest {
   context: ContextBlock[];
+  /** Run without retaining a session for later use. */
+  ephemeral?: boolean;
   exec?: ExecBackend;
   images?: readonly AgentImage[];
   model: string;

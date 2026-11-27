@@ -564,7 +564,9 @@ useHead({
                 {{
                   data.refs.session.mode === 'new'
                     ? m.sessionNew
-                    : m.sessionResumed
+                    : data.refs.session.mode === 'ephemeral'
+                      ? m.sessionEphemeral
+                      : m.sessionResumed
                 }}<small v-if="data.refs.session.sessionId"
                   ><code>{{ data.refs.session.sessionId }}</code></small
                 ><small v-if="data.refs.session.previousSessionId"

@@ -193,7 +193,7 @@ export interface TaskRefs {
   history: { fromSeq?: number; seqs?: number[]; throughSeq?: number };
   order: TaskContextRef[];
   session: {
-    mode: 'new' | 'resumed';
+    mode: 'ephemeral' | 'new' | 'resumed';
     previousSessionId?: string;
     reason?: string;
     sessionId?: string;

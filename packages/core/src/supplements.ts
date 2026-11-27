@@ -10,6 +10,7 @@ export interface TaskInput {
     target: Omit<OutboundMessage, 'text'>;
   };
   seq: number;
+  sessionCommand?: { mode: 'ephemeral' | 'new'; prompt: string };
 }
 
 export class Supplements {

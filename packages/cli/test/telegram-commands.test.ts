@@ -214,6 +214,7 @@ test(
         'add',
         'agent',
         'allow',
+        'btw',
         'cancel',
         'compact',
         'deny',
@@ -221,6 +222,7 @@ test(
         'help',
         'login',
         'model',
+        'new',
         'pair',
         'preview',
         'previews',
@@ -312,6 +314,14 @@ test(
     assert.equal(
       zh.find(({ command }) => command === 'compact')?.description,
       '壓縮目前對話的上下文',
+    );
+    assert.equal(
+      zh.find(({ command }) => command === 'btw')?.description,
+      '問一個臨時問題（<訊息>）',
+    );
+    assert.equal(
+      zh.find(({ command }) => command === 'new')?.description,
+      '開始新對話（[訊息]）',
     );
     assert.equal(
       zh.find(({ command }) => command === 'status')?.description,

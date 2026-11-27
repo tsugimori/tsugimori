@@ -109,6 +109,10 @@ const messages = {
       'The agent did not compact the session. It may need more conversation history.',
     compactFailed: 'The agent could not compact the session.',
     compactSuccess: 'Agent session compacted.',
+    newBusy: 'This chat has pending work. Try /new when it finishes.',
+    newSuccess:
+      'Started a new conversation. Your next message will use a new session.',
+    btwUsage: 'Usage: /btw <message>',
     noPreviews: 'No open previews.',
     preview: (id: string, url: string, port: number, expires: string) =>
       `${id} · ${url} · port ${port} · expires ${expires}`,
@@ -299,6 +303,9 @@ const messages = {
     compactSkipped: '代理程式未壓縮工作階段，可能需要更多對話紀錄。',
     compactFailed: '代理程式無法壓縮工作階段。',
     compactSuccess: '已壓縮代理程式的工作階段。',
+    newBusy: '此聊天室還有任務未完成，請等任務結束後再使用 /new。',
+    newSuccess: '已開始新對話，下一則訊息會用新的 session。',
+    btwUsage: '用法：/btw <訊息>',
     noPreviews: '目前沒有開啟的預覽。',
     preview: (id: string, url: string, port: number, expires: string) =>
       `${id} · ${url} · 連接埠 ${port} · 到期時間 ${expires}`,
