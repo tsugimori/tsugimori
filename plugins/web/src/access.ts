@@ -128,15 +128,25 @@ export function createAccessVerifier({
             claims.nbf > current()))
       )
         return false;
+      const { email } = claims;
       let role: AccessRole;
       if (
         (!identity.ownerEmail ||
-          (typeof claims.email === 'string' &&
-            claims.email.toLowerCase() ===
-              identity.ownerEmail.toLowerCase())) &&
+          (typeof email === 'string' &&
+            email.toLowerCase() === identity.ownerEmail.toLowerCase())) &&
         (!identity.ownerSub || claims.sub === identity.ownerSub)
       )
         role = 'owner';
+      else if (
+        typeof email === 'string' &&
+        typeof claims.sub === 'string' &&
+        claims.sub !== '' &&
+        claims.common_name === undefined &&
+        identity.viewerEmails?.some(
+          (viewerEmail) => viewerEmail.toLowerCase() === email.toLowerCase(),
+        )
+      )
+        role = 'viewer';
       // Access issues service token JWTs with the client ID in common_name
       // and no user identity.
       else if (

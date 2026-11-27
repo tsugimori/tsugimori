@@ -11,11 +11,13 @@ export interface AccessIdentity {
   ownerEmail?: string;
   ownerSub?: string;
   team: string;
+  /** Access user email addresses granted read-only viewer access. */
+  viewerEmails?: readonly string[];
   /** Access service token client IDs granted read-only viewer access. */
   viewerServiceTokens?: readonly string[];
 }
 
-/** `owner` matches the configured owner; `viewer` is a listed service token. */
+/** `owner` matches the configured owner. `viewer` matches a listed user or service token. */
 export type AccessRole = 'owner' | 'viewer';
 
 export type VerifyAccess = (

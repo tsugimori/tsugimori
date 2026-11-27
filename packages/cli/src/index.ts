@@ -442,6 +442,7 @@ async function startGateway(
           team: config.accessTeam,
           ownerEmail: config.ownerEmail,
           ownerSub: config.ownerSub,
+          viewerEmails: config.viewerEmails,
           viewerServiceTokens: config.viewerServiceTokens,
         }
       : undefined;

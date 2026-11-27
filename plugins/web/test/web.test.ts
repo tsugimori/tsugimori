@@ -1,15 +1,38 @@
 import type { AdminEvent, AdminReader } from '@tsugimori/plugin-sdk';
+import type { KeyObject } from 'node:crypto';
+import type { AddressInfo } from 'node:net';
 
 import assert from 'node:assert/strict';
 import { generateKeyPairSync, sign } from 'node:crypto';
+import { once } from 'node:events';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { get } from 'node:http';
+import { createServer, get } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
+import { NamedTunnel } from '../../tunnel-cloudflare/src/index.ts';
 import { createFixtureReader } from '../scripts/fixtures.ts';
 import { AdminServer, createAccessVerifier } from '../src/index.ts';
+
+function accessJwt(
+  key: KeyObject,
+  claims: Record<string, unknown> = {},
+  kid = 'first',
+) {
+  const encode = (value: object) =>
+    Buffer.from(JSON.stringify(value)).toString('base64url');
+  const header = encode({ alg: 'RS256', kid });
+  const body = encode({
+    aud: ['app'],
+    exp: 200,
+    iss: 'https://example.cloudflareaccess.com',
+    ...claims,
+  });
+  const data = `${header}.${body}`;
+  const signature = sign('RSA-SHA256', Buffer.from(data), key);
+  return `${data}.${signature.toString('base64url')}`;
+}
 
 test('Access JWTs require a valid key, audience, expiry, and owner identity', async () => {
   const { privateKey, publicKey } = generateKeyPairSync('rsa', {
@@ -44,23 +67,7 @@ test('Access JWTs require a valid key, audience, expiry, and owner identity', as
     kid = 'first',
     key = privateKey,
   ) {
-    const encode = (value: object) =>
-      Buffer.from(JSON.stringify(value)).toString('base64url');
-    const data =
-      encode({ alg: 'RS256', kid }) +
-      '.' +
-      encode({
-        aud: ['app'],
-        email: identity.ownerEmail,
-        exp: 200,
-        iss: 'https://example.cloudflareaccess.com',
-        ...claims,
-      });
-    return (
-      data +
-      '.' +
-      sign('RSA-SHA256', Buffer.from(data), key).toString('base64url')
-    );
+    return accessJwt(key, { email: identity.ownerEmail, ...claims }, kid);
   }
   assert.equal(await verify(token(), identity), 'owner');
   assert.equal(await verify(token({ aud: ['other'] }), identity), false);
@@ -118,6 +125,135 @@ test('Access JWTs require a valid key, audience, expiry, and owner identity', as
     await verify(token({}, 'second', second.privateKey), viewers),
     'owner',
   );
+});
+
+test('listed Access users can read the console while named previews require the owner', async (t) => {
+  const { privateKey, publicKey } = generateKeyPairSync('rsa', {
+    modulusLength: 2048,
+  });
+  const otherKey = generateKeyPairSync('rsa', {
+    modulusLength: 2048,
+  }).privateKey;
+  const jwk = {
+    ...publicKey.export({ format: 'jwk' }),
+    alg: 'RS256',
+    kid: 'first',
+  };
+  const verify = createAccessVerifier({
+    now: () => 100_000,
+    fetch: async () => Response.json({ keys: [jwk] }),
+  });
+  const access = {
+    aud: 'app',
+    team: 'example',
+    ownerEmail: 'owner@example.test',
+    viewerEmails: ['Viewer@Example.test', 'owner@example.test'],
+  };
+  const viewer = { email: 'vIeWeR@example.TEST', sub: 'viewer-id' };
+  const owner = { email: access.ownerEmail, sub: 'owner-id' };
+  const viewerJwt = accessJwt(privateKey, viewer);
+  assert.equal(await verify(viewerJwt, access), 'viewer');
+  assert.equal(await verify(accessJwt(privateKey, owner), access), 'owner');
+
+  const { reader } = createFixtureReader();
+  let errors = 0;
+  const admin = new AdminServer(
+    { reader, verify, logError: () => errors++ },
+    { access, listen: '127.0.0.1:0' },
+  );
+  const { port } = await admin.start();
+  t.after(() => admin.stop());
+  const read = (path: string, jwt: string, method = 'GET') =>
+    fetch(`http://127.0.0.1:${port}${path}`, {
+      headers: { 'Cf-Access-Jwt-Assertion': jwt },
+      method,
+    });
+  const chat = reader.chats()[0]!;
+  const query = new URLSearchParams({
+    adapter: chat.adapterId,
+    id: chat.chatId,
+  });
+  for (const path of [`/api/chat?${query}`, '/api/tasks']) {
+    const response = await read(path, viewerJwt);
+    assert.equal(response.status, 200);
+    await response.json();
+  }
+  assert.equal((await read('/api/tasks', viewerJwt, 'POST')).status, 405);
+
+  const denied = [
+    accessJwt(privateKey, { ...viewer, email: 'unlisted@example.test' }),
+    accessJwt(privateKey, { ...viewer, exp: 99 }),
+    accessJwt(privateKey, { ...viewer, nbf: 101 }),
+    accessJwt(privateKey, { ...viewer, aud: ['other'] }),
+    accessJwt(privateKey, {
+      ...viewer,
+      iss: 'https://other.cloudflareaccess.com',
+    }),
+    accessJwt(privateKey, { ...viewer, sub: undefined }),
+    accessJwt(privateKey, { ...viewer, sub: '' }),
+    accessJwt(privateKey, { ...viewer, common_name: 'viewer.access' }),
+    accessJwt(otherKey, viewer),
+  ];
+  for (const jwt of denied) {
+    const response = await read('/api/tasks', jwt);
+    assert.equal(response.status, 403);
+    assert.deepEqual(await response.json(), { error: 'forbidden' });
+  }
+  assert.equal(errors, 0);
+
+  const origin = createServer((_request, response) => response.end('preview'));
+  await once(origin.listen(0, '127.0.0.1'), 'listening');
+  t.after(() => origin[Symbol.asyncDispose]());
+  const named = new NamedTunnel(
+    {
+      verify,
+      fetch: async () =>
+        Response.json({ success: true, result: { id: 'a'.repeat(32) } }),
+    },
+    {
+      access: { ...access, aud: 'preview' },
+      domain: 'example.test',
+      port: 0,
+      token: 'test-token',
+      tunnelId: '01234567-0123-4567-89ab-0123456789ab',
+      zoneId: 'b'.repeat(32),
+    },
+  );
+  t.after(() => named.stop());
+  const preview = await named.open({
+    endpoint: {
+      host: '127.0.0.1',
+      port: (origin.address() as AddressInfo).port,
+    },
+    openedBy: 'owner',
+    signal: new AbortController().signal,
+    ttlMs: 60_000,
+  });
+  const previewPort = await named.start();
+  const openPreview = (claims: typeof viewer) =>
+    new Promise<number | undefined>((resolve, reject) => {
+      const request = get(
+        {
+          hostname: '127.0.0.1',
+          port: previewPort,
+          headers: {
+            Host: new URL(preview.url).host,
+            'Cf-Access-Jwt-Assertion': accessJwt(privateKey, {
+              ...claims,
+              aud: ['preview'],
+            }),
+          },
+        },
+        (response) => {
+          response.on('error', reject);
+          response.on('end', () => resolve(response.statusCode));
+          response.resume();
+        },
+      );
+      request.on('error', reject);
+    });
+  assert.equal(await openPreview(viewer), 403);
+  assert.equal(await openPreview(owner), 200);
 });
 
 const payload = '<script>alert(1)</script> "><img src=x onerror=alert(1)>';

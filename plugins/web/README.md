@@ -16,6 +16,7 @@ Add the top-level `web` section in `tsugimori.json`.
     "ownerEmail": "owner@example.com",
     "ownerSub": "replace-with-owner-subject",
     "allowLocalWithoutAccess": false,
+    "viewerEmails": ["viewer@example.com"],
     "viewerServiceTokens": ["replace-with-client-id.access"]
   }
 }
@@ -28,13 +29,20 @@ Add the top-level `web` section in `tsugimori.json`.
 | `accessTeam`, `accessAud` | Cloudflare Access team slug and admin application audience. Both are required for Access authentication.                                            |
 | `ownerEmail`, `ownerSub`  | Supply either the allowed email or JWT subject. If both are supplied, both must match. The email check is case-insensitive.                         |
 | `allowLocalWithoutAccess` | Defaults to `false`. Set to `true` for direct loopback access using a local Host without recognized proxy headers.                                  |
+| `viewerEmails`            | Defaults to none. Lists up to 16 Cloudflare Access user emails for read-only console access. Matching is case-insensitive.                          |
 | `viewerServiceTokens`     | Defaults to none. Lists Cloudflare Access service token client IDs that may open the console as read-only viewers. Up to 16 entries.                |
 
 Access settings are identifiers in JSON. The server requires no credential environment variables.
 
 ## Setup, checks, and status
 
-For remote access, configure an HTTPS hostname on a named Cloudflare Tunnel that forwards to the loopback admin listener. Put an owner-only Access policy on that hostname. The plugin verifies the Access JWT against the team's signing keys, issuer, audience, validity time, and configured owner identity. To let an automated maintainer read the console, create an Access service token, add a Service Auth policy for it on the admin application, and list its client ID in `viewerServiceTokens`. Access then forwards a JWT whose `common_name` is the client ID and that has no user email. The plugin accepts it as a viewer only when that ID is listed. Viewers can load every page and API that the console serves today; future write operations are reserved for the owner. Named previews accept only the owner. Revoke the token in Cloudflare to remove access. For local development, use `allowLocalWithoutAccess: true` and open `http://127.0.0.1:8787/` with the default address. The listener and access settings take effect at startup. This plugin is configured in JSON.
+For remote access, configure an HTTPS hostname on a named Cloudflare Tunnel that forwards to the loopback admin listener. Configure the admin application's Access policy to allow the owner and each user listed in `viewerEmails`. The plugin verifies the Access JWT against the team's signing keys, issuer, audience, and validity time before granting access based on the configured identities. The owner retains the owner role if their email is also listed in `viewerEmails`.
+
+To let an automated maintainer read the console, create an Access service token, add a Service Auth policy for it on the admin application, and list its client ID in `viewerServiceTokens`. Access forwards a JWT whose `common_name` is the client ID and that has no user email. The plugin accepts it as a viewer only when that ID is listed. Revoke the token in Cloudflare to remove access.
+
+Viewers can load every read-only page and API, including conversations and tasks across all chats. Named previews and future write operations are reserved for the owner.
+
+For local development, use `allowLocalWithoutAccess: true` and open `http://127.0.0.1:8787/` with the default address. The listener and access settings take effect at startup. This plugin is configured in JSON.
 
 There is no web-specific `doctor` probe or dedicated `/status` row for the listener. Core checks report duplicate configured listener addresses, and a failure to bind the web port stops startup. After starting, open the admin URL to check routing and access.
 

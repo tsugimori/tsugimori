@@ -393,6 +393,16 @@
           "type": "boolean",
           "default": false
         },
+        "viewerEmails": {
+          "type": "array",
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "maxLength": 255,
+            "pattern": "^[^\\s@]+@[^\\s@]+$"
+          }
+        },
         "viewerServiceTokens": {
           "type": "array",
           "maxItems": 16,
