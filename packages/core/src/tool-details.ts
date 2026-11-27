@@ -107,9 +107,9 @@ function serializer({ config, env }: WorkspaceConfig) {
     : undefined;
   const redact = (text: string) =>
     redactText(pattern ? text.replace(pattern, redacted) : text);
-  const field = (value: unknown) => {
+  const field = (value: unknown, limit = 64 * 1024) => {
     if (value === undefined) return null;
-    if (typeof value === 'string') return capBytes(redact(value), 64 * 1024);
+    if (typeof value === 'string') return capBytes(redact(value), limit);
     try {
       const objects = new WeakMap<object, object>();
       const text = JSON.stringify(
@@ -139,7 +139,7 @@ function serializer({ config, env }: WorkspaceConfig) {
         },
         2,
       );
-      return text === undefined ? null : capBytes(text, 64 * 1024);
+      return text === undefined ? null : capBytes(text, limit);
     } catch {
       return '[unserializable tool data]';
     }
@@ -205,6 +205,7 @@ export class ToolDetails {
     if (!format) return;
     const input = (args: unknown) =>
       format.field(name === 'send.image' ? imageToolArguments(args) : args);
+    const resultLimit = name === 'web_search' ? 4 * 1024 : undefined;
     const seq = save(() =>
       store.createToolCall({
         taskId,
@@ -240,7 +241,7 @@ export class ToolDetails {
         update({
           status: denied && status === 'error' ? 'denied' : status,
           endedAt: Date.now(),
-          result: format.field(result),
+          result: format.field(result, resultLimit),
         }),
       input: (args) => update({ args: input(args) }),
       pending: (approvalId) =>

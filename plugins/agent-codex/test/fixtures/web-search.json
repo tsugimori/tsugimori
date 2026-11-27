@@ -1,0 +1,263 @@
+[
+  {
+    "method": "item/started",
+    "params": {
+      "item": {
+        "type": "webSearch",
+        "id": "ws_fixture0",
+        "query": "",
+        "action": {
+          "type": "other"
+        },
+        "results": null,
+        "startedAtMs": 1795746221989,
+        "completedAtMs": null
+      },
+      "threadId": "fixture-thread",
+      "turnId": "fixture-turn",
+      "startedAtMs": 1795746221989
+    },
+    "emittedAtMs": 1795746221990
+  },
+  {
+    "method": "item/completed",
+    "params": {
+      "item": {
+        "type": "webSearch",
+        "id": "ws_fixture0",
+        "query": "https://example.com/",
+        "action": {
+          "type": "openPage",
+          "url": "https://example.com/"
+        },
+        "results": null,
+        "startedAtMs": 1795746221989,
+        "completedAtMs": 1795746221999
+      },
+      "threadId": "fixture-thread",
+      "turnId": "fixture-turn",
+      "contentTokenCount": null,
+      "completedAtMs": 1795746221999
+    },
+    "emittedAtMs": 1795746221999
+  },
+  {
+    "method": "item/started",
+    "params": {
+      "item": {
+        "type": "webSearch",
+        "id": "ws_fixture1",
+        "query": "",
+        "action": {
+          "type": "other"
+        },
+        "results": null,
+        "startedAtMs": 1795746221999,
+        "completedAtMs": null
+      },
+      "threadId": "fixture-thread",
+      "turnId": "fixture-turn",
+      "startedAtMs": 1795746221999
+    },
+    "emittedAtMs": 1795746221999
+  },
+  {
+    "method": "item/completed",
+    "params": {
+      "item": {
+        "type": "webSearch",
+        "id": "ws_fixture1",
+        "query": "example domain ...",
+        "action": {
+          "type": "search",
+          "query": null,
+          "queries": ["example domain", "example documentation"]
+        },
+        "results": null,
+        "startedAtMs": 1795746221999,
+        "completedAtMs": 1795746222008
+      },
+      "threadId": "fixture-thread",
+      "turnId": "fixture-turn",
+      "contentTokenCount": null,
+      "completedAtMs": 1795746222008
+    },
+    "emittedAtMs": 1795746222009
+  },
+  {
+    "method": "item/started",
+    "params": {
+      "item": {
+        "type": "webSearch",
+        "id": "ws_fixture2",
+        "query": "",
+        "action": {
+          "type": "other"
+        },
+        "results": null,
+        "startedAtMs": 1795746222009,
+        "completedAtMs": null
+      },
+      "threadId": "fixture-thread",
+      "turnId": "fixture-turn",
+      "startedAtMs": 1795746222009
+    },
+    "emittedAtMs": 1795746222009
+  },
+  {
+    "method": "item/completed",
+    "params": {
+      "item": {
+        "type": "webSearch",
+        "id": "ws_fixture2",
+        "query": "'Example Domain' in https://example.com/",
+        "action": {
+          "type": "findInPage",
+          "url": "https://example.com/",
+          "pattern": "Example Domain"
+        },
+        "results": null,
+        "startedAtMs": 1795746222009,
+        "completedAtMs": 1795746222018
+      },
+      "threadId": "fixture-thread",
+      "turnId": "fixture-turn",
+      "contentTokenCount": null,
+      "completedAtMs": 1795746222018
+    },
+    "emittedAtMs": 1795746222018
+  },
+  {
+    "method": "item/started",
+    "params": {
+      "item": {
+        "type": "webSearch",
+        "id": "ws_fixture3",
+        "query": "",
+        "action": {
+          "type": "other"
+        },
+        "results": null,
+        "startedAtMs": 1795746222018,
+        "completedAtMs": null
+      },
+      "threadId": "fixture-thread",
+      "turnId": "fixture-turn",
+      "startedAtMs": 1795746222018
+    },
+    "emittedAtMs": 1795746222018
+  },
+  {
+    "method": "item/completed",
+    "params": {
+      "item": {
+        "type": "webSearch",
+        "id": "ws_fixture3",
+        "query": "",
+        "action": {
+          "type": "other"
+        },
+        "results": null,
+        "startedAtMs": 1795746222018,
+        "completedAtMs": 1795746222028
+      },
+      "threadId": "fixture-thread",
+      "turnId": "fixture-turn",
+      "contentTokenCount": null,
+      "completedAtMs": 1795746222028
+    },
+    "emittedAtMs": 1795746222028
+  },
+  {
+    "method": "item/started",
+    "params": {
+      "item": {
+        "type": "webSearch",
+        "id": "ws_fixture4",
+        "query": "",
+        "action": {
+          "type": "other"
+        },
+        "results": null,
+        "startedAtMs": 1795746222028,
+        "completedAtMs": null
+      },
+      "threadId": "fixture-thread",
+      "turnId": "fixture-turn",
+      "startedAtMs": 1795746222028
+    },
+    "emittedAtMs": 1795746222028
+  },
+  {
+    "method": "item/completed",
+    "params": {
+      "item": {
+        "type": "webSearch",
+        "id": "ws_fixture4",
+        "query": "unavailable example",
+        "action": {
+          "type": "search",
+          "query": "unavailable example",
+          "queries": null
+        },
+        "results": null,
+        "startedAtMs": 1795746222028,
+        "completedAtMs": 1795746222039
+      },
+      "threadId": "fixture-thread",
+      "turnId": "fixture-turn",
+      "contentTokenCount": null,
+      "completedAtMs": 1795746222039
+    },
+    "emittedAtMs": 1795746222039
+  },
+  {
+    "method": "item/started",
+    "params": {
+      "item": {
+        "type": "webSearch",
+        "id": "call_fixture",
+        "query": "",
+        "action": null,
+        "results": null,
+        "startedAtMs": 1795746335893,
+        "completedAtMs": null
+      },
+      "threadId": "fixture-thread",
+      "turnId": "fixture-turn",
+      "startedAtMs": 1795746335893
+    },
+    "emittedAtMs": 1795746335893
+  },
+  {
+    "method": "item/completed",
+    "params": {
+      "item": {
+        "type": "webSearch",
+        "id": "call_fixture",
+        "query": "example domain",
+        "action": {
+          "type": "search",
+          "query": "example domain",
+          "queries": null
+        },
+        "results": [
+          {
+            "type": "text_result",
+            "ref_id": "turn0search0",
+            "title": "Example Domain",
+            "url": "https://example.com/",
+            "snippet": "A domain for examples."
+          }
+        ],
+        "startedAtMs": 1795746335893,
+        "completedAtMs": 1795746335907
+      },
+      "threadId": "fixture-thread",
+      "turnId": "fixture-turn",
+      "contentTokenCount": null,
+      "completedAtMs": 1795746335907
+    },
+    "emittedAtMs": 1795746335910
+  }
+]

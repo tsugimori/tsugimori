@@ -13,6 +13,11 @@ import type { AppServer, ServerFrame } from './app-server.ts';
 
 import { asRecord } from './app-server.ts';
 import { contextWindow } from './compaction.ts';
+import {
+  webSearchArgs,
+  webSearchResult,
+  webSearchTimestamp,
+} from './web-search.ts';
 
 export const approvalPolicy = 'on-request';
 export const approvalsReviewer = 'user';
@@ -133,8 +138,6 @@ function toolData(item: Record<string, unknown>) {
       };
     case 'fileChange':
       return { args: item.changes, result: item.output ?? item.error };
-    case 'webSearch':
-      return { args: item.action ?? item.query, result: item.result };
     case 'imageView':
       return { args: item.path, result: item.result };
     default:
@@ -217,9 +220,22 @@ export class TurnOutput {
       (typeof item.tool === 'string' ? item.tool : undefined);
     const framework =
       item.type === 'dynamicToolCall' && name && this.#frameworkTools.has(name);
-    const { args, result } = toolData(item);
+    const webSearch = item.type === 'webSearch';
+    const started = this.#items.get(callId);
+    const data = toolData(item);
+    const args = webSearch ? webSearchArgs(item, started) : data.args;
     if (method === 'item/started') {
-      this.#items.set(callId, item);
+      this.#items.set(
+        callId,
+        webSearch
+          ? {
+              ...item,
+              startedAtMs:
+                webSearchTimestamp(params.startedAtMs, item.startedAtMs) ??
+                Date.now(),
+            }
+          : item,
+      );
       return name && !framework
         ? [
             {
@@ -269,12 +285,17 @@ export class TurnOutput {
       (item.type === 'commandExecution' &&
         typeof item.exitCode === 'number' &&
         item.exitCode !== 0);
+    const status =
+      item.status === 'declined' ? 'denied' : failed ? 'error' : 'ok';
+    const result = webSearch
+      ? webSearchResult(item, started, params, status)
+      : data.result;
     return [
       {
         type: 'tool.finished',
         callId,
         name,
-        status: item.status === 'declined' ? 'denied' : failed ? 'error' : 'ok',
+        status,
         ...(args === undefined ? {} : { args }),
         ...(result === undefined ? {} : { result }),
       },

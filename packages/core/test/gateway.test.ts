@@ -5044,6 +5044,53 @@ test('disabled tool details keep names in trace and skip argument and result sto
   assert.doesNotMatch(JSON.stringify(view), /hidden/);
 });
 
+test('redacts web search results before capping their stored size', async (t) => {
+  const fixtureSecret = 'fixture web search credential';
+  const f = await fixture(
+    t,
+    async function* () {
+      yield {
+        type: 'tool.finished',
+        callId: 'search-1',
+        name: 'web_search',
+        status: 'ok',
+        args: { type: 'search', query: fixtureSecret },
+        result: {
+          status: 'completed',
+          durationMs: 25,
+          results: [
+            {
+              title: 'Example page',
+              url: 'https://example.com/',
+              snippet: fixtureSecret + ' 界'.repeat(2_000),
+            },
+          ],
+        },
+      };
+      yield { type: 'text.final', text: 'finished' };
+    },
+    true,
+    { envFixture: `FIXTURE_PASSWORD="${fixtureSecret}"\n` },
+  );
+  await f.platform.emit(inbound('web-search', 'Search'));
+  await f.gateway.idle();
+  const [task] = f.store.listChatTasks(chat);
+  assert.ok(task);
+  const [call] = f.store.taskToolCalls([task.id]);
+  assert.ok(call?.result);
+  assert.equal(call.status, 'ok');
+  assert.ok(Buffer.byteLength(call.result) <= 4 * 1024);
+  assert.match(call.result, /"durationMs": 25/);
+  assert.match(call.result, /"snippet": "\[redacted\]/);
+  assert.match(call.result, /…\[truncated \d+ bytes\]$/u);
+  assert.ok(!call.result.includes(fixtureSecret));
+  assert.equal(JSON.parse(call.args!).query, '[redacted]');
+  assert.match(
+    f.gateway.admin.toolCall(task.id, call.seq)?.result ?? '',
+    /Example page/,
+  );
+});
+
 test(
   'framework tool records pending and denied status with a linked approval',
   { timeout: 5000 },
