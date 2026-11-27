@@ -44,7 +44,8 @@ const messages = {
     compactionCount: (count: number) => `${count} total`,
     session: 'Session',
     privacy: 'Privacy',
-    privateSince: (seq: string) => `Private conversation since message #${seq}`,
+    incognitoSince: (seq: string) => `Incognito on since message #${seq}`,
+    incognitoOff: 'Incognito off',
     sessionAge: (age: string) => `active for ${age}`,
     modes: {
       manual: 'manual',
@@ -120,7 +121,8 @@ const messages = {
     compactionCount: (count: number) => `共 ${count} 次`,
     session: '對話',
     privacy: '隱私',
-    privateSince: (seq: string) => `自訊息 #${seq} 起為私人對話`,
+    incognitoSince: (seq: string) => `自訊息 #${seq} 起開啟無痕模式`,
+    incognitoOff: '無痕模式已關閉',
     sessionAge: (age: string) => `已持續 ${age}`,
     modes: {
       manual: '手動',
@@ -182,14 +184,15 @@ export function contextCard(
   },
   scope: string | undefined,
   locale: 'en' | 'zh-TW',
-  privateSince?: number,
+  incognitoId: number | null,
 ) {
   const zh = locale === 'zh-TW';
   const number = new Intl.NumberFormat(locale);
-  const lines =
-    privateSince === undefined
-      ? []
-      : [messages[locale].privateSince(number.format(privateSince))];
+  const lines = [
+    incognitoId === null
+      ? messages[locale].incognitoOff
+      : messages[locale].incognitoSince(number.format(incognitoId)),
+  ];
   if (!scope)
     return [
       ...lines,
@@ -361,7 +364,8 @@ export function statusCard(
   text += separator + m.uptime(elapsed(startedAt), date(startedAt));
 
   const work = tasks.status(chat);
-  const privateSince = store.getChat(chat)?.privateSince;
+  const currentChat = store.getChat(chat);
+  const incognitoId = currentChat?.incognitoId;
   const { agentId, defaults, quota, serviceTier, thinking } = work;
   if (agentId) {
     const agent = agents.find(({ id }) => id === agentId);
@@ -434,13 +438,15 @@ export function statusCard(
       );
     }
   }
-  if (privateSince != null)
+  if (currentChat)
     field(
       m.privacy,
-      m.privateSince(new Intl.NumberFormat(locale).format(privateSince)),
+      incognitoId == null
+        ? m.incognitoOff
+        : m.incognitoSince(new Intl.NumberFormat(locale).format(incognitoId)),
     );
   const summary =
-    privateSince == null ? store.getSummaryStatus(chat) : undefined;
+    incognitoId == null ? store.getSummaryStatus(chat) : undefined;
   if (summary)
     field(
       m.summary,
@@ -480,7 +486,7 @@ export function statusCard(
     field(
       m.lastApproval,
       m.decisions[latest.status],
-      privateSince == null ? (latest.failureReason ?? '') : '',
+      incognitoId == null ? (latest.failureReason ?? '') : '',
     );
 
   const { count, next, failed } = store.scheduleStatus(chat.adapterId, target);
@@ -493,13 +499,13 @@ export function statusCard(
         30,
       );
       details += `${m.due(date(next.nextDueAt))} #${scheduleRef(next.id)}`;
-      if (content && privateSince == null) details += ` ${content}`;
+      if (content && incognitoId == null) details += ` ${content}`;
     }
     field(
       m.schedules,
       details,
       failed ? `#${scheduleRef(failed.id)} ${m.failed}` : '',
-      privateSince == null ? (failed?.failureReason ?? '') : '',
+      incognitoId == null ? (failed?.failureReason ?? '') : '',
     );
   }
 

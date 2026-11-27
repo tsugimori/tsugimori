@@ -3,7 +3,7 @@ import type {
   InboundAttachment,
   ReplyTarget,
 } from '@tsugimori/plugin-sdk';
-import type { MessageRecord, Store } from '@tsugimori/storage';
+import type { AlbumMessage, MessageRecord, Store } from '@tsugimori/storage';
 
 import { attachmentMetadata } from '@tsugimori/plugin-sdk';
 
@@ -20,14 +20,15 @@ type Row = Pick<
   | 'userId'
 >;
 
-export function albumAttachments(members: readonly MessageRecord[]) {
-  let index = 0;
-  return members.flatMap((message) =>
-    (message.metadata?.attachments ?? []).flatMap((attachment) => {
-      const entry = { message, attachment: { ...attachment, index: index++ } };
-      return message.deleted ? [] : [entry];
-    }),
-  );
+export function albumAttachments(members: readonly AlbumMessage[]) {
+  return members
+    .filter(({ deleted }) => !deleted)
+    .flatMap((message) =>
+      (message.metadata?.attachments ?? []).map((attachment, index) => ({
+        message,
+        attachment: { ...attachment, index: message.attachmentOffset + index },
+      })),
+    );
 }
 
 function publicAttachments(attachments: readonly InboundAttachment[] = []) {
@@ -96,7 +97,6 @@ export function messageContext(
 export function messageAlbumLookup(
   store: AlbumSource,
   chat: Pick<MessageRecord, 'adapterId' | 'chatId'>,
-  privateSince?: number,
 ) {
   const cache = new Map<string, ReturnType<typeof albumAttachments>>();
   return (albumId: string, migratedFromChatId: string) => {
@@ -105,23 +105,9 @@ export function messageAlbumLookup(
     if (!album) {
       album = albumAttachments(
         store.messageAlbum?.(chat, albumId, migratedFromChatId) ?? [],
-      ).filter(
-        ({ message }) =>
-          privateSince === undefined || message.seq > privateSince,
       );
       cache.set(key, album);
     }
     return album;
   };
-}
-
-export function privateReplyVisible(
-  store: Partial<Pick<Store, 'getMessage'>>,
-  chat: Pick<MessageRecord, 'adapterId' | 'chatId'>,
-  id: string,
-  migratedFromChatId: string,
-  privateSince: number,
-) {
-  const target = store.getMessage?.(chat, id, migratedFromChatId, false);
-  return target !== undefined && !target.deleted && target.seq > privateSince;
 }

@@ -34,7 +34,7 @@ import type {
 import type { Tracer } from '@tsugimori/trace';
 
 import { approvalCallbackId } from '@tsugimori/auth';
-import { messageContext, privateReplyVisible } from '@tsugimori/context';
+import { messageContext } from '@tsugimori/context';
 import { pendingApprovalResult } from '@tsugimori/plugin-sdk';
 import { containsMention, scheduleReplyStyle } from '@tsugimori/scheduler';
 import { createHash, randomUUID } from 'node:crypto';
@@ -98,12 +98,12 @@ type Work = {
   endForApproval: AbortController;
   execution?: Promise<void>;
   id: string;
+  incognitoId?: number;
   input: TaskInput;
   mediaDelivered?: boolean;
   mediaQueued?: { detail?: ToolDetail; handle: QueuedMedia }[];
   messageIds: Set<string>;
   pendingApprovalFallback?: string;
-  privateSince?: number;
   progress: { stage: TaskStage; startedAt: number };
   recorder?: TaskRecorder;
   route?: { agentId: string; model: string };
@@ -306,14 +306,14 @@ export class Tasks {
     );
   }
 
-  resetSession(chat: ChatRef, privateSince: number | null) {
+  resetSession(chat: ChatRef, incognitoId: number | null) {
     const { store, trace } = this.#deps;
     chat = store.resolveChat(chat);
     const key = chatKey(chat);
     if (this.#queues.has(key)) return false;
     const agentId = store.getChat(chat)?.sessionAgentId;
     const session = agentId ? store.getSession(chat, agentId) : undefined;
-    store.clearSession(chat, privateSince);
+    store.clearSession(chat, incognitoId);
     trace.record('session.reset', {
       sessionScope: session
         ? sessionScope(
@@ -344,8 +344,7 @@ export class Tasks {
       !input.sessionCommand &&
       !input.message.migratedFromChatId &&
       running?.acceptsSupplements &&
-      (running.privateSince === undefined ||
-        input.seq > running.privateSince) &&
+      store.messageVisible(chat, messageId, '') &&
       !running.input.message.migratedFromChatId &&
       !running.abort.signal.aborted &&
       replyTo &&
@@ -431,11 +430,10 @@ export class Tasks {
     const oldKey = chatKey({ adapterId, chatId });
     const destination = { adapterId, chatId: newChatId };
     const key = chatKey(destination);
-    const privateSince =
-      this.#deps.store.getChat(destination)?.privateSince ?? undefined;
+    const incognitoId =
+      this.#deps.store.getChat(destination)?.incognitoId ?? undefined;
     for (const running of [this.#running.get(oldKey), this.#running.get(key)])
-      if (running && running.privateSince !== privateSince)
-        running.abort.abort();
+      if (running && running.incognitoId !== incognitoId) running.abort.abort();
     const previous = this.#queues.get(oldKey);
     if (!previous) return;
     const tail = Promise.all([previous, this.#queues.get(key)]).then(() => {
@@ -549,11 +547,19 @@ export class Tasks {
   ) {
     const call = approval.continuation;
     if (call?.kind !== 'tool') return false;
+    const { store } = this.#deps;
     const { adapterId, chatId } = source;
-    const chat = this.#deps.store.resolveChat({ adapterId, chatId });
-    const privateConversation =
-      this.#deps.store.getChat(chat)?.privateSince != null;
-    const tool = this.#toolDefinitions(adapter, privateConversation).find(
+    const chat = store.resolveChat({ adapterId, chatId });
+    if (
+      !store.messageVisible(
+        chat,
+        source.sourceMessageId,
+        source.sourceChatId ?? '',
+      )
+    )
+      return false;
+    const incognito = store.getChat(chat)?.incognitoId != null;
+    const tool = this.#toolDefinitions(adapter, incognito).find(
       ({ name, permission }) =>
         name === call.name && permission?.action === approval.action,
     );
@@ -582,9 +588,9 @@ export class Tasks {
     const { adapter, input, abort, id } = work;
     const { message } = input;
     const ephemeral = input.sessionCommand !== undefined;
-    const samePrivateBoundary = () =>
-      (store.getChat(store.resolveChat(work.chat))?.privateSince ??
-        undefined) === work.privateSince;
+    const sameIncognitoWindow = () =>
+      (store.getChat(store.resolveChat(work.chat))?.incognitoId ??
+        undefined) === work.incognitoId;
     const activity = new AbortController();
     const finish = (status: TaskRecord['status']) =>
       store.updateTask(id, { status, finishedAt: Date.now() });
@@ -604,7 +610,7 @@ export class Tasks {
       const chat = store.resolveChat(work.chat);
       const sourceChatId = store.getTask(id)?.sourceChatId ?? '';
       work.chat = chat;
-      if (store.getMessage(chat, message.messageId, sourceChatId)?.deleted) {
+      if (!store.messageVisible(chat, message.messageId, sourceChatId)) {
         finish('cancelled');
         return;
       }
@@ -613,11 +619,7 @@ export class Tasks {
         userId: message.userId,
       });
       const current = store.getChat(chat);
-      work.privateSince = current?.privateSince ?? undefined;
-      if (work.privateSince !== undefined && input.seq <= work.privateSince) {
-        finish('cancelled');
-        return;
-      }
+      work.incognitoId = current?.incognitoId ?? undefined;
       const allowlisted = current?.allowlisted ?? false;
       if (
         input.compact
@@ -758,7 +760,7 @@ export class Tasks {
         finish('completed');
       }
 
-      if (!ephemeral && samePrivateBoundary()) {
+      if (!ephemeral && sameIncognitoWindow()) {
         if (
           !input.scheduled &&
           !abort.signal.aborted &&
@@ -778,11 +780,7 @@ export class Tasks {
           store.clearSession(chat);
         }
       }
-      if (
-        !ephemeral &&
-        work.privateSince === undefined &&
-        !abort.signal.aborted
-      )
+      if (!ephemeral && work.incognitoId === undefined && !abort.signal.aborted)
         this.#deps.summarize({
           agentId: selected.agent.id,
           chat,
@@ -809,7 +807,7 @@ export class Tasks {
                 ? 'other'
                 : stage,
       );
-      if (ranAgent && !ephemeral && !work.stopExec && samePrivateBoundary())
+      if (ranAgent && !ephemeral && !work.stopExec && sameIncognitoWindow())
         store.clearSession(work.chat);
       if (!delivered && !work.stopExec && !(error instanceof DeliveryError))
         finish(abort.signal.aborted ? 'cancelled' : 'failed');
@@ -898,6 +896,7 @@ export class Tasks {
     let recorded = false;
     try {
       return await this.#deps.outbound.send(work.adapter, message, {
+        incognitoId: work.incognitoId,
         taskId: work.id,
         scheduled: work.input.scheduled !== undefined,
         sideQuestion: work.input.sessionCommand !== undefined,
@@ -917,11 +916,7 @@ export class Tasks {
     }
   }
 
-  #toolDefinitions(
-    adapter: PlatformAdapter,
-    privateConversation: boolean,
-    work?: Work,
-  ) {
+  #toolDefinitions(adapter: PlatformAdapter, incognito: boolean, work?: Work) {
     const { store, context, toolDetails } = this.#deps;
     const scheduled = work?.input.scheduled;
     const message = work?.input.message;
@@ -932,7 +927,11 @@ export class Tasks {
     return [
       ...this.#deps.tools.filter(
         ({ name }) =>
-          (!privateConversation || !name.startsWith('history.')) &&
+          (!incognito ||
+            (!name.startsWith('history.') &&
+              name !== memoryAction &&
+              name !== 'schedule.create' &&
+              name !== 'schedule.update')) &&
           (!name.startsWith('exec.') || Boolean(this.#deps.backend())),
       ),
       ...(adapter.tools?.() ?? []),
@@ -945,6 +944,7 @@ export class Tasks {
               ? {
                   address: scheduled?.target ?? reply(message, ''),
                   source: message.messageId,
+                  incognitoId: work.incognitoId,
                   sideQuestion: work.input.sessionCommand !== undefined,
                   onDelivery: (ids, error) => {
                     work.recorder?.delivery(adapter.id, ids, error);
@@ -973,7 +973,7 @@ export class Tasks {
   }
 
   async #compact(
-    { abort, adapter, chat, id, privateSince, recorder }: Work,
+    { abort, adapter, chat, id, incognitoId, recorder }: Work,
     agent: AgentConnector,
     settings: Pick<AgentRequest, 'model' | 'serviceTier' | 'thinking'>,
   ) {
@@ -990,7 +990,7 @@ export class Tasks {
       !session ||
       agent.acceptsSession?.(
         session.sessionId,
-        this.#toolDefinitions(adapter, privateSince !== undefined),
+        this.#toolDefinitions(adapter, incognitoId !== undefined),
       ) === false
     )
       return m.compactNoSession;
@@ -1074,7 +1074,7 @@ export class Tasks {
   ) {
     const { store, auth, context, runtime, trace, hooks, stickers } =
       this.#deps;
-    const { chat, input, id, abort, supplements, adapter, privateSince } = work;
+    const { chat, input, id, abort, supplements, adapter, incognitoId } = work;
     const ephemeral = input.sessionCommand !== undefined;
     const btw = input.sessionCommand?.mode === 'btw';
     const { signal } = abort;
@@ -1083,17 +1083,14 @@ export class Tasks {
     const visibleReply = (message: InboundMessage) => {
       const { replyTo } = message;
       if (
-        privateSince !== undefined &&
         replyTo &&
-        !privateReplyVisible(
-          store,
+        !store.messageVisible(
           chat,
           replyTo.id,
           input.message.migratedFromChatId ?? '',
-          privateSince,
         )
       )
-        return;
+        return { id: replyTo.id };
       return replyTo;
     };
     const collectStickers = (message: InboundMessage) => {
@@ -1119,7 +1116,7 @@ export class Tasks {
     const attrs = { ...chat, taskId: id };
     const definitions = this.#toolDefinitions(
       adapter,
-      privateSince !== undefined,
+      incognitoId !== undefined,
       work,
     );
     const previousSession = store.getSession(
@@ -1191,7 +1188,7 @@ export class Tasks {
           recentMessages: runtime.config.context.recentMessages,
           throughSeq: input.seq,
           ...(btw && { history: 'none' }),
-          privateSince,
+          incognitoId,
           afterSeq: (forkSessionId ? compatibleSession : session)?.throughSeq,
           skipSeq: session?.seenAfter,
         });
@@ -1253,7 +1250,7 @@ export class Tasks {
           if (message.replyTo)
             message.replyTo.attachments = describe(message.replyTo.attachments);
         }
-        await recorder.context(entries, privateSince !== undefined);
+        await recorder.context(entries, incognitoId !== undefined);
         const workdir = await context.workdir(chat);
         await prepareWorkspace(workdir, !runtime.disabled('workspace.record'));
         work.workdir = workdir;
@@ -1278,7 +1275,9 @@ export class Tasks {
       const replyTo = visibleReply(message);
       return {
         ...message,
-        ...(privateSince !== undefined && { raw: undefined }),
+        ...((incognitoId !== undefined || replyTo !== message.replyTo) && {
+          raw: undefined,
+        }),
         attachments: message.attachments && describe(message.attachments),
         replyTo: replyTo && {
           ...replyTo,
@@ -1373,7 +1372,7 @@ export class Tasks {
             task,
             recorder,
             approvalPending,
-            privateConversation: privateSince !== undefined,
+            incognito: incognitoId !== undefined,
             waitForClose: () => work.stopExec !== undefined,
             scopeChatId:
               sessionId === session?.sessionId
@@ -1470,7 +1469,7 @@ export class Tasks {
   }
 
   async #images(
-    { abort, adapter, chat, id, input, privateSince }: Work,
+    { abort, adapter, chat, id, input }: Work,
     { imageLimits }: AgentConnector,
     blocks: readonly ContextBlock[],
     afterSeq: number | undefined,
@@ -1488,7 +1487,6 @@ export class Tasks {
       input.message.migratedFromChatId ?? '',
       afterSeq,
       includeReplies,
-      privateSince,
     );
     if (!attachments.length) return [];
     const { signal } = abort;
@@ -1750,6 +1748,7 @@ export class Tasks {
               : undefined,
           },
           {
+            incognitoId: work.incognitoId,
             signal,
             sideQuestion: input.sessionCommand !== undefined,
             onDelivery: (ids, error) =>

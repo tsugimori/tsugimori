@@ -47,7 +47,7 @@ test('upgrades old chat rows and carries settings through group migration', asyn
   const store = new SqliteStore(path);
   try {
     assert.equal(store.getChat(chat)?.model, 'chosen');
-    assert.equal(store.getChat(chat)?.privateSince, null);
+    assert.equal(store.getChat(chat)?.incognitoId, null);
     assert.equal(store.getChat(chat)?.serviceTier, null);
     assert.equal(store.getChat(chat)?.thinking, null);
     store.setChatRoute(chat, { serviceTier: 'fast', thinking: 'xhigh' });
@@ -81,7 +81,7 @@ test('upgrades old chat rows and carries settings through group migration', asyn
   }
 });
 
-test('group migration retains the private boundary and clears the active session', (t) => {
+test('group migration carries over the open incognito window and clears the active session', (t) => {
   const store = new SqliteStore(':memory:');
   t.after(() => store.close());
   const previous = { adapterId: 'a', chatId: 'old' };
@@ -111,13 +111,117 @@ test('group migration retains the private boundary and clears the active session
   store.clearSession(previous, start);
   const latest = add(previous, 'visible');
   assert.equal(store.migrateChat(previous, current.chatId), true);
-  assert.equal(store.getChat(current)?.privateSince, start);
+  assert.equal(store.getChat(current)?.incognitoId, start);
   assert.equal(store.getSession(current, 'agent'), undefined);
   assert.deepEqual(
     store
-      .recentMessages(current, { throughSeq: latest, privateSince: start })
+      .recentMessages(current, { throughSeq: latest })
       .map(({ text }) => text),
     ['visible'],
+  );
+  assert.equal(
+    store.getMessage(current, 'visible', previous.chatId)?.incognitoId,
+    start,
+  );
+  store.clearSession(current, null);
+  assert.deepEqual(
+    store
+      .historyMessages(current, {
+        fromSeq: before,
+        throughSeq: latest,
+        limit: 10,
+      })
+      .map(({ text }) => text),
+    ['destination-before-private'],
+  );
+});
+
+test('migrates an open fixBD window and hides legacy messages and cached quotes when it closes', async (t) => {
+  const temp = await mkdtemp(join(tmpdir(), 'tsugimori-store-incognito-'));
+  t.after(() => rm(temp, { recursive: true, force: true }));
+  const path = join(temp, 'store.db');
+  const migrations = fileURLToPath(new URL('../drizzle/', import.meta.url));
+  const legacyMigrations = join(temp, 'drizzle');
+  await mkdir(legacyMigrations);
+  for (const folder of (await readdir(migrations)).sort()) {
+    if (folder.endsWith('_message_incognito')) break;
+    await symlink(
+      join(migrations, folder),
+      join(legacyMigrations, folder),
+      'dir',
+    );
+  }
+  const legacy = new DatabaseSync(path);
+  try {
+    migrate(drizzle({ client: legacy }), {
+      migrationsFolder: legacyMigrations,
+    });
+    legacy.exec(`
+      INSERT INTO chats (adapter_id, chat_id, kind, private_since)
+      VALUES ('a', 'c', 'dm', 2), ('a', 'other', 'dm', NULL);
+      INSERT INTO messages (seq, adapter_id, chat_id, message_id, direction, text)
+      VALUES (1, 'a', 'c', 'before', 'inbound', 'Before'),
+             (2, 'a', 'c', 'start', 'inbound', '/newprivate'),
+             (3, 'a', 'c', 'answer', 'outbound', 'Hidden answer'),
+             (4, 'a', 'other', 'other', 'inbound', 'Unrelated chat');
+      INSERT INTO chat_summaries (adapter_id, chat_id, revision, text, through_seq)
+      VALUES ('a', 'c', 1, 'Hidden summary', 3);
+    `);
+  } finally {
+    legacy.close();
+  }
+
+  const store = new SqliteStore(path);
+  t.after(() => store.close());
+  const chat = { adapterId: 'a', chatId: 'c' };
+  assert.equal(store.getChat(chat)?.incognitoId, 2);
+  assert.equal(store.getMessage(chat, 'before')?.incognitoId, null);
+  assert.equal(store.getMessage(chat, 'start')?.incognitoId, 2);
+  assert.equal(store.getMessage(chat, 'answer')?.incognitoId, 2);
+  assert.equal(
+    store.getMessage({ ...chat, chatId: 'other' }, 'other')?.incognitoId,
+    null,
+  );
+  assert.ok(store.messageVisible(chat, 'answer', ''));
+  assert.equal(store.messageVisible(chat, 'before', ''), false);
+  store.clearSession(chat, null);
+  assert.equal(store.getSummary(chat)?.text, '');
+  assert.equal(store.getSummaryVersion(chat, 1), undefined);
+
+  const user = { adapterId: 'a', userId: 'owner', display: null };
+  store.recordInbound({ ...chat, kind: 'dm', title: null }, user, {
+    ...chat,
+    messageId: 'reply',
+    direction: 'inbound',
+    userId: user.userId,
+    text: 'Public reply',
+    threadId: null,
+    replyTo: 'answer',
+    raw: { quote: 'Hidden answer' },
+    metadata: {
+      replyTo: {
+        id: 'answer',
+        text: 'Hidden answer',
+        attachments: [{ kind: 'sticker', index: 0, fileId: 'hidden-file' }],
+      },
+    },
+  });
+  assert.equal(store.quotedAttachmentMessage(chat, 'answer', ''), undefined);
+  const throughSeq = store.getMessage(chat, 'reply')!.seq;
+  for (const rows of [
+    store.recentMessages(chat, { throughSeq }),
+    store.summaryMessages(chat, 0, throughSeq, 10),
+    store.historyMessages(chat, { fromSeq: 1, throughSeq, limit: 10 }),
+  ]) {
+    assert.deepEqual(
+      rows.map(({ text }) => text),
+      ['Before', 'Public reply'],
+    );
+    assert.deepEqual(rows[1]?.metadata?.replyTo, { id: 'answer' });
+    assert.doesNotMatch(JSON.stringify(rows), /Hidden answer|hidden-file/);
+  }
+  assert.ok(
+    store.listChatMessages(chat).some(({ text }) => text === 'Hidden answer'),
   );
 });
 

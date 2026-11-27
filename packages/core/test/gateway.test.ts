@@ -757,10 +757,59 @@ test('/ask uses fresh-session context without forking or replacing the main sess
   );
 });
 
-test('/newprivate limits context and tools across turns, model changes, compaction, and restart', async (t) => {
+test('/incognito limits context and tools across turns, model changes, compaction, and restart', async (t) => {
   const requests: AgentRequest[] = [];
   const compacted: string[] = [];
   const downloads: (string | undefined)[] = [];
+  let checkedReaders: Promise<void> | undefined;
+  const verifyReaders = async (request: AgentRequest) => {
+    const search = request.tools.find(({ name }) => name === 'history.search');
+    const read = request.tools.find(({ name }) => name === 'history.read');
+    const get = request.tools.find(({ name }) => name === 'attachment.get');
+    assert.ok(search && read && get);
+    assert.deepEqual(
+      (
+        (await search.run({ query: 'incognito-only' })) as {
+          messages: unknown[];
+        }
+      ).messages,
+      [],
+    );
+    const range = (await read.run({
+      seq: hiddenSeq,
+      throughSeq: Number.MAX_SAFE_INTEGER,
+    })) as { messages: { id: string; replyTo?: unknown }[] };
+    assert.deepEqual(
+      range.messages.find(({ id }) => id === 'regular')?.replyTo,
+      {
+        id: 'private-first',
+        attachments: [],
+        sender: undefined,
+        text: undefined,
+        quote: undefined,
+      },
+    );
+    assert.doesNotMatch(
+      JSON.stringify(range),
+      /incognito-only|private\.pdf|private-sticker/i,
+    );
+    for (const messageId of [
+      'private-first',
+      'private-sticker',
+      'outbound-sticker',
+      hiddenReplyId,
+    ])
+      await assert.rejects(
+        get.run({ messageId, index: 0 }),
+        /Attachment not found/,
+      );
+    // The first private turn shared an album with a public message.
+    await assert.rejects(
+      get.run({ messageId: 'previous', index: 1 }),
+      /Attachment not found/,
+    );
+    await get.run({ messageId: 'previous', index: 0 });
+  };
   const f = await fixture(
     t,
     async function* (request) {
@@ -777,12 +826,27 @@ test('/newprivate limits context and tools across turns, model changes, compacti
           /Attachment not found/,
         );
         await get.run({ messageId: 'private-first', index: 1 });
+        const sticker = request.tools.find(
+          ({ name }) => name === 'send.sticker',
+        );
+        assert.ok(sticker);
+        await sticker.run({ fileId: 'sent-incognito-sticker' });
+      }
+      if (request.context.at(-1)?.content === 'Ordinary turn') {
+        checkedReaders = verifyReaders(request);
+        await checkedReaders;
       }
       yield {
         type: 'sessionId',
         sessionId: request.resumeSessionId ?? `session-${requests.length}`,
       };
-      yield { type: 'text.final', text: 'Ready' };
+      yield {
+        type: 'text.final',
+        text:
+          request.context.at(-1)?.content === 'First private turn'
+            ? 'Incognito-only agent answer'
+            : 'Ready',
+      };
     },
     true,
     {
@@ -799,6 +863,10 @@ test('/newprivate limits context and tools across turns, model changes, compacti
     },
   );
   const { gateway, platform, store, trace } = f;
+  platform.platform.capabilities.stickers = true;
+  platform.platform.sendSticker = async () => ({
+    messageId: 'outbound-sticker',
+  });
   const oldAttachment = {
     kind: 'file',
     index: 0,
@@ -812,6 +880,10 @@ test('/newprivate limits context and tools across turns, model changes, compacti
     }),
   );
   await gateway.idle();
+  const ordinarySession = store.getSession(chat, 'test');
+  await platform.emit(inbound('already-off', '/incognito off'));
+  assert.equal(platform.sent.at(-1)?.text, 'Incognito off.');
+  assert.deepEqual(store.getSession(chat, 'test'), ordinarySession);
   assert.ok(
     store.saveSummary({
       ...store.beginSummary(chat),
@@ -821,16 +893,21 @@ test('/newprivate limits context and tools across turns, model changes, compacti
   );
 
   await platform.emit(
-    inbound('private-start', '/newprivate Discarded argument'),
+    inbound('private-start', '/incognito Discarded argument'),
   );
   assert.equal(requests.length, 1);
   assert.equal(store.getSession(chat, 'test'), undefined);
   const start = store.getMessage(chat, 'private-start')!.seq;
-  assert.equal(store.getChat(chat)?.privateSince, start);
-  assert.equal(store.getMessage(chat, 'private-start')?.text, '/newprivate');
-  assert.match(
-    platform.sent.at(-1)?.text ?? '',
-    /private conversation.*until \/new/i,
+  assert.equal(store.getChat(chat)?.incognitoId, start);
+  assert.equal(store.getMessage(chat, 'private-start')?.text, '/incognito');
+  assert.equal(
+    platform.sent.at(-1)?.text,
+    "Incognito on: I can't see earlier messages, and what's said from now on won't be visible to me after `/incognito off` or `/new`.",
+  );
+  assert.equal(store.getMessage(chat, 'private-start')?.incognitoId, start);
+  assert.equal(
+    store.getMessage(chat, platform.sent.at(-1)!.messageId)?.incognitoId,
+    start,
   );
   await platform.emit(
     inbound('private-first', 'First private turn', {
@@ -846,6 +923,19 @@ test('/newprivate limits context and tools across turns, model changes, compacti
     }),
   );
   await gateway.idle();
+  const hiddenSeq = store.getMessage(chat, 'private-first')!.seq;
+  const hiddenReplyId = platform.sent.at(-1)!.messageId;
+  assert.equal(store.getMessage(chat, 'private-first')?.incognitoId, start);
+  assert.equal(store.getMessage(chat, hiddenReplyId)?.incognitoId, start);
+  assert.equal(store.getMessage(chat, 'outbound-sticker')?.incognitoId, start);
+  assert.equal(
+    store.saveSummary({
+      ...store.getSummary(chat)!,
+      throughSeq: hiddenSeq,
+      text: 'Incognito-only summary',
+    }),
+    false,
+  );
   const first = requests[1]!;
   assert.deepEqual(downloads, ['private-file']);
   assert.equal(first.resumeSessionId, undefined);
@@ -855,7 +945,13 @@ test('/newprivate limits context and tools across turns, model changes, compacti
       .map(({ content }) => content),
     ['First private turn'],
   );
-  assert.equal(first.context.at(-1)?.message?.replyTo, undefined);
+  assert.deepEqual(first.context.at(-1)?.message?.replyTo, {
+    id: 'previous',
+    attachments: [],
+    sender: undefined,
+    text: undefined,
+    quote: undefined,
+  });
   assert.deepEqual(
     first.context
       .at(-1)
@@ -897,12 +993,19 @@ test('/newprivate limits context and tools across turns, model changes, compacti
       /Old conversation|Old quote|old-attachment|Discarded argument/,
     );
     assert.ok(request.tools.some(({ name }) => name === 'attachment.get'));
-    assert.ok(request.tools.every(({ name }) => !name.startsWith('history.')));
+    assert.ok(
+      request.tools.every(
+        ({ name }) =>
+          !['memory.propose', 'schedule.create', 'schedule.update'].includes(
+            name,
+          ) && !name.startsWith('history.'),
+      ),
+    );
   }
   assert.deepEqual(
     trace.recent
       .filter(({ name }) => name === 'agent.run')
-      .map(({ attrs }) => [attrs.sessionMode, attrs.private]),
+      .map(({ attrs }) => [attrs.sessionMode, attrs.incognito]),
     [
       ['new', undefined],
       ['new', true],
@@ -914,20 +1017,20 @@ test('/newprivate limits context and tools across turns, model changes, compacti
   await platform.emit(inbound('context', '/context'));
   assert.match(
     platform.sent.at(-1)?.text ?? '',
-    new RegExp(`^Private conversation since message #${start}`),
+    new RegExp(`^Incognito on since message #${start}`),
   );
   await platform.emit(inbound('status', '/status'));
   assert.match(
     platform.sent.at(-1)?.text ?? '',
-    new RegExp(`Private conversation since message #${start}`),
+    new RegExp(`Incognito on since message #${start}`),
   );
   await platform.emit(inbound('compact', '/compact'));
   await gateway.idle();
   assert.deepEqual(compacted, ['session-2']);
-  assert.equal(store.getChat(chat)?.privateSince, start);
+  assert.equal(store.getChat(chat)?.incognitoId, start);
   await platform.emit(inbound('model', '/model second'));
   assert.equal(store.getSession(chat, 'test'), undefined);
-  assert.equal(store.getChat(chat)?.privateSince, start);
+  assert.equal(store.getChat(chat)?.incognitoId, start);
 
   await gateway.stop();
   const reopened = new SqliteStore(f.dbPath);
@@ -939,7 +1042,7 @@ test('/newprivate limits context and tools across turns, model changes, compacti
   });
   try {
     await restarted.start();
-    assert.equal(reopened.getChat(chat)?.privateSince, start);
+    assert.equal(reopened.getChat(chat)?.incognitoId, start);
     await platform.emit(inbound('after-restart', 'Turn after restart'));
     await restarted.idle();
     const afterRestart = requests.at(-1)!;
@@ -963,13 +1066,52 @@ test('/newprivate limits context and tools across turns, model changes, compacti
       afterRestart.tools.every(({ name }) => !name.startsWith('history.')),
     );
 
-    await platform.emit(inbound('private-restart', '/newprivate'));
+    const session = reopened.getSession(chat, 'test');
+    assert.ok(session);
+    await platform.emit(inbound('already-on', '/incognito on'));
+    assert.equal(platform.sent.at(-1)?.text, 'Incognito on.');
+    assert.deepEqual(reopened.getSession(chat, 'test'), session);
+    assert.equal(reopened.getChat(chat)?.incognitoId, start);
+
+    const sticker = {
+      kind: 'sticker',
+      index: 0,
+      fileId: 'private-sticker-file',
+      name: 'private-sticker.webp',
+    } as const;
+    await platform.emit(
+      inbound('private-sticker', 'Incognito-only sticker', {
+        attachments: [sticker],
+        chatKind: 'group',
+        userId: 'bystander',
+      }),
+    );
+    await platform.emit(inbound('end-toggle', '/incognito'));
+    assert.equal(platform.sent.at(-1)?.text, 'Incognito off.');
+    assert.equal(reopened.getChat(chat)?.incognitoId, null);
+    assert.equal(reopened.getMessage(chat, 'end-toggle')?.incognitoId, start);
+    assert.equal(reopened.getSession(chat, 'test'), undefined);
+    await platform.emit(
+      inbound('private-first', 'Incognito-only edit', { edited: true }),
+    );
     assert.equal(
-      reopened.getChat(chat)?.privateSince,
+      reopened.getMessage(chat, 'private-first')?.incognitoId,
+      start,
+    );
+
+    await platform.emit(inbound('private-restart', '/incognito on'));
+    assert.equal(
+      reopened.getChat(chat)?.incognitoId,
       reopened.getMessage(chat, 'private-restart')?.seq,
     );
     await platform.emit(
-      inbound('private-restart-turn', 'First turn after private restart'),
+      inbound('private-restart-turn', 'First turn in the next window', {
+        replyTo: {
+          id: 'private-sticker',
+          text: 'Incognito-only sticker',
+          attachments: [sticker],
+        },
+      }),
     );
     await restarted.idle();
     assert.deepEqual(
@@ -977,15 +1119,62 @@ test('/newprivate limits context and tools across turns, model changes, compacti
         .at(-1)
         ?.context.filter(({ source }) => source === 'message')
         .map(({ content }) => content),
-      ['First turn after private restart'],
+      ['First turn in the next window'],
+    );
+    assert.doesNotMatch(
+      JSON.stringify(requests.at(-1)?.context),
+      /Incognito-only|private-sticker\.webp/i,
     );
 
     const count = requests.length;
     await platform.emit(inbound('end-private', '/new clean'));
-    assert.equal(reopened.getChat(chat)?.privateSince, null);
+    assert.equal(reopened.getChat(chat)?.incognitoId, null);
+    assert.equal(platform.sent.at(-1)?.text, 'Incognito off.');
+    assert.equal(reopened.getSession(chat, 'test'), undefined);
     assert.equal(requests.length, count);
-    await platform.emit(inbound('regular', 'Ordinary turn'));
+    await platform.emit(
+      inbound('outbound-sticker-quote', 'Public sticker reference', {
+        chatKind: 'group',
+        userId: 'bystander',
+        replyTo: { id: 'outbound-sticker', attachments: [sticker] },
+      }),
+    );
+    await platform.emit(
+      inbound('regular', 'Ordinary turn', {
+        replyTo: {
+          id: 'private-first',
+          text: 'First private turn',
+          quote: 'Incognito-only quote',
+          attachments: [{ ...oldAttachment, name: 'private.pdf' }],
+        },
+      }),
+    );
     await restarted.idle();
+    assert.ok(checkedReaders);
+    await checkedReaders;
+    assert.equal(requests.at(-1)?.resumeSessionId, undefined);
+    assert.doesNotMatch(
+      JSON.stringify(requests.at(-1)?.context),
+      /Incognito-only|First private turn|Second private turn|First turn in the next window|private\.pdf|private-sticker\.webp/i,
+    );
+    assert.equal(
+      requests.at(-1)?.context.at(-1)?.message?.replyTo?.id,
+      'private-first',
+    );
+    const summaryInput = reopened.summaryMessages(
+      chat,
+      0,
+      Number.MAX_SAFE_INTEGER,
+      50,
+    );
+    assert.ok(summaryInput.some(({ text }) => text === 'Old conversation'));
+    assert.ok(summaryInput.some(({ text }) => text === 'Ordinary turn'));
+    assert.ok(summaryInput.every(({ incognitoId }) => incognitoId === null));
+    assert.ok(
+      reopened
+        .listChatMessages(chat)
+        .some(({ text }) => text === 'Incognito-only agent answer'),
+    );
     assert.ok(
       requests
         .at(-1)
@@ -1000,6 +1189,14 @@ test('/newprivate limits context and tools across turns, model changes, compacti
     assert.ok(
       requests.at(-1)?.tools.some(({ name }) => name === 'history.read'),
     );
+    await platform.emit(inbound('force-start', '/incognito on'));
+    assert.equal(
+      reopened.getChat(chat)?.incognitoId,
+      reopened.getMessage(chat, 'force-start')?.seq,
+    );
+    await platform.emit(inbound('force-end', '/incognito off'));
+    assert.equal(platform.sent.at(-1)?.text, 'Incognito off.');
+    assert.equal(reopened.getChat(chat)?.incognitoId, null);
   } finally {
     await restarted.stop();
     reopened.close();
@@ -1153,7 +1350,7 @@ test('/context shows usage and sizes for the current session in plain text', asy
   await platform.emit(inbound('empty', '/context'));
   assert.equal(
     platform.sent.at(-1)?.text,
-    'There is no active agent session in this chat.',
+    'Incognito off\nThere is no active agent session in this chat.',
   );
   await platform.emit(inbound('first', 'private first prompt'));
   await gateway.idle();
@@ -1177,6 +1374,7 @@ test('/context shows usage and sizes for the current session in plain text', asy
   const { context, tools } = requests[1]!;
   const format = new Intl.NumberFormat('en');
   assert.deepEqual(platform.sent.at(-1)?.text?.split('\n'), [
+    'Incognito off',
     'Session: resume · 2 tasks',
     'Tokens: 1,200 context · 1,100 input · 100,000 model window',
     `Context blocks: ${context.length} · ${context.reduce((sum, block) => sum + block.content.length, 0)} chars`,
@@ -1191,7 +1389,7 @@ test('/context shows usage and sizes for the current session in plain text', asy
     platform.sent.at(-1)?.text ?? '',
     /^\/new · Start a new conversation$/m,
   );
-  assert.match(platform.sent.at(-1)?.text ?? '', /^\/newprivate · /m);
+  assert.match(platform.sent.at(-1)?.text ?? '', /^\/incognito · /m);
   assert.match(platform.sent.at(-1)?.text ?? '', /^\/ask · /m);
 });
 
@@ -1214,7 +1412,7 @@ test(
     );
     const member = { chatKind: 'group', userId: 'member' } as const;
     await platform.emit(inbound('denied-new', '/new Disallowed', member));
-    await platform.emit(inbound('denied-private', '/newprivate', member));
+    await platform.emit(inbound('denied-private', '/incognito', member));
     await platform.emit(inbound('denied-btw', '/btw', member));
     await platform.emit(inbound('denied-ask', '/ask Disallowed', member));
     assert.equal(platform.sent.length, 0);
@@ -1237,10 +1435,10 @@ test(
         platform.sent.at(-1)?.text,
         '此聊天室還有任務未完成，請等任務結束後再使用 /new。',
       );
-      await platform.emit(inbound('busy-private', '/newprivate', member));
+      await platform.emit(inbound('busy-private', '/incognito', member));
       assert.equal(
         platform.sent.at(-1)?.text,
-        '此聊天室還有任務未完成，請等任務結束後再使用 /newprivate。',
+        '無痕模式已關閉。 此聊天室還有任務未完成，請等任務結束後再使用 /incognito。',
       );
       assert.equal(store.listChatTasks(chat).length, 1);
       assert.equal(
@@ -1252,13 +1450,10 @@ test(
     }
     await gateway.idle();
     assert.equal(platform.sent.at(-1)?.replyTo, 'member-task');
-    await platform.emit(inbound('member-private', '/newprivate', member));
-    assert.match(platform.sent.at(-1)?.text ?? '', /已開始私人對話/);
+    await platform.emit(inbound('member-private', '/incognito', member));
+    assert.match(platform.sent.at(-1)?.text ?? '', /無痕模式已開啟/);
     await platform.emit(inbound('member-reset', '/new', member));
-    assert.equal(
-      platform.sent.at(-1)?.text,
-      '已開始新對話，下一則訊息會用新的 session。',
-    );
+    assert.equal(platform.sent.at(-1)?.text, '無痕模式已關閉。');
   },
 );
 
@@ -3394,7 +3589,7 @@ test(
 );
 
 test(
-  'a different DM requires linked native recipient approval and scheduled agents use the private task pipeline',
+  'a different DM requires linked native recipient approval and scheduled agents respect incognito',
   { timeout: 6000 },
   async (t) => {
     const seen: AgentRequest[] = [];
@@ -3470,9 +3665,9 @@ test(
       f.store.listSchedules(chat)[0]?.deliveryApprovedBy,
       recipient.userId,
     );
-    await f.platform.emit(inbound('private-schedule', '/newprivate'));
     await f.platform.emit(inbound('schedule-agent', 'Create agent run'));
     await f.gateway.idle();
+    await f.platform.emit(inbound('private-schedule', '/incognito'));
     await until(
       t,
       () =>
@@ -3505,7 +3700,7 @@ test(
     assert.equal(scheduled.allowTextMentions, false);
     assert.equal(seen.at(-1)?.model, 'scheduled-model');
     const request = seen.at(-1)!;
-    assert.ok(request.tools.some(({ name }) => name === 'schedule.create'));
+    assert.ok(request.tools.every(({ name }) => name !== 'schedule.create'));
     assert.ok(request.tools.every(({ name }) => !name.startsWith('history.')));
     assert.doesNotMatch(
       JSON.stringify(request.context),
@@ -3516,7 +3711,7 @@ test(
         ({ name, attrs }) =>
           name === 'agent.run' &&
           attrs.taskId === scheduledTask.id &&
-          attrs.private === true,
+          attrs.incognito === true,
       ),
     );
     assert.ok(f.trace.recent.some(({ name }) => name === 'inbound.scheduled'));

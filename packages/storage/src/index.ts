@@ -23,10 +23,10 @@ import type {
 export interface ChatRecord extends ChatRef {
   agentId: string | null;
   allowlisted: boolean;
+  incognitoId: number | null;
   kind: 'dm' | 'group' | 'supergroup';
   migratedToChatId: string | null;
   model: string | null;
-  privateSince: number | null;
   serviceTier: string | null;
   sessionAgentId?: string | null;
   thinking: string | null;
@@ -56,6 +56,7 @@ export interface MessageRecord extends ChatRef {
   deleted: boolean;
   direction: 'inbound' | 'outbound';
   displayName?: string | null;
+  incognitoId?: number | null;
   messageId: string;
   metadata?: MessageMetadata | null;
   migratedFromChatId: string;
@@ -68,6 +69,8 @@ export interface MessageRecord extends ChatRef {
   threadId: string | null;
   userId: string | null;
 }
+
+export type AlbumMessage = MessageRecord & { attachmentOffset: number };
 
 export type HistoryQuery = { limit: number } & (
   | { fromSeq: number; throughSeq: number }
@@ -430,7 +433,7 @@ export interface Store {
   ): boolean;
   claimSetupRun(run: SetupRun, now: number): SetupRun | undefined;
   clearAgentSessions(agentId: string): void;
-  clearSession(ref: ChatRef, privateSince?: number | null): void;
+  clearSession(ref: ChatRef, incognitoId?: number | null): void;
   clearUnavailableCommandScopes(ref: CommandScopeChat): void;
   close(): void;
   closePreview(
@@ -506,6 +509,7 @@ export interface Store {
     name: string,
     uniqueId: string,
   ): Pick<IndexedSticker, 'description' | 'emoji'> | undefined;
+  /** Unfiltered lookup for administration and message bookkeeping. */
   getMessage(
     ref: ChatRef,
     messageId: string,
@@ -588,8 +592,14 @@ export interface Store {
     ref: ChatRef,
     albumId: string,
     migratedFromChatId: string,
-  ): MessageRecord[];
+  ): AlbumMessage[];
   messageRaw(ref: ChatRef, seq: number): unknown;
+  /** Unknown targets can use platform-supplied reply data only outside incognito. */
+  messageVisible(
+    ref: ChatRef,
+    messageId: string,
+    migratedFromChatId: string,
+  ): boolean;
   migrateChat(ref: ChatRef, newChatId: string, title?: string): boolean;
   openPreview(preview: StoredPreview): void;
   pruneRecords(
@@ -608,7 +618,6 @@ export interface Store {
       afterSummarySeq?: number;
       includeRaw?: boolean;
       limit?: number;
-      privateSince?: number;
       skipSeq?: readonly number[];
       throughSeq: number;
     },

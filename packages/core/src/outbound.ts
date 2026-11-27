@@ -140,10 +140,12 @@ export class Outbound {
     attrs: Parameters<Tracer['span']>[1],
     {
       completedTaskId,
+      incognitoId,
       sessionBoundary,
       sideQuestion,
     }: {
       completedTaskId?: string;
+      incognitoId?: number;
       sessionBoundary?: boolean;
       sideQuestion?: boolean;
     } = {},
@@ -157,6 +159,7 @@ export class Outbound {
           {
             adapterId,
             chatId: conversationId(address),
+            incognitoId,
             messageId: part.messageId,
             direction: 'outbound',
             userId: null,
@@ -181,11 +184,14 @@ export class Outbound {
     taskId: string,
     run: (address: MediaDestination) => Promise<MediaReceipt>,
     onDelivery: (ids: readonly string[], error?: unknown) => void,
-    sideQuestion?: boolean,
+    options: { incognitoId?: number; sideQuestion?: boolean } = {},
   ) {
-    const { hooks, trace } = this.#deps;
+    const { hooks, store, trace } = this.#deps;
     message = this.#address(adapter, message);
     const chat = { adapterId: adapter.id, chatId: conversationId(message) };
+    const incognitoId =
+      options.incognitoId ?? store.getChat(chat)?.incognitoId ?? undefined;
+    const recording = { incognitoId, sideQuestion: options.sideQuestion };
     const attrs = { ...chat, taskId };
     await hooks.emit('outbound.before', { chat, message });
     signal.throwIfAborted();
@@ -201,7 +207,7 @@ export class Outbound {
         error,
       );
       if (sent.length)
-        this.#recordParts(adapter.id, message, sent, attrs, { sideQuestion });
+        this.#recordParts(adapter.id, message, sent, attrs, recording);
       if (error instanceof SendFailure && error.cause instanceof Error)
         throw new ToolFailure(
           error.deliveryUnknown
@@ -215,7 +221,7 @@ export class Outbound {
       ? receipt.parts
       : [{ ...receipt, text: message.text }];
     onDelivery(parts.map(({ messageId }) => messageId));
-    this.#recordParts(adapter.id, message, parts, attrs, { sideQuestion });
+    this.#recordParts(adapter.id, message, parts, attrs, recording);
     const delivered = parts[0]!.chatId;
     if (delivered !== undefined)
       message = {
@@ -239,6 +245,7 @@ export class Outbound {
     adapter: PlatformAdapter,
     message: OutboundMessage,
     options: {
+      incognitoId?: number;
       media?: readonly QueuedMedia[];
       onDelivery?(messageIds: readonly string[], error?: unknown): void;
       onParts?(parts: readonly SendPart[], error?: unknown): void;
@@ -256,6 +263,13 @@ export class Outbound {
     const chat: ChatRef = {
       adapterId: adapter.id,
       chatId: conversationId(message),
+    };
+    const incognitoId =
+      options.incognitoId ?? store.getChat(chat)?.incognitoId ?? undefined;
+    const recording = {
+      incognitoId,
+      sessionBoundary: options.sessionBoundary,
+      sideQuestion: options.sideQuestion,
     };
     const push = adapter.capabilities.outboundPush ?? 'free';
     const metered =
@@ -288,10 +302,7 @@ export class Outbound {
         );
         options.onParts?.(sent, error);
         if (sent.length)
-          this.#recordParts(adapter.id, message, sent, attrs, {
-            sessionBoundary: options.sessionBoundary,
-            sideQuestion: options.sideQuestion,
-          });
+          this.#recordParts(adapter.id, message, sent, attrs, recording);
         throw error;
       }
       const parts = receipt.parts?.length
@@ -301,8 +312,7 @@ export class Outbound {
       options.onParts?.(parts);
       this.#recordParts(adapter.id, message, parts, attrs, {
         completedTaskId: taskId,
-        sessionBoundary: options.sessionBoundary,
-        sideQuestion: options.sideQuestion,
+        ...recording,
       });
       options.onReceipt?.(receipt);
     } catch (error) {

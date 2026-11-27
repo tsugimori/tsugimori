@@ -222,10 +222,10 @@ test(
         'deny',
         'fast',
         'help',
+        'incognito',
         'login',
         'model',
         'new',
-        'newprivate',
         'pair',
         'preview',
         'previews',
@@ -314,7 +314,7 @@ test(
       set(
         allowlistedScope,
         ownerCommands.filter(({ command }) =>
-          ['ask', 'btw', 'context', 'new', 'newprivate'].includes(command),
+          ['ask', 'btw', 'context', 'new', 'incognito'].includes(command),
         ),
       ),
     ]);

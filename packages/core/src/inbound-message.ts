@@ -34,6 +34,7 @@ export function resolveReplyTarget(
   if (
     quoted?.deleted ||
     quoted?.metadata?.sideQuestion ||
+    !store.messageVisible(chat, reply.id, migratedFromChatId) ||
     store.isSetupSecret(chat, reply.id) ||
     (reply.text !== undefined &&
       redactPairingCodes(reply.text) !== reply.text) ||

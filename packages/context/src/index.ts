@@ -9,17 +9,12 @@ import { constants } from 'node:fs';
 import { mkdir, open, readdir, realpath } from 'node:fs/promises';
 import { join } from 'node:path';
 
-import {
-  messageAlbumLookup,
-  messageContext,
-  privateReplyVisible,
-} from './message.ts';
+import { messageAlbumLookup, messageContext } from './message.ts';
 
 export {
   albumAttachments,
   messageAlbumLookup,
   messageContext,
-  privateReplyVisible,
 } from './message.ts';
 
 export interface SummaryProvider {
@@ -43,9 +38,9 @@ const noSummary: SummaryProvider = {
 export interface ContextRequest extends ChatRef {
   afterSeq?: number;
   history?: 'none';
+  incognitoId?: number;
   kind: string;
   ownerId?: string;
-  privateSince?: number;
   recentMessages: number;
   richText?: boolean;
   skipSeq?: readonly number[];
@@ -53,8 +48,7 @@ export interface ContextRequest extends ChatRef {
 }
 
 interface ContextDependencies {
-  store: Pick<Store, 'recentMessages'> &
-    Partial<Pick<Store, 'getMessage' | 'messageAlbum'>>;
+  store: Pick<Store, 'recentMessages'> & Partial<Pick<Store, 'messageAlbum'>>;
   summary?: SummaryProvider;
   workspace: string;
 }
@@ -174,14 +168,14 @@ export class ContextAssembler {
 
   async assembleWithRefs(request: ContextRequest) {
     const entries: AssembledEntry[] = [];
-    const { privateSince } = request;
+    const { incognitoId } = request;
     let afterSummarySeq: number | undefined;
     if (request.afterSeq === undefined) {
       entries.push({
         kind: 'system',
-        name: privateSince === undefined ? 'guidelines' : 'private-guidelines',
+        name: incognitoId === undefined ? 'guidelines' : 'private-guidelines',
         block:
-          privateSince === undefined ? guidelineBlock : privateGuidelineBlock,
+          incognitoId === undefined ? guidelineBlock : privateGuidelineBlock,
       });
     }
     if (request.kind === 'telegram') {
@@ -193,7 +187,7 @@ export class ContextAssembler {
     if (request.afterSeq === undefined) {
       entries.push(...(await this.#loadRules(request)));
       const summary =
-        request.history === 'none' || privateSince !== undefined
+        request.history === 'none' || incognitoId !== undefined
           ? undefined
           : await this.#summary.get(request);
       if (summary && summary.throughSeq < request.throughSeq) {
@@ -217,25 +211,13 @@ export class ContextAssembler {
       afterSeq:
         request.history === 'none' ? request.throughSeq - 1 : request.afterSeq,
       afterSummarySeq,
-      privateSince,
       skipSeq: request.skipSeq,
       includeRaw: false,
     });
     const album = this.#store.messageAlbum
-      ? messageAlbumLookup(this.#store, request, privateSince)
+      ? messageAlbumLookup(this.#store, request)
       : undefined;
     for (const message of messages) {
-      const replyId = message.metadata?.replyTo?.id ?? message.replyTo;
-      const hideReply =
-        privateSince !== undefined &&
-        replyId &&
-        !privateReplyVisible(
-          this.#store,
-          request,
-          replyId,
-          message.migratedFromChatId,
-          privateSince,
-        );
       entries.push({
         kind: message.seq === request.throughSeq ? 'new' : 'history',
         seq: message.seq,
@@ -248,13 +230,7 @@ export class ContextAssembler {
               : 'member',
           content: message.text,
           message: messageContext(
-            hideReply
-              ? {
-                  ...message,
-                  replyTo: null,
-                  metadata: { ...message.metadata, replyTo: undefined },
-                }
-              : message,
+            message,
             album,
             message.seq === request.throughSeq,
           ),

@@ -61,6 +61,7 @@ interface Dependencies {
 
 interface Round {
   address: MediaDestination;
+  incognitoId?: number;
   onDelivery(ids: readonly string[], error?: unknown): void;
   onQueued(handle: QueuedMedia, task: ToolContext): void;
   sideQuestion?: boolean;
@@ -83,7 +84,8 @@ export function sendTools(
     text: string,
     run: Parameters<Outbound['sendMedia']>[4],
   ) => {
-    const { address, onDelivery, onQueued, sideQuestion } = current();
+    const { address, incognitoId, onDelivery, onQueued, sideQuestion } =
+      current();
     const result = await deps.outbound.sendMedia(
       adapter,
       { ...address, text },
@@ -91,7 +93,7 @@ export function sendTools(
       task.taskId,
       run,
       onDelivery,
-      sideQuestion,
+      { incognitoId, sideQuestion },
     );
     if ('queued' in result) {
       onQueued(result, task);
@@ -118,11 +120,9 @@ export function sendTools(
         };
         const chat = deps.store.resolveChat(task.chat);
         const target = deps.store.getMessage(chat, messageId, '');
-        const privateSince = deps.store.getChat(chat)?.privateSince;
         if (
           !target ||
-          target.deleted ||
-          (privateSince != null && target.seq <= privateSince) ||
+          !deps.store.messageVisible(chat, messageId, '') ||
           target.threadId !== (address.threadId ?? null) ||
           deps.store.resolveChat({
             adapterId: adapter.id,

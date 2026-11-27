@@ -280,7 +280,7 @@ export class Gateway {
       onMigration: (adapter, chatId, newChatId) => {
         this.#tasks.migrateChat(adapter.id, chatId, newChatId);
         const destination = { adapterId: adapter.id, chatId: newChatId };
-        if (store.getChat(destination)?.privateSince != null)
+        if (store.getChat(destination)?.incognitoId != null)
           this.#summaries.cancelChat(destination);
         this.#restoreApprovalPrompts([adapter]);
       },
@@ -1078,7 +1078,11 @@ export class Gateway {
     const privateCommand = command && hasPrivateArguments(command.name);
     const redactedText = redactPairingCodes(event.text);
     const sideQuestion = command?.name === 'btw' || command?.name === 'ask';
-    const reset = command?.name === 'new' || command?.name === 'newprivate';
+    const reset = command?.name === 'new' || command?.name === 'incognito';
+    const incognitoSetting =
+      command?.name === 'incognito' && ['on', 'off'].includes(command.args)
+        ? ` ${command.args}`
+        : '';
     const privateRaw = privateCommand || reset || redactedText !== event.text;
     const replyId = event.replyTo?.id;
     const { replyTo, sensitiveReply } = resolveReplyTarget(
@@ -1113,7 +1117,7 @@ export class Gateway {
           },
           threadId: event.threadId ?? null,
           text: reset
-            ? `/${command.name}`
+            ? `/${command.name}${incognitoSetting}`
             : privateCommand && command?.args
               ? `/${command.name} [redacted]`
               : redactedText ||
@@ -1146,7 +1150,36 @@ export class Gateway {
       raw: privateRaw || sensitiveReply ? undefined : event.raw,
       text: stored.text,
     };
-    await this.#hooks.emit('inbound.received', { chat, message });
+    const received = this.#hooks.emit('inbound.received', { chat, message });
+    if (reset && !this.#isStopping()) {
+      await this.#trace.span(
+        'trigger.command',
+        { ...chat, command: command.name },
+        async () => {
+          try {
+            // Apply the transition at the command's position in the message log.
+            const response = this.#resetConversation(
+              adapter,
+              chat,
+              message,
+              stored.seq,
+              command,
+            );
+            await received;
+            if (response)
+              await this.#outbound.send(
+                adapter,
+                reply(message, response.text),
+                response,
+              );
+          } finally {
+            recordDecision('command', true, stored.seq);
+          }
+        },
+      );
+      return;
+    }
+    await received;
     if (this.#isStopping() || parsed === 'other-bot') {
       recordDecision(
         parsed === 'other-bot' ? 'addressed-to-other' : 'not-addressed',
@@ -1222,12 +1255,9 @@ export class Gateway {
 
     let priorAlbumItem = false;
     if (event.albumId && event.chatKind === 'dm') {
-      const privateSince = store.getChat(chat)?.privateSince;
       priorAlbumItem =
-        store
-          .messageAlbum(chat, event.albumId, migratedFrom ?? '')
-          .find(({ seq }) => privateSince == null || seq > privateSince)
-          ?.seq !== stored.seq;
+        store.messageAlbum(chat, event.albumId, migratedFrom ?? '')[0]?.seq !==
+        stored.seq;
     }
     const { triggered, reason } = priorAlbumItem
       ? { triggered: false, reason: 'not-addressed' as const }
@@ -1456,7 +1486,11 @@ export class Gateway {
           );
           if (failure) return failure;
           const source = store.getTask(approval.taskId);
-          if (source && this.#canCompleteApproval(source, approval.requester))
+          if (
+            source &&
+            this.#canCompleteApproval(source, approval.requester) &&
+            this.#canWriteChatKnowledge(source)
+          )
             return this.#runtime.config.scheduler?.maxActivePerUser ?? 20;
         }),
     );
@@ -1496,7 +1530,8 @@ export class Gateway {
     if (
       !source ||
       decidedBy === null ||
-      !this.#canCompleteApproval(source, requester)
+      !this.#canCompleteApproval(source, requester) ||
+      !this.#canWriteChatKnowledge(source)
     )
       return { error: 'The requesting conversation is no longer authorized' };
     try {
@@ -1570,6 +1605,19 @@ export class Gateway {
       Boolean(this.#deps.store.getChat(chat)) &&
       (this.#auth.isAllowlisted(chat) ||
         this.#auth.isOwner({ ...chat, userId: requester }))
+    );
+  }
+
+  #canWriteChatKnowledge(source: TaskRecord) {
+    const { store } = this.#deps;
+    const chat = store.resolveChat(source);
+    return (
+      store.getMessage(
+        chat,
+        source.sourceMessageId,
+        source.sourceChatId ?? '',
+        false,
+      )?.incognitoId == null
     );
   }
 
@@ -1880,6 +1928,43 @@ export class Gateway {
       }))
     )
       await send(pairing.sendFailed(id));
+  }
+
+  #resetConversation(
+    adapter: PlatformAdapter,
+    chat: ChatRef,
+    message: InboundMessage,
+    seq: number,
+    { name, args }: Command,
+  ) {
+    const { store } = this.#deps;
+    chat = store.resolveChat(chat);
+    if (
+      this.#removingPlatform(adapter.id) ||
+      this.#removingAgentRoute(chat) ||
+      (!this.#auth.isOwner({ adapterId: adapter.id, userId: message.userId }) &&
+        !this.#auth.isAllowlisted(chat))
+    )
+      return;
+    const m = systemMessages(this.#runtime.config.locale);
+    const incognitoId = store.getChat(chat)?.incognitoId ?? undefined;
+    const active = incognitoId !== undefined;
+    const state = active ? m.incognitoEnabled : m.incognitoOff;
+    const desired =
+      name === 'incognito' && (args === 'on' || (args !== 'off' && !active));
+    if (name === 'incognito' && active === desired)
+      return { incognitoId, text: state };
+    if (!this.#tasks.resetSession(chat, desired ? seq : null)) {
+      const busy = m.newBusy(name);
+      return {
+        incognitoId,
+        text: name === 'incognito' || active ? `${state} ${busy}` : busy,
+      };
+    }
+    if (active || desired) this.#summaries.cancelChat(chat);
+    return desired
+      ? { incognitoId: seq, sessionBoundary: true, text: m.incognitoOn }
+      : { text: active ? m.incognitoOff : m.newSuccess };
   }
 
   async #command(
@@ -2327,28 +2412,10 @@ export class Gateway {
               { store, trace: this.#trace },
               this.#tasks.status(chat).sessionScope,
               locale,
-              store.getChat(store.resolveChat(chat))?.privateSince ?? undefined,
+              store.getChat(store.resolveChat(chat))?.incognitoId ?? null,
             ),
           );
         }
-        break;
-      case 'new':
-      case 'newprivate':
-        if (
-          this.#removingPlatform(adapter.id) ||
-          this.#removingAgentRoute(chat)
-        )
-          break;
-        if (!this.#tasks.resetSession(chat, name === 'newprivate' ? seq : null))
-          await send(m.newBusy(name));
-        else if (name === 'newprivate') {
-          this.#summaries.cancelChat(store.resolveChat(chat));
-          await this.#outbound.send(
-            adapter,
-            reply(message, m.newPrivateSuccess),
-            { sessionBoundary: true },
-          );
-        } else await send(m.newSuccess);
         break;
       case 'ask':
       case 'btw': {

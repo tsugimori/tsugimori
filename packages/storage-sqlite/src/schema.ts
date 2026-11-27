@@ -61,7 +61,7 @@ export const chats = sqliteTable(
     thinking: text('thinking'),
     sessionAgentId: text('session_agent_id'),
     sessionModel: text('session_model'),
-    privateSince: integer('private_since'),
+    incognitoId: integer('incognito_id'),
   },
   (table) => [primaryKey({ columns: [table.adapterId, table.chatId] })],
 );
@@ -96,6 +96,7 @@ export const messages = sqliteTable(
   {
     ...chatScope(),
     seq: integer('seq').primaryKey({ autoIncrement: true }),
+    incognitoId: integer('incognito_id'),
     messageId: text('message_id').notNull(),
     migratedFromChatId: text('migrated_from_chat_id').notNull().default(''),
     direction: text('direction').$type<MessageRecord['direction']>().notNull(),

@@ -23,6 +23,7 @@ import type {
   HistoryQuery,
   InboundRecord,
   IndexedSticker,
+  MessageRecord,
   NewMessage,
   RemovalRows,
   RemovalTarget,
@@ -187,6 +188,15 @@ function readMessage<Row extends typeof messages.$inferSelect>({
   ...row
 }: Row) {
   return { ...row, raw: rawZ === null ? row.raw : decodeRecord(rawZ) };
+}
+
+function visibleToAgent(incognitoId: number | null) {
+  return incognitoId === null
+    ? isNull(messages.incognitoId)
+    : and(
+        gte(messages.seq, incognitoId),
+        or(isNull(messages.incognitoId), eq(messages.incognitoId, incognitoId)),
+      );
 }
 
 // Children precede their parents so platform cleanup can keep foreign keys on.
@@ -1270,16 +1280,16 @@ export class SqliteStore implements Store {
       serviceTier: current?.serviceTier ?? previous?.serviceTier ?? null,
       thinking: current?.thinking ?? previous?.thinking ?? null,
     };
-    const privateSince =
-      Math.max(previous?.privateSince ?? 0, current?.privateSince ?? 0) || null;
+    const incognitoId =
+      Math.max(previous?.incognitoId ?? 0, current?.incognitoId ?? 0) || null;
     const destination = {
       ...route,
-      privateSince,
+      incognitoId,
       // A destination session might contain messages outside the merged boundary.
-      sessionAgentId: privateSince
+      sessionAgentId: incognitoId
         ? null
         : (current?.sessionAgentId ?? previous?.sessionAgentId ?? null),
-      sessionModel: privateSince
+      sessionModel: incognitoId
         ? null
         : (current?.sessionModel ?? previous?.sessionModel ?? null),
       kind: 'supergroup' as const,
@@ -1305,7 +1315,7 @@ export class SqliteStore implements Store {
         target: [chats.adapterId, chats.chatId],
         set: {
           migratedToChatId: newChatId,
-          privateSince: null,
+          incognitoId: null,
           sessionAgentId: null,
           sessionModel: null,
         },
@@ -1971,10 +1981,25 @@ export class SqliteStore implements Store {
     const latest = this.#db
       .select({
         status: approvals.status,
-        failureReason: approvals.failureReason,
+        failureReason: sql<
+          string | null
+        >`case when ${messages.incognitoId} is null then ${approvals.failureReason} end`,
       })
       .from(approvals)
       .innerJoin(tasks, eq(tasks.id, approvals.taskId))
+      .leftJoin(
+        messages,
+        and(
+          eq(messages.adapterId, tasks.adapterId),
+          eq(messages.chatId, tasks.chatId),
+          eq(messages.direction, 'inbound'),
+          eq(messages.messageId, tasks.sourceMessageId),
+          eq(
+            messages.migratedFromChatId,
+            sql`coalesce(${tasks.sourceChatId}, '')`,
+          ),
+        ),
+      )
       .where(
         and(
           or(chatScope(tasks, ref), chatScope(approvals, ref)),
@@ -2513,9 +2538,13 @@ export class SqliteStore implements Store {
         );
         if (previous && revised) tx.insert(messageEdits).values(previous).run();
       }
-      const insert = tx
-        .insert(messages)
-        .values({ ...message, raw: null, rawZ, recordedAt: Date.now() });
+      const insert = tx.insert(messages).values({
+        ...message,
+        incognitoId: this.getChat(chat)?.incognitoId ?? null,
+        raw: null,
+        rawZ,
+        recordedAt: Date.now(),
+      });
       const result = (
         edited
           ? insert.onConflictDoUpdate({
@@ -2570,6 +2599,8 @@ export class SqliteStore implements Store {
         .insert(messages)
         .values({
           ...message,
+          incognitoId:
+            message.incognitoId ?? this.getChat(message)?.incognitoId,
           raw: null,
           rawZ: message.raw == null ? null : encodeRecord(message.raw, true),
           recordedAt: Date.now(),
@@ -2599,11 +2630,15 @@ export class SqliteStore implements Store {
   }
 
   messageAlbum(ref: ChatRef, albumId: string, migratedFromChatId: string) {
+    ref = this.resolveChat(ref);
+    const incognitoId = this.getChat(ref)?.incognitoId ?? null;
+    let attachmentOffset = 0;
     return this.#db
       .select({
         ...getColumns(messages),
         raw: sql<null>`null`,
         rawZ: sql<null>`null`,
+        visible: visibleToAgent(incognitoId)!,
       })
       .from(messages)
       .where(
@@ -2614,7 +2649,19 @@ export class SqliteStore implements Store {
         ),
       )
       .orderBy(messages.seq)
-      .all();
+      .all()
+      .flatMap(({ visible, ...row }) => {
+        const offset = attachmentOffset;
+        attachmentOffset += row.metadata?.attachments?.length ?? 0;
+        return visible
+          ? [
+              {
+                ...this.#redactMessageReply(ref, row, incognitoId),
+                attachmentOffset: offset,
+              },
+            ]
+          : [];
+      });
   }
 
   quotedAttachmentMessage(
@@ -2622,6 +2669,10 @@ export class SqliteStore implements Store {
     messageId: string,
     migratedFromChatId: string,
   ) {
+    ref = this.resolveChat(ref);
+    const incognitoId = this.getChat(ref)?.incognitoId ?? null;
+    if (!this.#messageVisible(ref, messageId, migratedFromChatId, incognitoId))
+      return;
     return this.#db
       .select({
         ...getColumns(messages),
@@ -2632,6 +2683,7 @@ export class SqliteStore implements Store {
       .where(
         and(
           chatScope(messages, ref),
+          visibleToAgent(incognitoId),
           eq(messages.replyTo, messageId),
           eq(messages.migratedFromChatId, migratedFromChatId),
           eq(messages.deleted, false),
@@ -2640,6 +2692,60 @@ export class SqliteStore implements Store {
       )
       .orderBy(desc(messages.seq))
       .get();
+  }
+
+  messageVisible(ref: ChatRef, messageId: string, migratedFromChatId: string) {
+    ref = this.resolveChat(ref);
+    return this.#messageVisible(
+      ref,
+      messageId,
+      migratedFromChatId,
+      this.getChat(ref)?.incognitoId ?? null,
+    );
+  }
+
+  #messageVisible(
+    ref: ChatRef,
+    messageId: string,
+    migratedFromChatId: string,
+    incognitoId: number | null,
+  ) {
+    const rows = this.#db
+      .select({
+        visible: sql<number>`(${visibleToAgent(incognitoId)}) and not ${messages.deleted}`,
+      })
+      .from(messages)
+      .where(
+        and(
+          chatScope(messages, ref),
+          inArray(messages.direction, ['inbound', 'outbound']),
+          eq(messages.messageId, messageId),
+          eq(messages.migratedFromChatId, migratedFromChatId),
+        ),
+      )
+      .all();
+    return rows.length
+      ? rows.every(({ visible }) => visible)
+      : incognitoId === null;
+  }
+
+  #redactMessageReply<
+    Row extends Pick<
+      MessageRecord,
+      'metadata' | 'migratedFromChatId' | 'replyTo'
+    >,
+  >(ref: ChatRef, row: Row, incognitoId: number | null): Row {
+    const replyId = row.metadata?.replyTo?.id ?? row.replyTo;
+    if (
+      !replyId ||
+      this.#messageVisible(ref, replyId, row.migratedFromChatId, incognitoId)
+    )
+      return row;
+    return {
+      ...row,
+      metadata: { ...row.metadata, replyTo: { id: replyId } },
+      ...('raw' in row && { raw: null }),
+    };
   }
 
   getMessage(
@@ -2729,6 +2835,7 @@ export class SqliteStore implements Store {
           chatScope(messages, ref),
           eq(messages.deleted, false),
           lte(messages.seq, summary.throughSeq),
+          visibleToAgent(this.getChat(ref)?.incognitoId ?? null),
         ),
       )
       .get()!;
@@ -2746,6 +2853,7 @@ export class SqliteStore implements Store {
 
   saveSummary(summary: ChatSummary) {
     const changed = this.#db.transaction((tx) => {
+      if (this.getChat(summary)?.incognitoId != null) return false;
       const row = tx
         .update(chatSummaries)
         .set({
@@ -2780,6 +2888,8 @@ export class SqliteStore implements Store {
     limit: number,
     offset = 0,
   ) {
+    ref = this.resolveChat(ref);
+    const incognitoId = this.getChat(ref)?.incognitoId ?? null;
     return this.#db
       .select({
         ...getColumns(messages),
@@ -2798,6 +2908,7 @@ export class SqliteStore implements Store {
       .where(
         and(
           chatScope(messages, ref),
+          visibleToAgent(incognitoId),
           eq(messages.deleted, false),
           sql`json_extract(${messages.metadata}, '$.sideQuestion') is not 1`,
           gt(messages.seq, afterSeq),
@@ -2808,7 +2919,9 @@ export class SqliteStore implements Store {
       .limit(limit)
       .offset(offset)
       .all()
-      .map(readMessage);
+      .map((row) =>
+        this.#redactMessageReply(ref, readMessage(row), incognitoId),
+      );
   }
 
   recentMessages(
@@ -2816,16 +2929,18 @@ export class SqliteStore implements Store {
     options: Parameters<Store['recentMessages']>[1],
   ) {
     ref = this.resolveChat(ref);
+    const incognitoId = this.getChat(ref)?.incognitoId ?? null;
     const { afterSeq } = options;
     const resumed = afterSeq !== undefined;
     const filter = and(
       chatScope(messages, ref),
       eq(messages.deleted, false),
       lte(messages.seq, options.throughSeq),
-      options.privateSince === undefined
+      visibleToAgent(incognitoId),
+      incognitoId === null
         ? undefined
         : and(
-            gt(messages.seq, options.privateSince),
+            gt(messages.seq, incognitoId),
             sql`json_extract(${messages.metadata}, '$.sessionBoundary') is not 1`,
           ),
       or(
@@ -2869,10 +2984,14 @@ export class SqliteStore implements Store {
         : query.limit(options.limit).all()
     )
       .reverse()
-      .map(readMessage);
+      .map((row) =>
+        this.#redactMessageReply(ref, readMessage(row), incognitoId),
+      );
   }
 
   historyMessages(ref: ChatRef, options: HistoryQuery) {
+    ref = this.resolveChat(ref);
+    const incognitoId = this.getChat(ref)?.incognitoId ?? null;
     const search = 'query' in options ? options : undefined;
     const match = search
       ? sql<number>`instr(lower(${messages.text}), lower(${search.query}))`
@@ -2924,7 +3043,8 @@ export class SqliteStore implements Store {
       )
       .where(
         and(
-          chatScope(messages, this.resolveChat(ref)),
+          chatScope(messages, ref),
+          visibleToAgent(incognitoId),
           eq(messages.deleted, false),
           sql`json_extract(${messages.metadata}, '$.sideQuestion') is not 1`,
           filter,
@@ -2932,7 +3052,8 @@ export class SqliteStore implements Store {
       )
       .orderBy(search ? desc(messages.seq) : asc(messages.seq))
       .limit(options.limit)
-      .all();
+      .all()
+      .map((row) => this.#redactMessageReply(ref, row, incognitoId));
   }
 
   getSession(ref: ChatRef, agentId: string, model?: string) {
@@ -3002,13 +3123,40 @@ export class SqliteStore implements Store {
     });
   }
 
-  clearSession(ref: ChatRef, privateSince?: number | null) {
+  clearSession(ref: ChatRef, incognitoId?: number | null) {
     ref = this.resolveChat(ref);
-    this.#db
-      .update(chats)
-      .set({ sessionAgentId: null, sessionModel: null, privateSince })
-      .where(chatScope(chats, ref))
-      .run();
+    this.#db.transaction((tx) => {
+      const previous = this.getChat(ref)?.incognitoId;
+      tx.update(chats)
+        .set({ sessionAgentId: null, sessionModel: null, incognitoId })
+        .where(chatScope(chats, ref))
+        .run();
+      if (incognitoId != null) {
+        // The start command is recorded before it can be authorized.
+        tx.update(messages)
+          .set({ incognitoId })
+          .where(
+            and(
+              chatScope(messages, ref),
+              gte(messages.seq, incognitoId),
+              isNull(messages.incognitoId),
+            ),
+          )
+          .run();
+      }
+      if (incognitoId === null && previous != null) {
+        repairSummary(tx, ref, previous);
+        tx.delete(chatSummaryVersions)
+          .where(
+            and(
+              eq(chatSummaryVersions.adapterId, ref.adapterId),
+              eq(chatSummaryVersions.chatId, ref.chatId),
+              gte(chatSummaryVersions.throughSeq, previous),
+            ),
+          )
+          .run();
+      }
+    });
   }
 
   clearAgentSessions(agentId: string) {

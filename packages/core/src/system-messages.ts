@@ -115,8 +115,10 @@ const messages = {
     stopped: (queued: number) => `Stopped the running task. ${queued} queued.`,
     newBusy: (command: string) =>
       `This chat has pending work. Try /${command} when it finishes.`,
-    newPrivateSuccess:
-      'Started a private conversation. Earlier messages are hidden from the agent until /new.',
+    incognitoOn:
+      "Incognito on: I can't see earlier messages, and what's said from now on won't be visible to me after `/incognito off` or `/new`.",
+    incognitoEnabled: 'Incognito on.',
+    incognitoOff: 'Incognito off.',
     newSuccess:
       'Started a new conversation. Your next message will use a new session.',
     btwUsage: 'Usage: /btw <message>',
@@ -319,8 +321,10 @@ const messages = {
       `已停止目前的任務。還有 ${queued} 個任務在佇列中。`,
     newBusy: (command: string) =>
       `此聊天室還有任務未完成，請等任務結束後再使用 /${command}。`,
-    newPrivateSuccess:
-      '已開始私人對話。使用 /new 前，代理程式看不到先前的訊息。',
+    incognitoOn:
+      '無痕模式已開啟：我看不到先前的訊息。使用 `/incognito off` 或 `/new` 後，我也看不到從現在起的對話。',
+    incognitoEnabled: '無痕模式已開啟。',
+    incognitoOff: '無痕模式已關閉。',
     newSuccess: '已開始新對話，下一則訊息會用新的 session。',
     btwUsage: '用法：/btw <訊息>',
     askUsage: '用法：/ask <訊息>',

@@ -68,7 +68,9 @@ export class BackgroundSummaries implements SummaryProvider {
   async get(chat: ChatRef) {
     if (this.#deps.runtime.config.context.summary?.enabled === false) return;
     const { store } = this.#deps;
-    const summary = store.getSummary(store.resolveChat(chat));
+    chat = store.resolveChat(chat);
+    if (store.getChat(chat)?.incognitoId != null) return;
+    const summary = store.getSummary(chat);
     return {
       block: summary?.text
         ? {
@@ -171,7 +173,7 @@ export class BackgroundSummaries implements SummaryProvider {
     clearTimeout(this.#delayed.get(key));
     this.#delayed.delete(key);
     const { recentMessages, summary } = runtime.config.context;
-    if (summary?.enabled === false || store.getChat(chat)?.privateSince != null)
+    if (summary?.enabled === false || store.getChat(chat)?.incognitoId != null)
       return;
     const selected = runtime.getAgent(job.agentId);
     if (!selected) return;

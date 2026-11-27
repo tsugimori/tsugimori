@@ -36,6 +36,10 @@ const descriptions = {
     'zh-TW': '查看或設定快速模式（on、off、default）',
   },
   help: { en: 'Show available commands', 'zh-TW': '查看可用指令' },
+  incognito: {
+    en: 'Toggle incognito mode (on or off)',
+    'zh-TW': '切換無痕模式（on 開啟、off 關閉）',
+  },
   login: { en: 'Sign in to an agent', 'zh-TW': '登入代理' },
   model: {
     en: 'Show or set the model (default to reset)',
@@ -44,10 +48,6 @@ const descriptions = {
   new: {
     en: 'Start a new conversation',
     'zh-TW': '開始新對話',
-  },
-  newprivate: {
-    en: 'Start a private conversation without earlier history',
-    'zh-TW': '開始不含先前紀錄的私人對話',
   },
   pair: {
     en: 'Get a new pairing code in DM (/pair new <adapterId>)',
@@ -84,8 +84,8 @@ const memberCommands = new Set<Command['name']>([
   'ask',
   'btw',
   'context',
+  'incognito',
   'new',
-  'newprivate',
 ]);
 
 export function isMemberCommand(name: Command['name']) {
