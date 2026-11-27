@@ -19,6 +19,8 @@ export type MediaReceipt = QueuedMedia | SendReceipt;
 export interface MediaUpload extends MediaDestination {
   file: MediaFile;
   preview(maxBytes: number): Promise<AttachmentContent>;
+  /** Final URL of a downloaded web image, after redirects. */
+  sourceUrl?: string;
 }
 
 export interface StickerChoice {

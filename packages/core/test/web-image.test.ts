@@ -83,7 +83,7 @@ test('web image redirects resolve each destination and refuse private addresses 
   }
 });
 
-test('web image fetch allows three redirects and uses the last URL for the filename', async () => {
+test('web image fetch allows three redirects and returns the final URL and filename', async () => {
   let connections = 0;
   const io: WebImageNetwork = {
     resolve: async () => [publicAddress],
@@ -96,8 +96,9 @@ test('web image fetch allows three redirects and uses the last URL for the filen
       });
     },
   };
-  const file = await fetchWebImage(url, png.length, signal, io);
+  const { file, sourceUrl } = await fetchWebImage(url, png.length, signal, io);
   assert.equal(file.name, 'picture3.png');
+  assert.equal(sourceUrl, 'https://images.example.test/picture3.png');
   assert.equal(connections, 4);
   await assert.rejects(
     fetchWebImage(url, 100, signal, {

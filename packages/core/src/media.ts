@@ -3,7 +3,6 @@ import type {
   ImageLimits,
   InboundAttachment,
   MediaDestination,
-  MediaFile,
   MediaUpload,
 } from '@tsugimori/plugin-sdk';
 
@@ -369,12 +368,13 @@ export async function prepareStickerGrid(
 
 export function mediaUpload(
   address: MediaDestination,
-  file: MediaFile,
+  { file, sourceUrl }: Pick<MediaUpload, 'file' | 'sourceUrl'>,
   signal: AbortSignal,
 ): MediaUpload {
   return {
     ...address,
     file,
+    ...(sourceUrl !== undefined && { sourceUrl }),
     async preview(maxBytes) {
       const ffmpeg = await findFfmpeg();
       if (!ffmpeg)

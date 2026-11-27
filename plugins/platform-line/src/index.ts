@@ -50,11 +50,12 @@ const uploadLimits = {
   images: { maxBytes: 10 * 1024 * 1024, queued: true },
 };
 const maxPreview = 1024 * 1024;
+const maxMediaUrlLength = 2000;
 type PendingMedia =
   | { packageId: string; stickerId: string; type: 'sticker' }
   | {
-      original: AttachmentContent;
-      preview: AttachmentContent;
+      original: AttachmentContent | string;
+      preview: AttachmentContent | string;
       type: 'image' | 'video';
     };
 
@@ -107,6 +108,7 @@ interface LineOptions {
 interface Listener {
   controller: AbortController;
   logError?: AdapterContext['logError'];
+  logInfo?: AdapterContext['logInfo'];
   signal: AbortSignal;
   start: Promise<() => Promise<void>>;
   stop?: Promise<void>;
@@ -229,6 +231,7 @@ export class LineAdapter implements PlatformAdapter {
     this.#listener = {
       controller,
       logError: (event, error) => ctx.logError?.(event, error),
+      logInfo: (event, fields) => ctx.logInfo?.(event, fields),
       signal,
       start: this.#start(route, signal, ctx),
     };
@@ -420,8 +423,7 @@ export class LineAdapter implements PlatformAdapter {
     signal: AbortSignal,
   ) {
     signal.throwIfAborted();
-    this.#mediaBase();
-    const { file } = message;
+    const { file, sourceUrl } = message;
     if (file.bytes.byteLength > limit)
       throw new ToolFailure(
         `LINE ${type} exceeds the ${limit / 1024 ** 2} MB size limit`,
@@ -441,15 +443,38 @@ export class LineAdapter implements PlatformAdapter {
           : bytes.subarray(0, 3).equals(Buffer.from('ffd8ff', 'hex'))
             ? 'image/jpeg'
             : undefined;
-    if (!mime)
+    const directUrl =
+      type === 'image' &&
+      mime &&
+      sourceUrl &&
+      sourceUrl.length <= maxMediaUrlLength &&
+      URL.parse(sourceUrl)?.protocol === 'https:'
+        ? sourceUrl
+        : undefined;
+    if (directUrl && bytes.byteLength <= maxPreview)
+      return this.#queue(message, {
+        type,
+        original: directUrl,
+        preview: directUrl,
+      });
+
+    this.#mediaBase();
+    const convertible =
+      !mime &&
+      type === 'image' &&
+      sourceUrl &&
+      (/^GIF8[79]a$/.test(bytes.toString('latin1', 0, 6)) ||
+        (bytes.toString('latin1', 0, 4) === 'RIFF' &&
+          bytes.toString('latin1', 8, 12) === 'WEBP'));
+    if (!mime && !convertible)
       throw new ToolFailure(
         type === 'video'
           ? 'LINE can send MP4 video files only'
           : 'LINE images must be JPEG or PNG',
       );
-    const original = { bytes: file.bytes, mime };
+    const original = mime && { bytes: file.bytes, mime };
     const preview =
-      type === 'image' && bytes.byteLength <= maxPreview
+      type === 'image' && original && bytes.byteLength <= maxPreview
         ? original
         : await message.preview(maxPreview);
     if (
@@ -458,7 +483,12 @@ export class LineAdapter implements PlatformAdapter {
     )
       throw new ToolFailure('LINE requires a JPEG or PNG preview up to 1 MB');
     signal.throwIfAborted();
-    return this.#queue(message, { type, original, preview });
+    // Use the converted JPEG or PNG for both LINE fields on web GIFs and WebPs.
+    return this.#queue(message, {
+      type,
+      original: directUrl ?? original ?? preview,
+      preview,
+    });
   }
 
   #queue(
@@ -554,22 +584,34 @@ export class LineAdapter implements PlatformAdapter {
               continue;
             }
             signal.throwIfAborted();
-            const base = this.#mediaBase();
-            const original = await this.#mediaHost.publish(
-              base,
-              payload.original,
-            );
-            releases.push(original.release);
+            const { original, preview } = payload;
+            const originalDirect = typeof original === 'string';
+            const previewDirect = typeof preview === 'string';
+            let base: string | undefined;
+            const publish = async (content: AttachmentContent) => {
+              const media = await this.#mediaHost.publish(
+                (base ??= this.#mediaBase()),
+                content,
+              );
+              releases.push(media.release);
+              return media.url;
+            };
+            const originalContentUrl = originalDirect
+              ? original
+              : await publish(original);
             signal.throwIfAborted();
-            const preview = await this.#mediaHost.publish(
-              base,
-              payload.preview,
-            );
-            releases.push(preview.release);
+            const previewImageUrl = previewDirect
+              ? preview
+              : await publish(preview);
+            if (originalDirect || previewDirect)
+              listener.logInfo?.('line.media_direct', {
+                original: originalDirect,
+                preview: previewDirect,
+              });
             messages.push({
               type: payload.type,
-              originalContentUrl: original.url,
-              previewImageUrl: preview.url,
+              originalContentUrl,
+              previewImageUrl,
             });
           }
           signal.throwIfAborted();

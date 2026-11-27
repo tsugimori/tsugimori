@@ -6587,6 +6587,8 @@ test('send tools require advertised capabilities and keep files and reactions in
 const webPng = Buffer.from('89504e470d0a1a0a', 'hex');
 const webImageUrl =
   'https://images.example.test/a%20picture.png?signature=private-value';
+const redirectImageUrl =
+  'https://images.example.test/redirect?signature=private-redirect';
 
 function webImages(requests: string[]): WebImageNetwork {
   return {
@@ -6597,6 +6599,11 @@ function webImages(requests: string[]): WebImageNetwork {
     async connect(url, address) {
       assert.equal(address, '93.184.216.34');
       requests.push(url.href);
+      if (url.pathname === '/redirect')
+        return Object.assign(Readable.from([]), {
+          statusCode: 302,
+          headers: { location: webImageUrl },
+        });
       return Object.assign(Readable.from([webPng]), {
         statusCode: url.pathname === '/missing.png' ? 404 : 200,
         headers: {},
@@ -6605,7 +6612,7 @@ function webImages(requests: string[]): WebImageNetwork {
   };
 }
 
-test('send.image accepts a single URL source and records the upload without the query in tool details', async (t) => {
+test('send.image provides the redirected URL only for web sources and omits queries from tool details', async (t) => {
   const requests: string[] = [];
   const f = await fixture(
     t,
@@ -6629,46 +6636,59 @@ test('send.image accepts a single URL source and records the upload without the 
         /accessible chat workspace/,
       );
       assert.deepEqual(
-        await image.run({ url: webImageUrl }, undefined, 'web-image'),
+        await image.run({ url: redirectImageUrl }, undefined, 'web-image'),
         {
-          messageId: 'uploaded',
-          messageIds: ['uploaded'],
+          messageId: 'a_picture.png',
+          messageIds: ['a_picture.png'],
         },
       );
+      await writeFile(join(request.workdir, 'local.png'), webPng);
+      await image.run({ path: 'local.png' });
+      await image.run({ attachment: { messageId: 'source', index: 0 } });
       yield { type: 'text.final', text: 'NO_REPLY: Image sent' };
     },
     true,
-    { webImageNetwork: webImages(requests) },
+    {
+      downloadAttachment: async () => ({ bytes: webPng, mime: 'image/png' }),
+      webImageNetwork: webImages(requests),
+    },
   );
   const { platform, sent } = f.platform;
   platform.capabilities.images = { maxBytes: webPng.length };
-  platform.sendImage = async ({ file, replyTo }) => {
-    assert.deepEqual(file, {
-      bytes: webPng,
-      mime: 'image/png',
-      name: 'a_picture.png',
-    });
+  platform.sendImage = async (media) => {
+    const { file, replyTo, sourceUrl } = media;
+    assert.deepEqual(Buffer.from(file.bytes), webPng);
+    assert.equal(file.mime, 'image/png');
     assert.equal(replyTo, 'source');
-    return { messageId: 'uploaded' };
+    if (file.name === 'a_picture.png') assert.equal(sourceUrl, webImageUrl);
+    else assert.ok(!('sourceUrl' in media));
+    return { messageId: file.name };
   };
-  await f.platform.emit(inbound('source', 'Send the image from the web'));
+  await f.platform.emit(
+    inbound('source', 'Send the images', {
+      attachments: [
+        { index: 0, kind: 'image', name: 'attached.png', fileId: 'photo' },
+      ],
+    }),
+  );
   await f.gateway.idle();
   await f.trace.flush();
   const [task] = f.store.listChatTasks(chat);
   assert.equal(task?.status, 'sent');
-  assert.deepEqual(requests, [webImageUrl]);
+  assert.deepEqual(requests, [redirectImageUrl, webImageUrl]);
   assert.deepEqual(sent, []);
-  assert.equal(f.store.getMessage(chat, 'uploaded')?.text, '[image]');
+  for (const name of ['a_picture.png', 'local.png', 'attached.png'])
+    assert.equal(f.store.getMessage(chat, name)?.text, '[image]');
   const calls = f.store.taskToolCalls([task.id]);
   assert.deepEqual(
     JSON.parse(calls.find(({ callId }) => callId === 'web-image')!.args!),
     {
-      url: 'https://images.example.test/a%20picture.png',
+      url: 'https://images.example.test/redirect',
     },
   );
   assert.doesNotMatch(
     JSON.stringify(f.store.taskTrace(task.id)),
-    /private-value/,
+    /private-(?:value|redirect)/,
   );
 });
 
@@ -6705,7 +6725,8 @@ test('final replies send text before web images, retain failed URLs, and preserv
     events.push(message.text);
     return send(message);
   };
-  platform.sendImage = async ({ file }) => {
+  platform.sendImage = async ({ file, sourceUrl }) => {
+    assert.equal(sourceUrl, file.name === 'second.png' ? second : webImageUrl);
     events.push(file.name);
     return { messageId: 'image-' + ++uploaded };
   };
@@ -6763,7 +6784,10 @@ test('final web images use the same outbound batch as text on queued platforms',
       yield {
         type: 'text.final',
         text:
-          (round++ === 0 ? 'An image\n\n' : '') + '![](' + webImageUrl + ')',
+          (round++ === 0 ? 'An image\n\n' : '') +
+          '![](' +
+          redirectImageUrl +
+          ')',
       };
     },
     true,
@@ -6771,10 +6795,10 @@ test('final web images use the same outbound batch as text on queued platforms',
   );
   const { platform } = f.platform;
   platform.capabilities.images = { maxBytes: webPng.length, queued: true };
-  platform.sendImage = async ({ replyTo }) => ({
-    queued: true,
-    id: 'handle-' + replyTo,
-  });
+  platform.sendImage = async ({ replyTo, sourceUrl }) => {
+    assert.equal(sourceUrl, webImageUrl);
+    return { queued: true, id: 'handle-' + replyTo };
+  };
   const send = platform.send.bind(platform);
   const batches: string[][] = [];
   platform.send = async (message, options) => {
@@ -6796,7 +6820,12 @@ test('final web images use the same outbound batch as text on queued platforms',
   await f.platform.emit(inbound('image-only', 'Share just the picture'));
   await f.gateway.idle();
   assert.deepEqual(batches, [['An image', '[image]'], ['[image]']]);
-  assert.deepEqual(requests, [webImageUrl, webImageUrl]);
+  assert.deepEqual(requests, [
+    redirectImageUrl,
+    webImageUrl,
+    redirectImageUrl,
+    webImageUrl,
+  ]);
   assert.equal(f.store.getMessage(chat, 'image-image-only')?.text, '[image]');
   assert.ok(
     f.store.listChatTasks(chat).every(({ status }) => status === 'sent'),

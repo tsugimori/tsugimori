@@ -2,7 +2,6 @@ import type {
   ApprovalReaction,
   ChatRef,
   MediaDestination,
-  MediaFile,
   MediaReceipt,
   OutboundMessage,
   PlatformAdapter,
@@ -16,7 +15,7 @@ import type { Tracer } from '@tsugimori/trace';
 import { SendFailure, ToolFailure } from '@tsugimori/plugin-sdk';
 
 import type { HookRunner, Logger } from './hooks.ts';
-import type { WebImageNetwork } from './web-image.ts';
+import type { WebImage, WebImageNetwork } from './web-image.ts';
 
 import { untilAborted } from './abort.ts';
 import { replaceMarkdownImages } from './markdown-images.ts';
@@ -306,16 +305,16 @@ export class Outbound {
       );
       return this.send(adapter, { ...message, text }, options);
     }
-    const files: MediaFile[] = [];
+    const downloads: WebImage[] = [];
     const queued = [...(options.media ?? [])];
     const { chatId, replyTo, threadId } = message;
-    const sendImage = (file: MediaFile, reply?: 'part' | 'last') =>
+    const sendImage = (image: WebImage, reply?: 'part' | 'last') =>
       this.sendMedia(
         adapter,
         { chatId, replyTo, threadId, text: '[image]' },
         signal,
         taskId,
-        (address) => upload(mediaUpload(address, file, signal), signal),
+        (address) => upload(mediaUpload(address, image, signal), signal),
         onDelivery,
         {
           incognitoId: options.incognitoId,
@@ -325,16 +324,16 @@ export class Outbound {
       );
     const text = await replaceMarkdownImages(message.text, async (url) => {
       try {
-        const file = await this.fetchImage(url, images.maxBytes, {
+        const image = await this.fetchImage(url, images.maxBytes, {
           chat,
           signal,
           taskId,
         });
         if (images.queued) {
-          const receipt = await sendImage(file);
+          const receipt = await sendImage(image);
           if ('queued' in receipt) queued.push(receipt);
         } else {
-          files.push(file);
+          downloads.push(image);
         }
         return '';
       } catch (error) {
@@ -343,7 +342,7 @@ export class Outbound {
         return url;
       }
     });
-    if (!files.length)
+    if (!downloads.length)
       return this.send(
         adapter,
         { ...message, text },
@@ -359,12 +358,12 @@ export class Outbound {
       signal.throwIfAborted();
       store.updateTask(taskId, { status: 'sending' });
     }
-    for (const [index, file] of files.entries()) {
-      const last = index === files.length - 1;
+    for (const [index, image] of downloads.entries()) {
+      const last = index === downloads.length - 1;
       let receipt: Awaited<ReturnType<typeof sendImage>>;
       signal.throwIfAborted();
       try {
-        receipt = await sendImage(file, last ? 'last' : 'part');
+        receipt = await sendImage(image, last ? 'last' : 'part');
       } catch (error) {
         if (
           (signal.aborted && !(error instanceof SendFailure)) ||

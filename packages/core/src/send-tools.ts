@@ -194,17 +194,25 @@ export function sendTools(
       async run(args, task) {
         current();
         const source = args as Source | { url: string };
-        const file =
+        const media =
           'url' in source
             ? await deps.outbound.fetchImage(
                 source.url,
                 capability.maxBytes,
                 task,
               )
-            : await loadMedia(deps, adapter, source, task, capability.maxBytes);
+            : {
+                file: await loadMedia(
+                  deps,
+                  adapter,
+                  source,
+                  task,
+                  capability.maxBytes,
+                ),
+              };
         task.signal.throwIfAborted();
         return send(task, `[${kind}]`, (address) =>
-          upload(mediaUpload(address, file, task.signal), task.signal),
+          upload(mediaUpload(address, media, task.signal), task.signal),
         );
       },
     });

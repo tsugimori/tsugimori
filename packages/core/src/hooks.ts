@@ -20,6 +20,8 @@ export type Logger = (entry: {
   method?: string;
   migratedToChatId?: string;
   nextDelayMs?: number | null;
+  original?: boolean;
+  preview?: boolean;
   reason?: string;
   reasonCode?: string;
   retryAfterMs?: number;

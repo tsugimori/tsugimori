@@ -257,7 +257,15 @@ export interface AdapterContext {
   loadCursor?(stream: string): AdapterCursor | undefined;
   logDebug?(event: string): void;
   logError?(event: string, error?: unknown): void;
-  logInfo?(event: string, fields?: { method?: string; reason?: string }): void;
+  logInfo?(
+    event: string,
+    fields?: {
+      method?: string;
+      original?: boolean;
+      preview?: boolean;
+      reason?: string;
+    },
+  ): void;
   logWarning?(event: string, reason?: string): void;
   ready?: Promise<void>;
   resolveChatId?(chatId: string): string;

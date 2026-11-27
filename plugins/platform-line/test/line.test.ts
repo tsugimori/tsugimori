@@ -990,6 +990,11 @@ const tinyPng = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jL1sAAAAASUVORK5CYII=',
   'base64',
 );
+const webPng = Buffer.concat([
+  tinyPng,
+  Buffer.alloc(3 * 1024 ** 2 - tinyPng.length),
+]);
+const imageUrl = 'https://images.example.test/picture?signature=test';
 
 test('LINE queues validated stickers, replies with final text and pushes overflow', async (t) => {
   const f = await fixture(t);
@@ -1197,6 +1202,137 @@ test('LINE media-only delivery serves repeated and concurrent GETs and HEAD', as
     ['line.media_miss', { reason: 'method' }],
     ['line.media_miss', { reason: 'expired' }],
   ]);
+});
+
+test('LINE uses eligible web image URLs and hosts the remaining image parts', async (t) => {
+  const maxLengthUrl = imageUrl.padEnd(2000, 'a');
+  for (const { bytes, directParts, label, makePreview, sourceUrl } of [
+    {
+      label: 'HTTPS JPEG at both direct preview limits',
+      bytes: Buffer.concat([
+        Buffer.from('ffd8ff', 'hex'),
+        Buffer.alloc(1024 ** 2 - 3),
+      ]),
+      sourceUrl: maxLengthUrl,
+      directParts: 2,
+    },
+    {
+      label: '3 MiB PNG',
+      bytes: webPng,
+      sourceUrl: imageUrl,
+      directParts: 1,
+      makePreview: true,
+    },
+    {
+      label: 'HTTP PNG',
+      bytes: tinyPng,
+      sourceUrl: imageUrl.replace('https:', 'http:'),
+      directParts: 0,
+    },
+    {
+      label: 'URL over the length limit',
+      bytes: tinyPng,
+      sourceUrl: maxLengthUrl + 'a',
+      directParts: 0,
+    },
+    {
+      label: 'GIF',
+      bytes: Buffer.from('GIF89a'),
+      sourceUrl: imageUrl,
+      directParts: 0,
+      makePreview: true,
+    },
+    {
+      label: 'WebP',
+      bytes: Buffer.from('RIFF\0\0\0\0WEBP'),
+      sourceUrl: imageUrl,
+      directParts: 0,
+      makePreview: true,
+    },
+    { label: 'workspace PNG', bytes: tinyPng, directParts: 0 },
+  ]) {
+    await t.test(label, async (t) => {
+      const f = await fixture(t, fakeApi(), { publicMedia: directParts < 2 });
+      const destination = { chatId: userId };
+      let previews = 0;
+      const queued = await f.adapter.sendImage(
+        {
+          ...destination,
+          file: { name: 'image', bytes },
+          sourceUrl,
+          async preview(maxBytes) {
+            assert.equal(maxBytes, 1024 ** 2);
+            previews++;
+            return { bytes: tinyPng, mime: 'image/png' };
+          },
+        },
+        AbortSignal.timeout(3000),
+      );
+      await f.adapter.send({ ...destination, text: '' }, { media: [queued] });
+      const sent = f.api.calls.at(-1)?.body?.messages?.[0];
+      assert.equal(sent?.type, 'image');
+      for (const [i, url] of [
+        sent.originalContentUrl,
+        sent.previewImageUrl,
+      ].entries()) {
+        if (i < directParts) assert.equal(url, sourceUrl);
+        else {
+          assert.match(
+            url,
+            /^https:\/\/hooks\.example\.test\/line\/main\/media\//,
+          );
+          const response = await fetch(f.base + new URL(url).pathname);
+          assert.equal(response.status, 200);
+          assert.deepEqual(Buffer.from(await response.arrayBuffer()), tinyPng);
+        }
+      }
+      assert.equal(previews, makePreview ? 1 : 0);
+      assert.equal(
+        (await readdir(f.mediaDirectory)).length,
+        (2 - directParts) * 2,
+      );
+      assert.deepEqual(
+        f.info.filter(([event]) => event === 'line.media_direct'),
+        directParts
+          ? [
+              [
+                'line.media_direct',
+                { original: true, preview: directParts === 2 },
+              ],
+            ]
+          : [],
+      );
+    });
+  }
+});
+
+test('LINE releases the hosted preview when a mixed image send fails', async (t) => {
+  const api = fakeApi(({ path }) =>
+    path.endsWith('/push') ? Response.json({}, { status: 400 }) : undefined,
+  );
+  const f = await fixture(t, api, { publicMedia: true });
+  const destination = { chatId: userId };
+  const queued = await f.adapter.sendImage(
+    {
+      ...destination,
+      file: { name: 'picture.png', bytes: webPng },
+      sourceUrl: imageUrl,
+      async preview() {
+        return { bytes: tinyPng, mime: 'image/png' };
+      },
+    },
+    AbortSignal.timeout(3000),
+  );
+  await assert.rejects(
+    f.adapter.send({ ...destination, text: '' }, { media: [queued] }),
+    (error) => error instanceof SendFailure && !error.deliveryUnknown,
+  );
+  const sent = api.calls.at(-1)?.body?.messages?.[0];
+  assert.equal(sent?.type, 'image');
+  assert.equal(sent.originalContentUrl, imageUrl);
+  const preview = await fetch(f.base + new URL(sent.previewImageUrl).pathname);
+  assert.equal(preview.status, 404);
+  assert.deepEqual(await readdir(f.mediaDirectory), []);
 });
 
 async function sendSmallImage(adapter: LineAdapter, bytes = tinyPng) {

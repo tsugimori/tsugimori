@@ -1235,7 +1235,15 @@ test('sends reactions, stickers, photos, documents and videos to the current Tel
     },
     preview: () => assert.fail('Telegram uploads need no preview'),
   };
-  assert.equal((await adapter.sendImage(upload, signal)).messageId, '33');
+  assert.equal(
+    (
+      await adapter.sendImage(
+        { ...upload, sourceUrl: 'https://images.example.test/test.png' },
+        signal,
+      )
+    ).messageId,
+    '33',
+  );
   assert.equal((await adapter.sendFile(upload, signal)).messageId, '34');
   assert.equal(
     (

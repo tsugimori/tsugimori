@@ -158,12 +158,17 @@ function imageFile(url: URL, bytes: Buffer): MediaFile {
 
 const redirects = new Set([301, 302, 303, 307, 308]);
 
+export interface WebImage {
+  file: MediaFile;
+  sourceUrl: string;
+}
+
 export async function fetchWebImage(
   source: string,
   maxBytes: number,
   parentSignal: AbortSignal,
   io = network,
-): Promise<MediaFile> {
+): Promise<WebImage> {
   const signal = AbortSignal.any([parentSignal, AbortSignal.timeout(15_000)]);
   try {
     return await untilAborted(signal, async () => {
@@ -198,7 +203,10 @@ export async function fetchWebImage(
             if (size > maxBytes) throw tooLarge();
             chunks.push(Buffer.from(chunk));
           }
-          return imageFile(url, Buffer.concat(chunks, size));
+          return {
+            file: imageFile(url, Buffer.concat(chunks, size)),
+            sourceUrl: url.href,
+          };
         } finally {
           response.destroy();
         }
