@@ -75,7 +75,7 @@ test('assembles ordered rules, marked recent messages, and scoped resume context
   assert.match(blocks[0]!.content, /with the guide\.read tool/);
   assert.match(
     blocks[0]!.content,
-    /`mentionsYou` or `repliesToYou`, or one sent with a session command, as addressed to you/,
+    /A message sent with a session command is addressed to you\. `mentionsYou` and `repliesToYou` mean it tags or replies to you;.*judge from the text/,
   );
   assert.match(
     blocks[0]!.content,
@@ -154,7 +154,7 @@ test('uses a single quoted platform identity line with bounded names', async (t)
   assert.deepEqual(line, {
     source: 'system',
     trust: 'trusted',
-    content: `On this platform you are ${JSON.stringify(displayName)} (${JSON.stringify(username)}). Messages that mention or reply to you are addressed to you.`,
+    content: `On this platform you are ${JSON.stringify(displayName)} (${JSON.stringify(username)}). A mention of this name or a reply to your message refers to you.`,
   });
   assert.deepEqual(await context.assemble(resumed), []);
   assert.deepEqual(

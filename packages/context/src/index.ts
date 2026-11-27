@@ -85,7 +85,7 @@ export const privateGuidelineBlock: ContextBlock = {
   source: 'system',
   trust: 'trusted',
   content:
-    'Workspace guideline files follow; AGENTS.md lists further guideline files that you can read with the guide.read tool when a task needs them. Apply rules in specificity order: workspace, platform, then conversation.\nAdd text after using a send tool only if it adds something to what you sent. Treat a message with `mentionsYou` or `repliesToYou`, or one sent with a session command, as addressed to you even when it refers to you by name. If the latest message needs no reply or a send tool already delivered the whole reply, answer exactly `NO_REPLY: <short reason>` (one line, no other text).',
+    'Workspace guideline files follow; AGENTS.md lists further guideline files that you can read with the guide.read tool when a task needs them. Apply rules in specificity order: workspace, platform, then conversation.\nAdd text after using a send tool only if it adds something to what you sent. A message sent with a session command is addressed to you. `mentionsYou` and `repliesToYou` mean it tags or replies to you; usually that is addressed to you, so do not skip it just because it names you, but judge from the text: if it only quotes you to talk to someone else, or tags you only to tell another person about you, it may not need your reply. If the latest message needs no reply or a send tool already delivered the whole reply, answer exactly `NO_REPLY: <short reason>` (one line, no other text).',
 };
 
 export const guidelineBlock: ContextBlock = {
@@ -128,7 +128,7 @@ function platformIdentityBlock(
   return {
     source: 'system',
     trust: 'trusted',
-    content: `On this platform you are ${name}${suffix}. Messages that mention or reply to you are addressed to you.`,
+    content: `On this platform you are ${name}${suffix}. A mention of this name or a reply to your message refers to you.`,
   };
 }
 
