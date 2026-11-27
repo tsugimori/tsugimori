@@ -400,11 +400,17 @@ class Session implements ExecSession {
     signal.throwIfAborted();
     if (size > maxOutput)
       throw new ToolFailure('Sandbox command exceeded 1 MiB of output');
-    if (
-      exitCode !== 0 &&
-      Buffer.concat(stderr).toString('utf8').startsWith('bwrap:')
-    )
-      throw new ToolFailure('bubblewrap could not create the chat sandbox');
+    const failure = Buffer.concat(stderr).toString('utf8');
+    if (exitCode !== 0 && failure.startsWith('bwrap:')) {
+      const missing = /^bwrap: execvp (.+): No such file or directory/.exec(
+        failure,
+      )?.[1];
+      throw new ToolFailure(
+        missing
+          ? `Command not found in the chat sandbox: ${missing.slice(0, 200)}`
+          : 'bubblewrap could not create the chat sandbox',
+      );
+    }
     return {
       exitCode,
       stdout: Buffer.concat(stdout),

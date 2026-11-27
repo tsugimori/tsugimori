@@ -255,3 +255,33 @@ test(
     await assert.rejects(session.exposePort(8001), /no running service/);
   },
 );
+
+test('a missing command is reported as not found instead of a sandbox failure', async (t) => {
+  const probe = spawnSync('bwrap', [
+    ...namespaceArgs,
+    '--ro-bind',
+    '/',
+    '/',
+    '--',
+    '/bin/true',
+  ]);
+  if (probe.status !== 0) {
+    t.skip('bubblewrap with user namespaces is unavailable');
+    return;
+  }
+  const workdir = await realpath(
+    await mkdtemp(join(tmpdir(), 'tsugimori-missing-command-test-')),
+  );
+  t.after(() => rm(workdir, { recursive: true, force: true }));
+  const session = await new LocalSandbox().start({
+    workdir,
+    writable: [workdir],
+    network: 'none',
+    denyRead: [],
+  });
+  t.after(() => session.stop());
+  await assert.rejects(
+    session.run(['tsugimori-no-such-command'], {}),
+    /Command not found in the chat sandbox: tsugimori-no-such-command/,
+  );
+});
