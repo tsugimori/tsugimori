@@ -12,7 +12,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
-import { ContextAssembler } from '../src/index.ts';
+import { ContextAssembler, guidelineBlock } from '../src/index.ts';
 
 test('assembles ordered rules, marked recent messages, and scoped resume context', async (t) => {
   const workspace = await mkdtemp(join(tmpdir(), 'tsugimori-context-'));
@@ -128,7 +128,15 @@ test('assembles ordered rules, marked recent messages, and scoped resume context
     (await context.assemble({ ...input, afterSeq: old.seq })).map(
       (block) => block.content,
     ),
-    ['owner message', 'member message'],
+    [
+      guidelineBlock.content,
+      '--- SOUL.md ---\npersona',
+      '--- MEMORY.md ---\nmemory',
+      '--- rules/global.md ---\nglobal',
+      '--- platforms/fake.md ---\nplatform',
+      'owner message',
+      'member message',
+    ],
   );
 });
 
@@ -149,7 +157,7 @@ test('uses a single quoted platform identity line with bounded names', async (t)
   };
   const displayName = '日太"\\' + '😀'.repeat(60);
   const username = '@' + 'u'.repeat(64);
-  const [line] = await context.assemble({
+  const [, line] = await context.assemble({
     ...resumed,
     botIdentity: {
       displayName: ' \n日\x00太\u202E"\\\u2028' + '😀'.repeat(100),
@@ -157,14 +165,15 @@ test('uses a single quoted platform identity line with bounded names', async (t)
     },
   });
   assert.deepEqual(line, {
+    scope: 'stable',
     source: 'system',
     trust: 'trusted',
     content: `On this platform you are ${JSON.stringify(displayName)} (${JSON.stringify(username)}). A mention of this name or a reply to your message refers to you.`,
   });
-  assert.deepEqual(await context.assemble(resumed), []);
+  assert.deepEqual(await context.assemble(resumed), [guidelineBlock]);
   assert.deepEqual(
     await context.assemble({ ...resumed, botIdentity: { username: '\n' } }),
-    [],
+    [guidelineBlock],
   );
 });
 
@@ -200,6 +209,7 @@ test('includes the current Telegram table capability next to system guidance, in
     'Telegram renders Markdown tables natively; keep tables to 20 columns or fewer.',
   );
   assert.deepEqual(await content({ richText: true, afterSeq: 1 }), [
+    guidelineBlock.content,
     'Telegram renders Markdown tables natively; keep tables to 20 columns or fewer.',
   ]);
   assert.ok(

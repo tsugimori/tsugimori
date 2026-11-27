@@ -6,7 +6,7 @@ import type {
   ContextBlock,
 } from '@tsugimori/plugin-sdk';
 
-import { renderContextLine } from '@tsugimori/plugin-sdk';
+import { renderTurnContext } from '@tsugimori/plugin-sdk';
 import { createHash } from 'node:crypto';
 
 import type { AppServer, ServerFrame } from './app-server.ts';
@@ -37,10 +37,10 @@ const toolNames: Record<string, string> = {
 };
 
 export function renderContext(blocks: ContextBlock[], resumed: boolean) {
-  const messages = resumed
-    ? blocks.filter((block) => block.source === 'message')
-    : blocks;
-  return messages.map(renderContextLine).join('\n');
+  return renderTurnContext(
+    blocks,
+    (block) => !resumed || block.source === 'message',
+  );
 }
 
 export class TurnFrames {

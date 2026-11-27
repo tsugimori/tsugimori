@@ -17,7 +17,7 @@ import type {
 } from '@tsugimori/plugin-sdk';
 import type { ScheduleRecord } from '@tsugimori/storage';
 
-import { renderContextLine } from '@tsugimori/plugin-sdk';
+import { isStableInstruction, renderContextLine } from '@tsugimori/plugin-sdk';
 import { SqliteStore } from '@tsugimori/storage-sqlite';
 import { Tracer } from '@tsugimori/trace';
 import assert from 'node:assert/strict';
@@ -512,7 +512,7 @@ test('/new clears the active session and ignores trailing text', async (t) => {
   );
   assert.deepEqual(
     trace.recent.find(({ name }) => name === 'session.reset')?.attrs,
-    { sessionScope: sessionScope(chat, 'test', 'first', 'backend-1') },
+    { ...chat, sessionScope: sessionScope(chat, 'test', 'first', 'backend-1') },
   );
 
   await platform.emit(inbound('fresh', 'Next message'));
@@ -810,7 +810,7 @@ test('/ask uses fresh-session context without forking or replacing the main sess
   assert.deepEqual(
     ask.context.slice(-2).map(({ content }) => content),
     [
-      'The next message was sent to you with the /ask command. Reply to it.',
+      'The latest message was sent to you with the /ask command. Reply to it.',
       'One-off question',
     ],
   );
@@ -1758,7 +1758,7 @@ test('/context shows usage and sizes for the current session in plain text', asy
     'Incognito off',
     'Session: resume · 2 tasks',
     'Tokens: 1,200 context · 1,100 input · 100,000 model window',
-    `Context blocks: ${context.length} · ${context.reduce((sum, block) => sum + block.content.length, 0)} chars`,
+    `Context blocks: ${context.length} · ${format.format(context.reduce((sum, block) => sum + block.content.length, 0))} chars`,
     `Tool definitions: ${tools.length} · ${format.format(tools.reduce((sum, tool) => sum + tool.description.length + JSON.stringify(tool.schema).length, 0))} description and schema chars`,
   ]);
   assert.equal(platform.sent.at(-1)?.format, undefined);
@@ -3582,8 +3582,14 @@ test(
     await f.gateway.idle();
     assert.equal(requests[1]?.resumeSessionId, 'native');
     assert.deepEqual(
-      requests[1]?.context.map((block) => block.content),
+      requests[1]?.context
+        .filter(({ source }) => source === 'message')
+        .map((block) => block.content),
       ['more detail'],
+    );
+    assert.deepEqual(
+      requests[1]?.context.filter(isStableInstruction),
+      requests[0]?.context.filter(isStableInstruction),
     );
     assert.deepEqual(
       f.platform.sent.map((message) => message.text),
@@ -6250,10 +6256,7 @@ test('agent run spans summarize the last usage, native and framework tools, and 
     })),
   );
   const instructions = observed.context
-    .filter(
-      ({ source, trust }) =>
-        trust === 'trusted' && (source === 'system' || source === 'rule'),
-    )
+    .filter(isStableInstruction)
     .map(renderContextLine)
     .join('\n');
   const hash = (text: string) =>
@@ -6355,7 +6358,7 @@ test('agent run spans summarize the last usage, native and framework tools, and 
   assert.equal(nextRun?.prompt?.resumed, true);
   assert.equal(nextRun?.prompt?.newChars, 'Follow-up'.length);
   assert.equal(nextRun?.prompt?.summaryChars, 0);
-  assert.equal(nextRun?.prompt?.instructionsChanged, true);
+  assert.equal(nextRun?.prompt?.instructionsChanged, false);
   assert.equal(nextRun?.prompt?.toolsChanged, false);
 });
 

@@ -49,6 +49,10 @@ Open a task in the owner console to inspect its trigger decision, resolved model
 
 The task list shows the prompt cache hit ratio when the provider reports it. Task details show token counts and prompt composition per agent run, including tool and instruction hashes that help identify changes across a resumed session.
 
+Run `corepack pnpm exec tsugimori prompt-report ./ws [--json]` under the running gateway's OS account. The command reads the local gateway socket and reports sizes, IDs, hashes, and usage counts. It lists each attached platform's framework tools by description and serialized input schema size, including the existing incognito and cross-target schedule variants. Provider-supplied tools are outside the framework inventory.
+
+The report shows the rolling summary available to carry over after `/new`, its serialized block size, and the 4,000-character limit. Its token estimate divides UTF-8 bytes by four, rounded up. Each chat includes up to ten persisted runs, recorded compactions and explicit resets, and the active agent's `compactAt`. The p50, p90, and max use the latest run with input usage in that window from each chat. A missing provider metric is shown as a dash in text and `null` in JSON.
+
 The console also shows raw Telegram and LINE message payloads when available. Private commands omit their raw payload. Agent text, visible reasoning, and tool details use secret redaction. Stored tool arguments and results are capped at 64 KiB per field, with a 4 KiB cap for web search results. Codex web search records include the item duration and any result data Codex exposes. `web.toolDetails.maxChars` controls how much the console displays.
 
 `records.maxBytes` defaults to 2 GiB (2,147,483,648 bytes). The gateway checks usage one minute after startup and hourly thereafter. When usage exceeds the cap, it prunes the oldest transcripts and task input/output, then raw message payloads, then unreferenced guideline blobs and summary versions. It aims for 90% of the cap and keeps task outcomes, message text, and tool-call metadata. Records have no age limit.
@@ -58,6 +62,8 @@ The build writes `packages/core/dist/build-info.json` with the source commit, di
 Owners are identified by native platform user ID. Set `owner` by adapter ID or platform kind, with the adapter ID taking precedence. When an owner adds a platform from chat, the gateway sends its pairing code privately once the unowned platform attaches. An owner can also DM `/pair new <id>` to a bot they own to replace the code. For the first owner, run `corepack pnpm exec tsugimori pair ./ws --adapter <id>`. Send the resulting `/pair <code>` line to the new bot in a DM within 24 hours. Issuing a new code for the same adapter replaces the previous code. Pairing or configuring an owner invalidates any pending code. Owners trigger the agent in a DM or by mentioning the bot. In an allowlisted chat, members can trigger it by mentioning or replying to the bot. Ordinary messages can enter chat history even when they do not trigger a turn.
 
 The gateway resumes an existing agent session when possible, using new chat content since its previous turn. Chat overrides take precedence over approved chat workspace settings, then the agent entry, then provider defaults. Codex and Claude support changing model, thinking, and fast settings on the next turn of an existing session. Switching agents or changing an option that requires a fresh session rebuilds context from that chat's stored history.
+
+Claude keeps workspace and platform guidance in the system prompt across chat turns. Both adapters put trusted instructions for a single turn after the conversation input in a delimited section. The recorded instruction hash measures the stable guidance.
 
 ### Context and summaries
 

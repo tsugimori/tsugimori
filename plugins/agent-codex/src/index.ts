@@ -830,7 +830,10 @@ export class CodexAgent implements AgentConnector {
         input: [
           {
             type: 'text',
-            text: renderContext(request.context, resumeSessionId !== undefined),
+            text: renderContext(
+              request.context,
+              Boolean(resumeSessionId || request.forkSessionId),
+            ),
             text_elements: [],
           },
           ...(request.images ?? []).flatMap(({ data, mime, source }) => [

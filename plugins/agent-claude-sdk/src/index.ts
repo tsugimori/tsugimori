@@ -17,7 +17,6 @@ import type {
   AgentRequest,
   AgentSessionInfo,
   AgentSettings,
-  ContextBlock,
   ImageLimits,
   PluginFactoryContext,
 } from '@tsugimori/plugin-sdk';
@@ -26,9 +25,10 @@ import {
   defaultCompactAt,
   definePlugin,
   imageLimits,
-  isTrustedInstruction,
+  isStableInstruction,
   nativeCompactionLimit,
-  renderContextLine,
+  renderStableInstructions,
+  renderTurnContext,
   toolWireName,
 } from '@tsugimori/plugin-sdk';
 import { mkdir, realpath } from 'node:fs/promises';
@@ -75,10 +75,6 @@ const defaultImageLimits: ImageLimits = {
   maxBytes: 7_500_000,
   maxPixels: 1568 * 28 ** 2,
 };
-
-function render(blocks: ContextBlock[]) {
-  return blocks.map(renderContextLine).join('\n');
-}
 
 async function* imagePrompt(
   text: string,
@@ -322,10 +318,13 @@ export class ClaudeAgent implements AgentConnector {
       const query =
         this.#query ?? (await import('@anthropic-ai/claude-agent-sdk')).query;
       signal.throwIfAborted();
-      const instructions = request.context.filter(isTrustedInstruction);
-      const context = request.resumeSessionId
-        ? request.context.filter(({ source }) => source === 'message')
-        : request.context.filter((block) => !isTrustedInstruction(block));
+      const instructions = renderStableInstructions(request.context);
+      const context = renderTurnContext(
+        request.context,
+        request.resumeSessionId
+          ? ({ source }) => source === 'message'
+          : (block) => !isStableInstruction(block),
+      );
       const registered = request.tools.length
         ? gatewayTools(
             (await import('@anthropic-ai/claude-agent-sdk')).createSdkMcpServer,
@@ -342,7 +341,7 @@ export class ClaudeAgent implements AgentConnector {
           request.ephemeral || request.purpose ? false : undefined,
         resume: request.resumeSessionId,
         effort: effortLevels.find((level) => level === request.thinking),
-        systemPrompt: instructions.length ? render(instructions) : undefined,
+        systemPrompt: instructions || undefined,
         settingSources: [],
         skills: [],
         strictMcpConfig: true,
@@ -445,8 +444,8 @@ export class ClaudeAgent implements AgentConnector {
         prompt:
           command ??
           (request.images?.length
-            ? imagePrompt(render(context), request.images)
-            : render(context)),
+            ? imagePrompt(context, request.images)
+            : context),
         options,
       })) {
         signal.throwIfAborted();

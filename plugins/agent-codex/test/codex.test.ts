@@ -205,9 +205,15 @@ for await (const line of createInterface({ input: process.stdin })) {
       assert.equal(params.model, process.env.TEST_CODEX_DEFAULT_MODEL ? undefined : 'fake-model');
       assert.equal(params.effort, 'low');
     }
-    const blocks = params.input[0].text.split('\n').map((line) => JSON.parse(line));
-    assert.deepEqual(blocks.map(({ source }) => source), thread.fork ? ['system', 'message'] : thread.resumed ? ['message'] : ['rule', 'message']);
-    if (thread.fork) assert.match(blocks[0].content, /Answer only this side question/);
+    const lines = params.input[0].text.split('\n');
+    if (thread.fork) {
+      const [open, instruction, close] = lines.splice(-3);
+      assert.equal(open, '<trusted_turn_instructions>');
+      assert.equal(close, '</trusted_turn_instructions>');
+      assert.match(JSON.parse(instruction).content, /Answer only this side question/);
+    }
+    const blocks = lines.map((line) => JSON.parse(line));
+    assert.deepEqual(blocks.map(({ source }) => source), thread.fork || thread.resumed ? ['message'] : ['rule', 'message']);
     const input = blocks.at(-1).content;
     if (input === 'photo') assert.deepEqual(params.input.slice(1), [
       { type: 'text', text: '{"messageId":"photo","index":0}', text_elements: [] },
@@ -966,6 +972,7 @@ test(
           ephemeral: true,
           context: [
             {
+              scope: 'turn',
               source: 'system',
               trust: 'trusted',
               content: 'Answer only this side question.',

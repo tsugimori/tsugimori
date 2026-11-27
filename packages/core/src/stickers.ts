@@ -668,6 +668,7 @@ export class StickerIndex {
         images: [image],
         context: [
           {
+            scope: 'turn',
             source: 'system',
             trust: 'trusted',
             content: prompt,

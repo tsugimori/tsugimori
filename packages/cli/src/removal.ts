@@ -20,10 +20,12 @@ import { createInterface } from 'node:readline';
 import { terminalIO } from './setup.ts';
 
 type WebhookInfo = ReturnType<Gateway['webhookInfo']>;
+type PromptReport = ReturnType<Gateway['promptReport']>;
 
 interface Controller {
   execute(plan: RemovalPlan): Promise<string>;
   plan(target: RemovalTarget): Promise<RemovalPlan>;
+  promptReport?(): Promise<PromptReport>;
   waitForPlatformDetach?(id: string): Promise<void>;
   webhookInfo?(platformId?: string): Promise<WebhookInfo>;
 }
@@ -31,6 +33,7 @@ interface Controller {
 type Response =
   | { locale: RemovalPlan['locale']; plan: string }
   | { error: string }
+  | { promptReport: PromptReport }
   | { result: string }
   | { webhook: WebhookInfo }
   | { detached: true };
@@ -131,6 +134,18 @@ async function serve(socket: Socket, controller: Controller) {
       socket.end(
         JSON.stringify({ webhook: await controller.webhookInfo(id) }) + '\n',
       );
+      return;
+    }
+    if (
+      payload &&
+      typeof payload === 'object' &&
+      'action' in payload &&
+      payload.action === 'prompt-report'
+    ) {
+      const response: Response = controller.promptReport
+        ? { promptReport: await controller.promptReport() }
+        : { error: 'The running gateway does not provide prompt reports.' };
+      socket.end(JSON.stringify(response) + '\n');
       return;
     }
     if (
@@ -320,6 +335,22 @@ export async function readGatewayWebhook(
   if (!response || 'webhook' in response) return response?.webhook;
   throw new SetupError(
     'Could not read webhook status from the running gateway.',
+  );
+}
+
+export async function readGatewayPromptReport(workspace: string) {
+  const response = await requestGateway(
+    workspace,
+    { action: 'prompt-report' },
+    10_000,
+  );
+  if (!response)
+    throw new SetupError(
+      'Start the gateway in this workspace before running a prompt report.',
+    );
+  if ('promptReport' in response) return response.promptReport;
+  throw new SetupError(
+    'Could not read the prompt report from the running gateway.',
   );
 }
 

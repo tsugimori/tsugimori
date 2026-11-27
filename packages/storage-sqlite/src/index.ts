@@ -26,6 +26,8 @@ import type {
   IndexedSticker,
   MessageRecord,
   NewMessage,
+  PromptRunRecord,
+  PromptSessionRecord,
   RemovalRows,
   RemovalTarget,
   ScheduleAddress,
@@ -2142,6 +2144,71 @@ export class SqliteStore implements Store {
       .where(and(eq(sessionScope(attrs), scope), matches[metric]))
       .orderBy(desc(traceSpans.id))
       .get();
+  }
+
+  listPromptHistory(runsPerChat: number) {
+    const taskSpan = sql`join ${traceSpans} on json_extract(${traceSpans.attrs}, '$.taskId') = ${tasks.id}`;
+    const runs = this.#db.all(sql`
+      with ranked as (
+        select ${tasks.adapterId} as adapterId, ${tasks.chatId} as chatId,
+          ${tasks.id} as taskId, ${traceSpans.startedAt} as startedAt,
+          json_extract(${traceSpans.attrs}, '$.agentId') as agentId,
+          json_extract(${traceSpans.attrs}, '$.inputTokens') as inputTokens,
+          json_extract(${traceSpans.attrs}, '$.cachedInputTokens') as cachedInputTokens,
+          json_extract(${traceSpans.attrs}, '$.instructionsHash') as instructionsHash,
+          json_extract(${traceSpans.attrs}, '$.toolsHash') as toolsHash,
+          ${sessionScope(traceSpans.attrs)} as sessionScope,
+          row_number() over (partition by ${tasks.adapterId}, ${tasks.chatId}
+            order by ${traceSpans.startedAt} desc, ${traceSpans.id} desc) as rank
+        from ${tasks} ${taskSpan}
+        where ${traceSpans.name} = 'agent.run'
+          and json_extract(${traceSpans.attrs}, '$.purpose') is null
+      )
+      select adapterId, chatId, taskId, startedAt, agentId, inputTokens,
+        cachedInputTokens, instructionsHash, toolsHash, sessionScope
+      from ranked where rank <= ${runsPerChat}
+      order by adapterId, chatId, rank
+    `) as PromptRunRecord[];
+    const sessions = this.#db.all(sql`
+      with compactions as (
+        select ${tasks.adapterId} as adapterId, ${tasks.chatId} as chatId,
+          count(*) as compactions, max(${traceSpans.endedAt}) as lastCompactionAt
+        from ${tasks} ${taskSpan}
+        where ${traceSpans.name} = 'agent.compaction' and ${traceSpans.status} = 'ok'
+          and json_extract(${traceSpans.attrs}, '$.purpose') is null
+        group by ${tasks.adapterId}, ${tasks.chatId}
+      ),
+      resets as (
+        select ${traceSpans.endedAt} as endedAt,
+          ${sessionScope(traceSpans.attrs)} as scope,
+          json_extract(${traceSpans.attrs}, '$.adapterId') as adapterId,
+          json_extract(${traceSpans.attrs}, '$.chatId') as chatId
+        from ${traceSpans} where ${traceSpans.name} = 'session.reset'
+      ),
+      reset_chats as (
+        select adapterId, chatId, endedAt from resets where adapterId is not null
+        union all
+        select ${tasks.adapterId}, ${tasks.chatId}, resets.endedAt
+        from resets join ${traceSpans} on ${sessionScope(traceSpans.attrs)} = resets.scope
+          and ${traceSpans.name} = 'agent.run'
+        join ${tasks} on ${tasks.id} = json_extract(${traceSpans.attrs}, '$.taskId')
+        where resets.adapterId is null
+      ),
+      last_resets as (
+        select adapterId, chatId, max(endedAt) as lastResetAt
+        from reset_chats group by adapterId, chatId
+      )
+      select ${chats.adapterId} as adapterId, ${chats.chatId} as chatId,
+        coalesce(compactions.compactions, 0) as compactions,
+        compactions.lastCompactionAt, last_resets.lastResetAt
+      from ${chats}
+      left join compactions on compactions.adapterId = ${chats.adapterId}
+        and compactions.chatId = ${chats.chatId}
+      left join last_resets on last_resets.adapterId = ${chats.adapterId}
+        and last_resets.chatId = ${chats.chatId}
+      order by ${chats.adapterId}, ${chats.chatId}
+    `) as PromptSessionRecord[];
+    return { runs, sessions };
   }
 
   sessionHistory(scope: string): SessionHistory {

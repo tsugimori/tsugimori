@@ -14,7 +14,7 @@ import type {
 import type { ApprovalContinuation, TraceSpan } from '@tsugimori/storage';
 import type { Tracer } from '@tsugimori/trace';
 
-import { isTrustedInstruction, renderContextLine } from '@tsugimori/plugin-sdk';
+import { renderStableInstructions } from '@tsugimori/plugin-sdk';
 import { Ajv } from 'ajv';
 import { createHash } from 'node:crypto';
 
@@ -60,23 +60,32 @@ function isPendingApproval(result: unknown) {
   );
 }
 
-function promptComposition(
-  request: AgentRequest,
-  newMessages: AgentRunDependencies['newMessages'],
+function promptHash(value: string) {
+  return createHash('sha256').update(value).digest('hex').slice(0, 16);
+}
+
+export function toolComposition(
+  tools: readonly Pick<ToolDefinition, 'name' | 'description' | 'schema'>[],
 ) {
-  const tools = JSON.stringify(
-    request.tools.map(({ name, description, schema }) => ({
+  const serialized = JSON.stringify(
+    tools.map(({ name, description, schema }) => ({
       name,
       description,
       schema,
     })),
   );
-  const instructions = request.context
-    .filter(isTrustedInstruction)
-    .map(renderContextLine)
-    .join('\n');
-  const hash = (value: string) =>
-    createHash('sha256').update(value).digest('hex').slice(0, 16);
+  return {
+    toolCount: tools.length,
+    toolsChars: serialized.length,
+    toolsHash: promptHash(serialized),
+  };
+}
+
+function promptComposition(
+  request: AgentRequest,
+  newMessages: AgentRunDependencies['newMessages'],
+) {
+  const instructions = renderStableInstructions(request.context);
   let summaryChars = 0;
   let historyChars = 0;
   let newChars = 0;
@@ -89,11 +98,9 @@ function promptComposition(
   }
   return {
     resumed: Boolean(request.resumeSessionId),
-    toolCount: request.tools.length,
-    toolsChars: tools.length,
-    toolsHash: hash(tools),
+    ...toolComposition(request.tools),
     instructionsChars: instructions.length,
-    instructionsHash: hash(instructions),
+    instructionsHash: promptHash(instructions),
     summaryChars,
     historyChars,
     newChars,

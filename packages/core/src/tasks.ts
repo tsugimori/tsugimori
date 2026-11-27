@@ -35,7 +35,10 @@ import type { Tracer } from '@tsugimori/trace';
 
 import { approvalCallbackId } from '@tsugimori/auth';
 import { messageContext } from '@tsugimori/context';
-import { pendingApprovalResult } from '@tsugimori/plugin-sdk';
+import {
+  isStableInstruction,
+  pendingApprovalResult,
+} from '@tsugimori/plugin-sdk';
 import { containsMention, scheduleReplyStyle } from '@tsugimori/scheduler';
 import { createHash, randomUUID } from 'node:crypto';
 import { rm } from 'node:fs/promises';
@@ -321,6 +324,7 @@ export class Tasks {
     const session = agentId ? store.getSession(chat, agentId) : undefined;
     store.clearSession(chat, incognitoId);
     trace.record('session.reset', {
+      ...chat,
       sessionScope: session
         ? sessionScope(
             { ...chat, chatId: session.scopeChatId ?? chat.chatId },
@@ -934,14 +938,30 @@ export class Tasks {
     }
   }
 
-  #toolDefinitions(adapter: PlatformAdapter, incognito: boolean, work?: Work) {
+  toolInventories(adapter: PlatformAdapter) {
+    return [
+      { mode: 'standard', incognito: false, sendAllowed: true },
+      { mode: 'incognito', incognito: true, sendAllowed: true },
+      { mode: 'cross-target schedule', incognito: false, sendAllowed: false },
+      {
+        mode: 'incognito cross-target schedule',
+        incognito: true,
+        sendAllowed: false,
+      },
+    ].map(({ mode, incognito, sendAllowed }) => ({
+      mode,
+      definitions: this.#toolDefinitions(adapter, incognito, { sendAllowed }),
+    }));
+  }
+
+  #toolDefinitions(
+    adapter: PlatformAdapter,
+    incognito: boolean,
+    { work, sendAllowed = true }: { sendAllowed?: boolean; work?: Work } = {},
+  ) {
     const { store, context, toolDetails } = this.#deps;
     const scheduled = work?.input.scheduled;
     const message = work?.input.message;
-    const sendAllowed =
-      !scheduled ||
-      (message?.chatId === scheduled.target.chatId &&
-        message?.threadId === scheduled.target.threadId);
     return [
       ...this.#deps.tools.filter(
         ({ name }) =>
@@ -1135,7 +1155,13 @@ export class Tasks {
     const definitions = this.#toolDefinitions(
       adapter,
       incognitoId !== undefined,
-      work,
+      {
+        work,
+        sendAllowed:
+          !input.scheduled ||
+          (input.message.chatId === input.scheduled.target.chatId &&
+            input.message.threadId === input.scheduled.target.threadId),
+      },
     );
     const previousSession = store.getSession(
       chat,
@@ -1216,6 +1242,7 @@ export class Tasks {
             kind: 'system',
             name: 'schedule-style',
             block: {
+              scope: 'stable',
               source: 'system',
               trust: 'trusted',
               content: scheduleReplyStyle,
@@ -1225,6 +1252,7 @@ export class Tasks {
           entries.push({
             kind: 'new',
             block: {
+              scope: 'turn',
               source: 'system',
               trust: 'trusted',
               content:
@@ -1239,9 +1267,10 @@ export class Tasks {
           entries.splice(at < 0 ? entries.length : at, 0, {
             kind: 'new',
             block: {
+              scope: 'turn',
               source: 'system',
               trust: 'trusted',
-              content: `The next message was sent to you with the /${input.sessionCommand.mode} command. Reply to it.`,
+              content: `The latest message was sent to you with the /${input.sessionCommand.mode} command. Reply to it.`,
             },
           });
         }
@@ -1249,6 +1278,7 @@ export class Tasks {
           entries.unshift({
             kind: 'new',
             block: {
+              scope: 'turn',
               source: 'system',
               trust: 'trusted',
               content:
@@ -1492,9 +1522,9 @@ export class Tasks {
         work.acceptsSupplements = false;
         break;
       }
-      blocks = next.map((input) => deliverSupplement(input).block);
-      newMessages = new Set(blocks);
-      media = blocks;
+      media = next.map((input) => deliverSupplement(input).block);
+      newMessages = new Set(media);
+      blocks = [...assembled.blocks.filter(isStableInstruction), ...media];
     }
     const seenAfter = [
       ...new Set([...(session?.seenAfter ?? []), ...supplements.delivered]),

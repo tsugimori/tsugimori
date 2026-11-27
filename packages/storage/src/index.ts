@@ -125,6 +125,23 @@ export interface SessionHistory {
   tasks?: number;
 }
 
+export interface PromptRunRecord extends ChatRef {
+  agentId: string;
+  cachedInputTokens: number | null;
+  inputTokens: number | null;
+  instructionsHash: string | null;
+  sessionScope: string | null;
+  startedAt: number;
+  taskId: string;
+  toolsHash: string | null;
+}
+
+export interface PromptSessionRecord extends ChatRef {
+  compactions: number;
+  lastCompactionAt: number | null;
+  lastResetAt: number | null;
+}
+
 export interface AgentSession extends ChatRef {
   agentId: string;
   /** The model at session creation, which keeps the session scope stable. */
@@ -591,6 +608,10 @@ export interface Store {
   listMigratedApprovalPrompts(adapterId: string, now: number): ApprovalRecord[];
   listPendingApprovals(ref: ChatRef): ApprovalRecord[];
   listPreviews(adapterId?: string): StoredPreview[];
+  listPromptHistory(runsPerChat: number): {
+    runs: PromptRunRecord[];
+    sessions: PromptSessionRecord[];
+  };
   listSchedules(ref: ChatRef): ScheduleRecord[];
   listStickerSets(): StickerSetStatus[];
   listUnavailableCommandScopes(

@@ -36,8 +36,10 @@ import { dirname, join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { isDeepStrictEqual, parseArgs } from 'node:util';
 
+import { formatPromptReport } from './prompt-report.ts';
 import {
   listenForRemoval,
+  readGatewayPromptReport,
   readGatewayWebhook,
   runRemoval,
   waitForGatewayPlatformDetach,
@@ -45,7 +47,7 @@ import {
 import { doctorText, runSetup, terminalIO } from './setup.ts';
 
 const usage =
-  'Usage: tsugimori init [dir] | start [dir] | pair [dir] --adapter <id> | previews [dir] | doctor [dir] [--json] | setup [dir] [--yes] [--upgrade] | add <agent|platform> <kind> [--id <id>] [--dir <dir>] | setup <agent|platform> <kind> [--id <id>] [--dir <dir>] | setup login <id> [--dir <dir>] | remove <platform|agent> <id> [--dir <dir>] [--yes]';
+  'Usage: tsugimori init [dir] | start [dir] | pair [dir] --adapter <id> | previews [dir] | doctor [dir] [--json] | prompt-report [dir] [--json] | setup [dir] [--yes] [--upgrade] | add <agent|platform> <kind> [--id <id>] [--dir <dir>] | setup <agent|platform> <kind> [--id <id>] [--dir <dir>] | setup login <id> [--dir <dir>] | remove <platform|agent> <id> [--dir <dir>] [--yes]';
 
 class UsageError extends Error {}
 
@@ -79,6 +81,7 @@ export async function main(
     command !== 'pair' &&
     command !== 'previews' &&
     command !== 'doctor' &&
+    command !== 'prompt-report' &&
     command !== 'setup' &&
     command !== 'add' &&
     command !== 'remove'
@@ -94,7 +97,7 @@ export async function main(
         ? { dir: { type: 'string' } }
         : command === 'pair'
           ? { adapter: { type: 'string' } }
-          : command === 'doctor'
+          : command === 'doctor' || command === 'prompt-report'
             ? { json: { type: 'boolean' } }
             : command === 'setup'
               ? { yes: { type: 'boolean' }, upgrade: { type: 'boolean' } }
@@ -214,6 +217,15 @@ export async function main(
   const workspace = resolve(parsed.positionals[0] ?? '.');
 
   switch (command) {
+    case 'prompt-report': {
+      const report = await readGatewayPromptReport(workspace);
+      console.log(
+        parsed.values.json
+          ? JSON.stringify(report, null, 2)
+          : formatPromptReport(report),
+      );
+      return;
+    }
     case 'doctor': {
       const checks = new EnvironmentChecks(deps, workspace);
       const snapshot = await loadConfig(workspace, registry);
@@ -409,6 +421,7 @@ async function start(
     webhookInfo: async (id) => (await gateway()).webhookInfo(id),
     waitForPlatformDetach: async (id) =>
       (await gateway()).waitForPlatformDetach(id),
+    promptReport: async () => (await gateway()).promptReport(),
   });
   try {
     await startGateway(workspace, registry, deps, ready.resolve);

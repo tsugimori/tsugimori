@@ -82,6 +82,7 @@ async function existsAtPath(path: string) {
 }
 
 export const privateGuidelineBlock: ContextBlock = {
+  scope: 'stable',
   source: 'system',
   trust: 'trusted',
   content:
@@ -97,12 +98,14 @@ export const guidelineBlock: ContextBlock = {
 
 export const telegramTableBlocks = {
   'telegram-tables-bullets': {
+    scope: 'stable',
     source: 'system',
     trust: 'trusted',
     content:
       'Telegram shows Markdown tables as bullet lists; prefer short lists or sections over tables.',
   },
   'telegram-tables-rich': {
+    scope: 'stable',
     source: 'system',
     trust: 'trusted',
     content:
@@ -126,6 +129,7 @@ function platformIdentityBlock(
   const name = displayName ? JSON.stringify(displayName) : handle;
   const suffix = displayName && handle ? ` (${handle})` : '';
   return {
+    scope: 'stable',
     source: 'system',
     trust: 'trusted',
     content: `On this platform you are ${name}${suffix}. A mention of this name or a reply to your message refers to you.`,
@@ -138,6 +142,7 @@ export function guidelineFileBlock(
 ): ContextBlock {
   const chat = path.startsWith('chats/');
   return {
+    ...(chat ? {} : { scope: 'stable' as const }),
     source: 'rule',
     trust: chat ? 'member' : 'trusted',
     content: `--- ${chat ? 'chat rules: ' + path.split('/').at(-1) : path} ---\n${content}`,
@@ -194,14 +199,11 @@ export class ContextAssembler {
     const entries: AssembledEntry[] = [];
     const { incognitoId } = request;
     let afterSummarySeq: number | undefined;
-    if (request.afterSeq === undefined) {
-      entries.push({
-        kind: 'system',
-        name: incognitoId === undefined ? 'guidelines' : 'private-guidelines',
-        block:
-          incognitoId === undefined ? guidelineBlock : privateGuidelineBlock,
-      });
-    }
+    entries.push({
+      kind: 'system',
+      name: incognitoId === undefined ? 'guidelines' : 'private-guidelines',
+      block: incognitoId === undefined ? guidelineBlock : privateGuidelineBlock,
+    });
     const identity = platformIdentityBlock(request.botIdentity);
     if (identity) entries.push({ kind: 'new', block: identity });
     if (request.kind === 'telegram') {
@@ -210,8 +212,8 @@ export class ContextAssembler {
         : 'telegram-tables-bullets';
       entries.push({ kind: 'system', name, block: telegramTableBlocks[name] });
     }
+    entries.push(...(await this.#loadRules(request)));
     if (request.afterSeq === undefined) {
-      entries.push(...(await this.#loadRules(request)));
       const summary =
         request.history === 'none' || incognitoId !== undefined
           ? undefined
@@ -293,7 +295,7 @@ export class ContextAssembler {
           block: guidelineFileBlock(path, content),
         });
     }
-    if (await existsAtPath(chatRules)) {
+    if (request.afterSeq === undefined && (await existsAtPath(chatRules))) {
       const entries = await readdir(chatRules, { withFileTypes: true }).catch(
         (error: unknown) => {
           if (!isMissing(error)) throw error;

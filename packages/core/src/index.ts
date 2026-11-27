@@ -35,7 +35,12 @@ import {
   watch,
 } from '@tsugimori/config';
 import { ContextAssembler } from '@tsugimori/context';
-import { SendFailure, SetupError, ToolFailure } from '@tsugimori/plugin-sdk';
+import {
+  defaultCompactAt,
+  SendFailure,
+  SetupError,
+  ToolFailure,
+} from '@tsugimori/plugin-sdk';
 import {
   prepareReminder,
   reminderEntities,
@@ -81,6 +86,7 @@ import { Memory, memoryAction } from './memory.ts';
 import { conversationId, Outbound } from './outbound.ts';
 import { pairingContact } from './pairing.ts';
 import { Previews } from './previews.ts';
+import { buildPromptReport, platformPromptSizes } from './prompt-report.ts';
 import { PluginRegistry } from './registry.ts';
 import { removalMessages } from './removal-messages.ts';
 import { defaultAgent, Removal } from './removal.ts';
@@ -639,6 +645,26 @@ export class Gateway {
       attached:
         platformId !== undefined && !!this.#runtime.getAdapter(platformId),
     };
+  }
+
+  promptReport() {
+    const platforms = this.#runtime.adapterIds.flatMap((id) => {
+      const adapter = this.#runtime.getAdapter(id);
+      return adapter
+        ? [platformPromptSizes(id, this.#tasks.toolInventories(adapter))]
+        : [];
+    });
+    return buildPromptReport(
+      this.#deps.store,
+      platforms,
+      this.#runtime.config.context.summary?.enabled !== false,
+      (chat) => {
+        const { selected } = this.#tasks.route(chat);
+        return selected
+          ? (selected.config.compactAt ?? defaultCompactAt)
+          : null;
+      },
+    );
   }
 
   #notifyAdminReload() {

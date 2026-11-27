@@ -407,12 +407,18 @@ export interface PlatformAdapter {
 export interface ContextBlock {
   content: string;
   message?: ContextMessage;
+  /** Trusted instructions without a scope are treated as stable. */
+  scope?: 'stable' | 'turn';
   source: 'system' | 'rule' | 'summary' | 'message' | 'tool' | 'external';
   trust: 'trusted' | 'owner' | 'member' | 'untrusted';
 }
 
 export function isTrustedInstruction({ source, trust }: ContextBlock) {
   return trust === 'trusted' && (source === 'system' || source === 'rule');
+}
+
+export function isStableInstruction(block: ContextBlock) {
+  return isTrustedInstruction(block) && block.scope !== 'turn';
 }
 
 export function renderContextLine({
@@ -422,6 +428,35 @@ export function renderContextLine({
   trust,
 }: ContextBlock) {
   return JSON.stringify({ source, trust, ...message, content });
+}
+
+export function renderStableInstructions(blocks: readonly ContextBlock[]) {
+  return blocks.filter(isStableInstruction).map(renderContextLine).join('\n');
+}
+
+export function renderTurnContext(
+  blocks: readonly ContextBlock[],
+  include: (block: ContextBlock) => boolean,
+) {
+  const context: string[] = [];
+  const instructions: string[] = [];
+  for (const block of blocks) {
+    const turn = block.scope === 'turn' && isTrustedInstruction(block);
+    if (!turn && !include(block)) continue;
+    // Keep literal delimiters in context data inside their JSON strings.
+    const line = renderContextLine(block).replaceAll(
+      /<(?=\/?trusted_turn_instructions>)/g,
+      '\\u003c',
+    );
+    (turn ? instructions : context).push(line);
+  }
+  if (instructions.length)
+    context.push(
+      '<trusted_turn_instructions>',
+      ...instructions,
+      '</trusted_turn_instructions>',
+    );
+  return context.join('\n');
 }
 
 export type ResourceRef =
