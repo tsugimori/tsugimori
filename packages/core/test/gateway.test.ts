@@ -32,10 +32,12 @@ import {
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { Readable } from 'node:stream';
 import { test, type TestContext } from 'node:test';
 import { setTimeout as delay, setImmediate } from 'node:timers/promises';
 
 import type { Logger } from '../src/index.ts';
+import type { WebImageNetwork } from '../src/web-image.ts';
 
 import { LineApi } from '../../../plugins/platform-line/src/api.ts';
 import { mapEvent } from '../../../plugins/platform-line/src/updates.ts';
@@ -155,6 +157,7 @@ async function fixture(
     supportsSessionFork?: boolean;
     thinkingLevels?: AgentConnector['thinkingLevels'];
     web?: Config['web'];
+    webImageNetwork?: WebImageNetwork;
   } = {},
 ) {
   const workspace = await mkdtemp(join(tmpdir(), 'tsugimori-gateway-'));
@@ -238,6 +241,7 @@ async function fixture(
     registry,
     trace,
     previews: options.previews,
+    webImageNetwork: options.webImageNetwork,
     log: (entry) => logs.push(entry),
   });
   const { context: contextSettings } = options;
@@ -6526,6 +6530,225 @@ test('send tools require advertised capabilities and keep files and reactions in
   );
   assert.equal(f.store.getMessage(thread, 'upload-1')?.replyTo, 'source');
   assert.equal(f.platform.sent.at(-1)?.text, 'Here is the report.');
+});
+
+const webPng = Buffer.from('89504e470d0a1a0a', 'hex');
+const webImageUrl =
+  'https://images.example.test/a%20picture.png?signature=private-value';
+
+function webImages(requests: string[]): WebImageNetwork {
+  return {
+    async resolve(host) {
+      assert.equal(host, 'images.example.test');
+      return ['93.184.216.34'];
+    },
+    async connect(url, address) {
+      assert.equal(address, '93.184.216.34');
+      requests.push(url.href);
+      return Object.assign(Readable.from([webPng]), {
+        statusCode: url.pathname === '/missing.png' ? 404 : 200,
+        headers: {},
+      });
+    },
+  };
+}
+
+test('send.image accepts a single URL source and records the upload without the query in tool details', async (t) => {
+  const requests: string[] = [];
+  const f = await fixture(
+    t,
+    async function* (request) {
+      const image = request.tools.find(({ name }) => name === 'send.image');
+      assert.ok(image);
+      await assert.rejects(image.run({}), /Invalid tool arguments/);
+      await assert.rejects(
+        image.run({ url: webImageUrl, path: 'image.png' }),
+        /Invalid tool arguments/,
+      );
+      await assert.rejects(
+        image.run({
+          url: webImageUrl,
+          attachment: { messageId: 'source', index: 0 },
+        }),
+        /Invalid tool arguments/,
+      );
+      await assert.rejects(
+        image.run({ path: webImageUrl }),
+        /accessible chat workspace/,
+      );
+      assert.deepEqual(
+        await image.run({ url: webImageUrl }, undefined, 'web-image'),
+        {
+          messageId: 'uploaded',
+          messageIds: ['uploaded'],
+        },
+      );
+      yield { type: 'text.final', text: 'NO_REPLY: Image sent' };
+    },
+    true,
+    { webImageNetwork: webImages(requests) },
+  );
+  const { platform, sent } = f.platform;
+  platform.capabilities.images = { maxBytes: webPng.length };
+  platform.sendImage = async ({ file, replyTo }) => {
+    assert.deepEqual(file, {
+      bytes: webPng,
+      mime: 'image/png',
+      name: 'a_picture.png',
+    });
+    assert.equal(replyTo, 'source');
+    return { messageId: 'uploaded' };
+  };
+  await f.platform.emit(inbound('source', 'Send the image from the web'));
+  await f.gateway.idle();
+  await f.trace.flush();
+  const [task] = f.store.listChatTasks(chat);
+  assert.equal(task?.status, 'sent');
+  assert.deepEqual(requests, [webImageUrl]);
+  assert.deepEqual(sent, []);
+  assert.equal(f.store.getMessage(chat, 'uploaded')?.text, '[image]');
+  const calls = f.store.taskToolCalls([task.id]);
+  assert.deepEqual(
+    JSON.parse(calls.find(({ callId }) => callId === 'web-image')!.args!),
+    {
+      url: 'https://images.example.test/a%20picture.png',
+    },
+  );
+  assert.doesNotMatch(
+    JSON.stringify(f.store.taskTrace(task.id)),
+    /private-value/,
+  );
+});
+
+test('final replies send text before web images, retain failed URLs, and preserve code', async (t) => {
+  const missing = 'http://images.example.test/missing.png?signature=keep';
+  const second = 'http://images.example.test/second.png';
+  const fenced = '```markdown\n![example](' + webImageUrl + ')\n\n\n```';
+  const inSpan = '\`\`![example](' + missing + ')\`\`';
+  const escaped = '\\![escaped](' + missing + ')';
+  const indented = '    ![indented](' + second + ')';
+  const code = [fenced, inSpan, escaped, indented].join('\n\n');
+  const replies = [
+    'First\n\n![alt](' + webImageUrl + ')\n\nLast\n![second](' + second + ')',
+    '![alt](' + webImageUrl + ')\n',
+    '![missing](' + missing + ')',
+    code + '\n\n![](' + second + ')',
+  ];
+  const requests: string[] = [];
+  const events: string[] = [];
+  let round = 0;
+  let uploaded = 0;
+  const f = await fixture(
+    t,
+    async function* () {
+      yield { type: 'text.final', text: replies[round++]! };
+    },
+    true,
+    { webImageNetwork: webImages(requests) },
+  );
+  const { platform } = f.platform;
+  const send = platform.send.bind(platform);
+  platform.capabilities.images = { maxBytes: webPng.length };
+  platform.send = (message) => {
+    events.push(message.text);
+    return send(message);
+  };
+  platform.sendImage = async ({ file }) => {
+    events.push(file.name);
+    return { messageId: 'image-' + ++uploaded };
+  };
+  for (let i = 0; i < replies.length; i++) {
+    await f.platform.emit(inbound('web-' + i, 'Show me a web image'));
+    await f.gateway.idle();
+  }
+  await f.trace.flush();
+  assert.deepEqual(events, [
+    'First\n\nLast',
+    'a_picture.png',
+    'second.png',
+    'a_picture.png',
+    missing,
+    code,
+    'second.png',
+  ]);
+  assert.deepEqual(requests, [
+    webImageUrl,
+    second,
+    webImageUrl,
+    missing,
+    second,
+  ]);
+  const tasks = f.store.listChatTasks(chat);
+  for (const task of tasks) assert.equal(task.status, 'sent');
+  const firstTask = tasks.find(
+    ({ sourceMessageId }) => sourceMessageId === 'web-0',
+  )!;
+  assert.deepEqual(
+    f.store
+      .getTaskExecution(firstTask.id)
+      ?.outcome.delivery?.parts.map(({ messageId }) => messageId),
+    ['bot-1', 'image-1', 'image-2'],
+  );
+  assert.equal(f.store.getMessage(chat, 'image-3')?.text, '[image]');
+  assert.equal(
+    f.store
+      .taskTrace(firstTask.id)
+      .filter(({ name }) => name === 'outbound.send_media').length,
+    2,
+  );
+  assert.doesNotMatch(
+    JSON.stringify(f.store.taskTrace(firstTask.id)),
+    /private-value/,
+  );
+});
+
+test('final web images use the same outbound batch as text on queued platforms', async (t) => {
+  const requests: string[] = [];
+  let round = 0;
+  const f = await fixture(
+    t,
+    async function* () {
+      yield {
+        type: 'text.final',
+        text:
+          (round++ === 0 ? 'An image\n\n' : '') + '![](' + webImageUrl + ')',
+      };
+    },
+    true,
+    { webImageNetwork: webImages(requests) },
+  );
+  const { platform } = f.platform;
+  platform.capabilities.images = { maxBytes: webPng.length, queued: true };
+  platform.sendImage = async ({ replyTo }) => ({
+    queued: true,
+    id: 'handle-' + replyTo,
+  });
+  const send = platform.send.bind(platform);
+  const batches: string[][] = [];
+  platform.send = async (message, options) => {
+    const [handle] = options?.media ?? [];
+    assert.equal(handle?.id, 'handle-' + message.replyTo);
+    const imageId = 'image-' + message.replyTo;
+    const parts = [];
+    if (message.text)
+      parts.push({
+        messageId: (await send(message)).messageId,
+        text: message.text,
+      });
+    parts.push({ messageId: imageId, mediaId: handle?.id, text: '[image]' });
+    batches.push(parts.map(({ text }) => text));
+    return { messageId: parts[0]!.messageId, parts };
+  };
+  await f.platform.emit(inbound('with-text', 'Share a picture'));
+  await f.gateway.idle();
+  await f.platform.emit(inbound('image-only', 'Share just the picture'));
+  await f.gateway.idle();
+  assert.deepEqual(batches, [['An image', '[image]'], ['[image]']]);
+  assert.deepEqual(requests, [webImageUrl, webImageUrl]);
+  assert.equal(f.store.getMessage(chat, 'image-image-only')?.text, '[image]');
+  assert.ok(
+    f.store.listChatTasks(chat).every(({ status }) => status === 'sent'),
+  );
 });
 
 test('media-only rounds record queued IDs with their tool call and complete immediate sends without text', async (t) => {

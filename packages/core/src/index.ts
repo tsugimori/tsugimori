@@ -51,6 +51,7 @@ import type { MemoryResult } from './memory.ts';
 import type { PreviewProviders } from './previews.ts';
 import type { RemovalPlan } from './removal.ts';
 import type { PlatformNotice } from './runtime.ts';
+import type { WebImageNetwork } from './web-image.ts';
 
 import { untilAborted } from './abort.ts';
 import { adminReader } from './admin.ts';
@@ -110,6 +111,7 @@ interface GatewayDependencies {
   store: Store;
   summary?: SummaryProvider;
   trace?: Tracer;
+  webImageNetwork?: WebImageNetwork;
   workspace: string;
 }
 
@@ -200,6 +202,7 @@ export class Gateway {
     summary,
     previews,
     namedPreview,
+    webImageNetwork,
     setup = {},
     log = logToStderr,
   }: GatewayDependencies) {
@@ -265,6 +268,7 @@ export class Gateway {
       store,
       trace: this.#trace,
       hooks: this.#hooks,
+      webImageNetwork,
     });
     this.#auth = new Auth({
       store,

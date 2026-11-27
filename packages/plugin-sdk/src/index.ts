@@ -101,7 +101,11 @@ export interface PrincipalRef {
 export interface PlatformCapabilities {
   deleteEvents?: boolean;
   files?: { maxBytes: number };
-  images?: { maxBytes: number };
+  images?: {
+    maxBytes: number;
+    /** Prepare image handles for delivery together with the text reply. */
+    queued?: boolean;
+  };
   inlineButtons?: boolean;
   /** Defaults to `free`. `metered` uses quota for sends outside a current inbound reply. `none` supports only replies to a current inbound. */
   outboundPush?: 'free' | 'metered' | 'none';

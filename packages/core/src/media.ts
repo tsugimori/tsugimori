@@ -2,8 +2,12 @@ import type {
   AgentImage,
   ImageLimits,
   InboundAttachment,
+  MediaDestination,
+  MediaFile,
+  MediaUpload,
 } from '@tsugimori/plugin-sdk';
 
+import { ToolFailure } from '@tsugimori/plugin-sdk';
 import { spawn } from 'node:child_process';
 import { constants } from 'node:fs';
 import { access, stat } from 'node:fs/promises';
@@ -361,4 +365,39 @@ export async function prepareStickerGrid(
   throw new Error(
     'Sticker grid could not be encoded within the agent size limit',
   );
+}
+
+export function mediaUpload(
+  address: MediaDestination,
+  file: MediaFile,
+  signal: AbortSignal,
+): MediaUpload {
+  return {
+    ...address,
+    file,
+    async preview(maxBytes) {
+      const ffmpeg = await findFfmpeg();
+      if (!ffmpeg)
+        throw new ToolFailure(
+          'ffmpeg is required to prepare this media preview',
+        );
+      try {
+        const image = await prepareImage(
+          file.bytes,
+          {
+            index: 0,
+            kind: file.mime === 'video/mp4' ? 'video' : 'image',
+            mime: file.mime,
+          },
+          { maxBytes, maxEdge: 640 },
+          signal,
+          ffmpeg,
+        );
+        return { bytes: Buffer.from(image.data, 'base64'), mime: image.mime };
+      } catch {
+        signal.throwIfAborted();
+        throw new ToolFailure('Could not prepare this media preview');
+      }
+    },
+  };
 }

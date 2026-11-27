@@ -739,11 +739,15 @@ export class Tasks {
           : reply(message, text);
         if (scheduled && !scheduled.allowTextMentions && containsMention(text))
           throw new Error('Scheduled response contains an unapproved mention');
-        await this.#deliver(work, {
-          ...output,
-          format: !silent && result.text ? 'markdown' : undefined,
-          parseTextMentions: !silent && result.text ? undefined : false,
-        });
+        await this.#deliver(
+          work,
+          {
+            ...output,
+            format: !silent && result.text ? 'markdown' : undefined,
+            parseTextMentions: !silent && result.text ? undefined : false,
+          },
+          !silent && Boolean(result.text),
+        );
         delivered = true;
         outcome.kind = 'delivered';
       } else if (work.mediaDelivered) {
@@ -895,12 +899,14 @@ export class Tasks {
     work.mediaQueued = undefined;
   }
 
-  async #deliver(work: Work, message: OutboundMessage) {
+  async #deliver(work: Work, message: OutboundMessage, finalReply = false) {
     work.progress.stage = 'delivery';
     const timed = work.recorder?.timing('deliveryMs');
     let recorded = false;
     try {
-      return await this.#deps.outbound.send(work.adapter, message, {
+      const { outbound } = this.#deps;
+      const send = finalReply ? outbound.sendFinal : outbound.send;
+      return await send.call(outbound, work.adapter, message, {
         incognitoId: work.incognitoId,
         taskId: work.id,
         scheduled: work.input.scheduled !== undefined,

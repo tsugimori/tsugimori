@@ -88,9 +88,12 @@ description when available. The agent can still load the original image with
 
 Agents can send media in the current conversation using the tools supported by
 its platform. `send.image` and `send.file` accept a chat workspace path or
-`{ "attachment": { "messageId": "...", "index": 0 } }`. Telegram sends media
-immediately. LINE includes media with the final text when it can use a reply
-token and sends queued media even when the agent returns no text. [LINE delivery](plugins/platform-line/README.md#delivery-and-limits)
+`{ "attachment": { "messageId": "...", "index": 0 } }`. `send.image` also
+accepts a public HTTP(S) URL in `url`. Specify one source per call. When a final
+reply contains a Markdown image, the gateway sends it after the text or leaves
+its URL in the text if the download fails. Telegram sends media tools' uploads
+immediately. LINE includes queued media with the final reply, even when it has
+no text. [LINE delivery](plugins/platform-line/README.md#delivery-and-limits)
 
 Telegram sticker sets are indexed in the background for `sticker.search`. The
 index stores file IDs and descriptions without retaining image grids. The

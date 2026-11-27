@@ -27,7 +27,7 @@ import {
 import type { Outbound } from './outbound.ts';
 
 import { findAttachments } from './attachments.ts';
-import { findFfmpeg, prepareImage } from './media.ts';
+import { mediaUpload } from './media.ts';
 
 const string = { type: 'string', minLength: 1, maxLength: 1024 };
 const id = { type: 'string', minLength: 1, maxLength: 512 };
@@ -44,9 +44,16 @@ const attachmentSchema = properties(
   },
   ['messageId', 'index'],
 );
-const uploadSchema = {
-  ...properties({ path: string, attachment: attachmentSchema }, []),
-  oneOf: [{ required: ['path'] }, { required: ['attachment'] }],
+const uploadSchema = (image: boolean) => {
+  const sources = {
+    path: string,
+    attachment: attachmentSchema,
+    ...(image && { url: { ...string, maxLength: 8192 } }),
+  };
+  return {
+    ...properties(sources, []),
+    oneOf: Object.keys(sources).map((source) => ({ required: [source] })),
+  };
 };
 type Source =
   { attachment: { index: number; messageId: string } } | { path: string };
@@ -179,54 +186,25 @@ export function sendTools(
     tools.push({
       name: `send.${kind}`,
       description:
-        `Send ${kind === 'image' ? 'an image' : adapter.kind === 'line' ? 'an MP4 video' : 'a file or MP4 video'} to this chat from a path in the chat workspace or an attachment reference from this chat. Provide exactly one source.` +
-        completeReply,
-      schema: uploadSchema,
+        kind === 'image'
+          ? 'Send an image to this chat from exactly one source: a workspace path, chat attachment, or HTTP(S) URL.'
+          : `Send ${adapter.kind === 'line' ? 'an MP4 video' : 'a file or MP4 video'} to this chat from a path in the chat workspace or an attachment reference from this chat. Provide exactly one source.` +
+            completeReply,
+      schema: uploadSchema(kind === 'image'),
       async run(args, task) {
         current();
-        const file = await loadMedia(
-          deps,
-          adapter,
-          args as Source,
-          task,
-          capability.maxBytes,
-        );
+        const source = args as Source | { url: string };
+        const file =
+          'url' in source
+            ? await deps.outbound.fetchImage(
+                source.url,
+                capability.maxBytes,
+                task,
+              )
+            : await loadMedia(deps, adapter, source, task, capability.maxBytes);
         task.signal.throwIfAborted();
         return send(task, `[${kind}]`, (address) =>
-          upload(
-            {
-              ...address,
-              file,
-              async preview(maxBytes) {
-                const ffmpeg = await findFfmpeg();
-                if (!ffmpeg)
-                  throw new ToolFailure(
-                    'ffmpeg is required to prepare this media preview',
-                  );
-                try {
-                  const image = await prepareImage(
-                    file.bytes,
-                    {
-                      index: 0,
-                      kind: file.mime === 'video/mp4' ? 'video' : 'image',
-                      mime: file.mime,
-                    },
-                    { maxBytes, maxEdge: 640 },
-                    task.signal,
-                    ffmpeg,
-                  );
-                  return {
-                    bytes: Buffer.from(image.data, 'base64'),
-                    mime: image.mime,
-                  };
-                } catch {
-                  task.signal.throwIfAborted();
-                  throw new ToolFailure('Could not prepare this media preview');
-                }
-              },
-            },
-            task.signal,
-          ),
+          upload(mediaUpload(address, file, task.signal), task.signal),
         );
       },
     });

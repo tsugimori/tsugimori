@@ -38,6 +38,25 @@ function redactText(text: string) {
     );
 }
 
+function imageToolArguments(args: unknown) {
+  if (!args || typeof args !== 'object') return args;
+  const clean = { ...args } as Record<string, unknown>;
+  for (const key of ['url', 'path']) {
+    const value = clean[key];
+    if (
+      typeof value !== 'string' ||
+      (key === 'path' && !/^https?:\/\//i.test(value))
+    )
+      continue;
+    const url = URL.parse(value);
+    clean[key] =
+      url?.protocol === 'http:' || url?.protocol === 'https:'
+        ? url.origin + url.pathname
+        : redacted;
+  }
+  return clean;
+}
+
 export function capToolDetail(text: string, limit: number) {
   if (text.length <= limit) return text;
   const marker = (omitted: number) =>
@@ -184,6 +203,8 @@ export class ToolDetails {
     };
     const format = save(() => serializer(current));
     if (!format) return;
+    const input = (args: unknown) =>
+      format.field(name === 'send.image' ? imageToolArguments(args) : args);
     const seq = save(() =>
       store.createToolCall({
         taskId,
@@ -196,7 +217,7 @@ export class ToolDetails {
         startedAt: Date.now(),
         endedAt: null,
         status: null,
-        args: format.field(args),
+        args: input(args),
         result: null,
       }),
     );
@@ -221,7 +242,7 @@ export class ToolDetails {
           endedAt: Date.now(),
           result: format.field(result),
         }),
-      input: (args) => update({ args: format.field(args) }),
+      input: (args) => update({ args: input(args) }),
       pending: (approvalId) =>
         update({ approvalId, status: 'pending-approval' }),
       seq,

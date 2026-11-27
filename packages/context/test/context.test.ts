@@ -73,6 +73,11 @@ test('assembles ordered rules, marked recent messages, and scoped resume context
   const blocks = await context.assemble(input);
   assert.equal(blocks[0]?.source, 'system');
   assert.match(blocks[0]!.content, /with the guide\.read tool/);
+  assert.ok(
+    blocks[0]!.content.includes(
+      'To share a picture from the web, use `send.image` with its URL, leave Markdown images out of the text, and add a source link only if the user asks for it.',
+    ),
+  );
   assert.match(
     blocks[0]!.content,
     /A message sent with a session command is addressed to you\. `mentionsYou` and `repliesToYou` mean it tags or replies to you;.*judge from the text/,

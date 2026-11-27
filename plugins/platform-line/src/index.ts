@@ -46,7 +46,7 @@ import { webhook, webhookPath } from './webhook.ts';
 
 const uploadLimits = {
   files: { maxBytes: 200 * 1024 * 1024 },
-  images: { maxBytes: 10 * 1024 * 1024 },
+  images: { maxBytes: 10 * 1024 * 1024, queued: true },
 };
 const maxPreview = 1024 * 1024;
 type PendingMedia =

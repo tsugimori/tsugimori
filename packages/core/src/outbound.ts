@@ -2,6 +2,7 @@ import type {
   ApprovalReaction,
   ChatRef,
   MediaDestination,
+  MediaFile,
   MediaReceipt,
   OutboundMessage,
   PlatformAdapter,
@@ -15,8 +16,12 @@ import type { Tracer } from '@tsugimori/trace';
 import { SendFailure, ToolFailure } from '@tsugimori/plugin-sdk';
 
 import type { HookRunner, Logger } from './hooks.ts';
+import type { WebImageNetwork } from './web-image.ts';
 
 import { untilAborted } from './abort.ts';
+import { replaceMarkdownImages } from './markdown-images.ts';
+import { mediaUpload } from './media.ts';
+import { fetchWebImage } from './web-image.ts';
 
 export function conversationId({
   chatId,
@@ -33,6 +38,21 @@ interface OutboundDependencies {
   log: Logger;
   store: Store;
   trace: Tracer;
+  webImageNetwork?: WebImageNetwork;
+}
+
+interface SendOptions {
+  completeTask?: boolean;
+  incognitoId?: number;
+  media?: readonly QueuedMedia[];
+  onDelivery?(messageIds: readonly string[], error?: unknown): void;
+  onParts?(parts: readonly SendPart[], error?: unknown): void;
+  onReceipt?(receipt: SendReceipt): void;
+  scheduled?: boolean;
+  sessionBoundary?: boolean;
+  sideQuestion?: boolean;
+  signal?: AbortSignal;
+  taskId?: string;
 }
 
 export class Outbound {
@@ -183,8 +203,12 @@ export class Outbound {
     signal: AbortSignal,
     taskId: string,
     run: (address: MediaDestination) => Promise<MediaReceipt>,
-    onDelivery: (ids: readonly string[], error?: unknown) => void,
-    options: { incognitoId?: number; sideQuestion?: boolean } = {},
+    onDelivery?: (ids: readonly string[], error?: unknown) => void,
+    options: {
+      incognitoId?: number;
+      reply?: 'part' | 'last';
+      sideQuestion?: boolean;
+    } = {},
   ) {
     const { hooks, store, trace } = this.#deps;
     message = this.#address(adapter, message);
@@ -202,13 +226,17 @@ export class Outbound {
       );
     } catch (error) {
       const sent = error instanceof SendFailure ? error.parts : [];
-      onDelivery(
+      onDelivery?.(
         sent.map(({ messageId }) => messageId),
         error,
       );
       if (sent.length)
         this.#recordParts(adapter.id, message, sent, attrs, recording);
-      if (error instanceof SendFailure && error.cause instanceof Error)
+      if (
+        !options.reply &&
+        error instanceof SendFailure &&
+        error.cause instanceof Error
+      )
         throw new ToolFailure(
           error.deliveryUnknown
             ? 'Media delivery could not be confirmed'
@@ -220,8 +248,11 @@ export class Outbound {
     const parts = receipt.parts?.length
       ? receipt.parts
       : [{ ...receipt, text: message.text }];
-    onDelivery(parts.map(({ messageId }) => messageId));
-    this.#recordParts(adapter.id, message, parts, attrs, recording);
+    onDelivery?.(parts.map(({ messageId }) => messageId));
+    this.#recordParts(adapter.id, message, parts, attrs, {
+      ...recording,
+      completedTaskId: options.reply === 'last' ? taskId : undefined,
+    });
     const delivered = parts[0]!.chatId;
     if (delivered !== undefined)
       message = {
@@ -241,21 +272,130 @@ export class Outbound {
     };
   }
 
+  fetchImage(
+    url: string,
+    maxBytes: number,
+    {
+      chat,
+      signal,
+      taskId,
+    }: { chat: ChatRef; signal: AbortSignal; taskId: string },
+  ) {
+    const { trace, webImageNetwork } = this.#deps;
+    return trace.span('outbound.fetch_image', { ...chat, taskId }, () =>
+      fetchWebImage(url, maxBytes, signal, webImageNetwork),
+    );
+  }
+
+  async sendFinal(
+    adapter: PlatformAdapter,
+    message: OutboundMessage,
+    options: SendOptions & { signal: AbortSignal; taskId: string },
+  ) {
+    if (!message.text.includes('!['))
+      return this.send(adapter, message, options);
+    const { signal, taskId, onDelivery } = options;
+    const { store } = this.#deps;
+    const chat = { adapterId: adapter.id, chatId: conversationId(message) };
+    const images = adapter.capabilities.images;
+    const upload = adapter.sendImage?.bind(adapter);
+    if (!images || !upload) {
+      const text = await replaceMarkdownImages(
+        message.text,
+        async (url) => url,
+      );
+      return this.send(adapter, { ...message, text }, options);
+    }
+    const files: MediaFile[] = [];
+    const queued = [...(options.media ?? [])];
+    const { chatId, replyTo, threadId } = message;
+    const sendImage = (file: MediaFile, reply?: 'part' | 'last') =>
+      this.sendMedia(
+        adapter,
+        { chatId, replyTo, threadId, text: '[image]' },
+        signal,
+        taskId,
+        (address) => upload(mediaUpload(address, file, signal), signal),
+        onDelivery,
+        {
+          incognitoId: options.incognitoId,
+          reply,
+          sideQuestion: options.sideQuestion,
+        },
+      );
+    const text = await replaceMarkdownImages(message.text, async (url) => {
+      try {
+        const file = await this.fetchImage(url, images.maxBytes, {
+          chat,
+          signal,
+          taskId,
+        });
+        if (images.queued) {
+          const receipt = await sendImage(file);
+          if ('queued' in receipt) queued.push(receipt);
+        } else {
+          files.push(file);
+        }
+        return '';
+      } catch (error) {
+        signal.throwIfAborted();
+        if (!(error instanceof ToolFailure)) throw error;
+        return url;
+      }
+    });
+    if (!files.length)
+      return this.send(
+        adapter,
+        { ...message, text },
+        { ...options, media: queued },
+      );
+    if (text.trim() || queued.length)
+      await this.send(
+        adapter,
+        { ...message, text },
+        { ...options, media: queued, completeTask: false },
+      );
+    else {
+      signal.throwIfAborted();
+      store.updateTask(taskId, { status: 'sending' });
+    }
+    for (const [index, file] of files.entries()) {
+      const last = index === files.length - 1;
+      let receipt: Awaited<ReturnType<typeof sendImage>>;
+      signal.throwIfAborted();
+      try {
+        receipt = await sendImage(file, last ? 'last' : 'part');
+      } catch (error) {
+        if (
+          (signal.aborted && !(error instanceof SendFailure)) ||
+          error instanceof ToolFailure
+        )
+          throw error;
+        this.#failDelivery(taskId, error);
+      }
+      if ('queued' in receipt)
+        await this.send(
+          adapter,
+          { ...message, text: '' },
+          { ...options, media: [receipt], completeTask: last },
+        );
+    }
+  }
+
+  #failDelivery(taskId: string | undefined, error: unknown): never {
+    if (!taskId || (error instanceof SendFailure && !error.deliveryUnknown))
+      throw error;
+    this.#deps.store.updateTask(taskId, {
+      status: 'delivery-unknown',
+      finishedAt: Date.now(),
+    });
+    throw new DeliveryError({ cause: error });
+  }
+
   async send(
     adapter: PlatformAdapter,
     message: OutboundMessage,
-    options: {
-      incognitoId?: number;
-      media?: readonly QueuedMedia[];
-      onDelivery?(messageIds: readonly string[], error?: unknown): void;
-      onParts?(parts: readonly SendPart[], error?: unknown): void;
-      onReceipt?(receipt: SendReceipt): void;
-      scheduled?: boolean;
-      sessionBoundary?: boolean;
-      sideQuestion?: boolean;
-      signal?: AbortSignal;
-      taskId?: string;
-    } = {},
+    options: SendOptions = {},
   ) {
     const { store, trace, hooks } = this.#deps;
     const { signal, taskId } = options;
@@ -311,18 +451,12 @@ export class Outbound {
       options.onDelivery?.(parts.map(({ messageId }) => messageId));
       options.onParts?.(parts);
       this.#recordParts(adapter.id, message, parts, attrs, {
-        completedTaskId: taskId,
+        completedTaskId: options.completeTask === false ? undefined : taskId,
         ...recording,
       });
       options.onReceipt?.(receipt);
     } catch (error) {
-      if (!taskId || (error instanceof SendFailure && !error.deliveryUnknown))
-        throw error;
-      store.updateTask(taskId, {
-        status: 'delivery-unknown',
-        finishedAt: Date.now(),
-      });
-      throw new DeliveryError({ cause: error });
+      this.#failDelivery(taskId, error);
     }
     const delivered = message.approval
       ? receipt.parts?.at(-1)
