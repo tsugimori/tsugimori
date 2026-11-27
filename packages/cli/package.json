@@ -18,7 +18,7 @@
     "@tsugimori/storage-sqlite": "workspace:*",
     "@tsugimori/auth": "workspace:*",
     "@tsugimori/platform-line": "workspace:*",
-    "@tsugimori/platform-teams": "workspace:*",
+    "@tsugimori/platform-teams-personal": "workspace:*",
     "@tsugimori/platform-telegram": "workspace:*",
     "@tsugimori/agent-codex": "workspace:*",
     "@tsugimori/agent-claude-sdk": "workspace:*",

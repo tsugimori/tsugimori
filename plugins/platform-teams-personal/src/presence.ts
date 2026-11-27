@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import type { teamsSession } from './auth.ts';
+import type { teamsPersonalSession } from './auth.ts';
 import type { Wait } from './wire.ts';
 
 import { LoginRequired } from './auth.ts';
@@ -14,9 +14,9 @@ function retryAfter(value: string | null) {
   return Number.isFinite(ms) ? Math.min(2 ** 31 - 1, Math.max(0, ms)) : 0;
 }
 
-export function teamsPresence(
+export function teamsPersonalPresence(
   fetch: typeof globalThis.fetch,
-  auth: ReturnType<typeof teamsSession>,
+  auth: ReturnType<typeof teamsPersonalSession>,
   warn: (event: string) => void,
   wait: Wait = waitFor,
 ) {
@@ -89,7 +89,7 @@ export function teamsPresence(
         failures = 0;
       } catch (error) {
         if (signal.aborted) return;
-        warn('teams.presence_refresh_failed');
+        warn('teams_personal.presence_refresh_failed');
         if (
           error instanceof LoginRequired ||
           (error instanceof HttpError && [401, 403].includes(error.status))
@@ -116,7 +116,7 @@ export function teamsPresence(
     const signal = AbortSignal.any([connection, controller.signal]);
     const done = maintain(signal)
       .catch(() => {
-        if (!signal.aborted) warn('teams.presence_loop_failed');
+        if (!signal.aborted) warn('teams_personal.presence_loop_failed');
       })
       .finally(() => {
         running = undefined;
@@ -159,7 +159,7 @@ export function teamsPresence(
         try {
           await offline(AbortSignal.timeout(1000));
         } catch {
-          warn('teams.presence_cleanup_failed');
+          warn('teams_personal.presence_cleanup_failed');
         }
       }
     },

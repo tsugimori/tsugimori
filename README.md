@@ -71,7 +71,7 @@ Set `agentWeb.search` and `agentWeb.fetch` in `tsugimori.json` to change the wor
 
 Native search runs at OpenAI for Codex and Anthropic for Claude. Codex uses its cached search mode. The gateway offers its read-only `web.fetch` tool to both agents. Claude's native `WebFetch` is available only outside gateway execution scopes, where it makes requests from the host, keeps its existing approval flow, and follows the fetch setting.
 
-`web.fetch` makes an HTTP or HTTPS GET from the gateway, rejects URL credentials and non-public IP addresses, and validates DNS at every hop before connecting directly to a vetted address. It allows three redirects and has a 10-second deadline, a 512 KiB body limit, and a 12,000-character text limit. It extracts text from HTML and returns plain text, JSON, and XML as text. Other media types and encoded bodies return metadata only. Results include the final URL, HTTP status, content type, and truncation flag. Page text is marked as untrusted external content.
+`web.fetch` makes an HTTP or HTTPS GET from the gateway, rejects URL credentials and non-public IP addresses, and validates DNS at every hop before connecting directly to a vetted address. It allows three redirects and has a 10-second deadline, a 512 KiB body limit, and a 12,000-character text limit. It extracts text from HTML and includes up to 512 characters of the page title when present. It returns plain text, JSON, and XML as text. Other media types and encoded bodies return metadata only. Results include the final URL, HTTP status, content type, and truncation flag. The title and page text are marked as untrusted external content.
 
 ### Context and summaries
 
@@ -180,7 +180,7 @@ Run `/add <agent|platform> <kind> [--id <id>]` or `/login <id>` as an owner. In 
 
 The wizard begins with a plan showing the steps, what each asks for, and when it saves credentials and configuration. Follow numbered progress in the originating conversation and reply directly to each prompt. Secret prompts go to the owner's DM and identify the origin. The gateway excludes secret replies from message history and attempts deletion where supported. Enter secrets in an interactive terminal to hide input there.
 
-Guided setup offers buttons for preset answers on supported platforms and displays typed choices on LINE, Teams, and in the terminal.
+Guided setup offers buttons for preset answers on supported platforms and displays typed choices on LINE, Teams Personal, and in the terminal.
 
 Rerun the same command and ID to resume an interrupted attempt from its saved checkpoint. To cancel, send `/cancel` in the originating chat or in the DM with the pending secret prompt. In a terminal, enter `/cancel` or press Ctrl+C. Cancellation reports credentials saved and any instance it left disabled. An explicitly cancelled attempt starts again at step 1. Re-login temporarily disables an enabled instance. If cancelled, that instance stays disabled until sign-in succeeds again. Successful setup saves configuration for the running gateway to reload.
 
@@ -225,16 +225,16 @@ The gateway shares one loopback listener for webhook platforms. The default is `
 
 ## Plugins
 
-| Plugin                                                   | Purpose                                                                                      |
-| -------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
-| [Telegram](plugins/platform-telegram/README.md)          | Telegram bots via long polling.                                                              |
-| [Teams Personal](plugins/platform-teams/README.md)       | Teams Free chat and media with reactions, typing, presence, and device-code login.           |
-| [LINE](plugins/platform-line/README.md)                  | LINE Messaging API via signed webhooks and metered push.                                     |
-| [Codex](plugins/agent-codex/README.md)                   | Agent connector for Codex App Server.                                                        |
-| [Claude Agent SDK](plugins/agent-claude-sdk/README.md)   | Agent connector for Claude through its bundled CLI.                                          |
-| [Local sandbox](plugins/exec-local-sandbox/README.md)    | Linux command and file tools isolated per chat.                                              |
-| [Cloudflare Tunnel](plugins/tunnel-cloudflare/README.md) | Time-limited Quick and named previews of chat services.                                      |
-| [Admin web UI](plugins/web/README.md)                    | Read-only overview, chat timelines, redacted tool details, traces, approvals, and schedules. |
+| Plugin                                                      | Purpose                                                                                      |
+| ----------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| [Telegram](plugins/platform-telegram/README.md)             | Telegram bots via long polling.                                                              |
+| [Teams Personal](plugins/platform-teams-personal/README.md) | Teams Free chat and media with reactions, typing, presence, and device-code login.           |
+| [LINE](plugins/platform-line/README.md)                     | LINE Messaging API via signed webhooks and metered push.                                     |
+| [Codex](plugins/agent-codex/README.md)                      | Agent connector for Codex App Server.                                                        |
+| [Claude Agent SDK](plugins/agent-claude-sdk/README.md)      | Agent connector for Claude through its bundled CLI.                                          |
+| [Local sandbox](plugins/exec-local-sandbox/README.md)       | Linux command and file tools isolated per chat.                                              |
+| [Cloudflare Tunnel](plugins/tunnel-cloudflare/README.md)    | Time-limited Quick and named previews of chat services.                                      |
+| [Admin web UI](plugins/web/README.md)                       | Read-only overview, chat timelines, redacted tool details, traces, approvals, and schedules. |
 
 ## Operations
 

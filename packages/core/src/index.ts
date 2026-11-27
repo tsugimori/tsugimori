@@ -2397,26 +2397,29 @@ export class Gateway {
             args === 'agent'
               ? this.#registry.agentKinds
               : this.#registry.platformKinds;
-          const choices = [...kinds].map((kind) => ({
-            value: `${args} ${kind}`,
-            label:
-              kind +
-              (args === 'platform' &&
+          const choices = [...kinds].map((kind) => {
+            const value = `${args} ${kind}`;
+            const label =
+              args === 'platform'
+                ? this.#registry.platformLabel(kind)
+                : undefined;
+            const suffix =
+              args === 'platform' &&
               this.#registry.requiresWebhook(kind) &&
               this.#webhooks.status().state !== 'ok'
                 ? m.webhook.suffix
-                : ''),
-          }));
+                : '';
+            return {
+              value,
+              label: (label ?? kind) + suffix,
+              text:
+                (label ? `${label} (/add ${value})` : `/add ${value}`) + suffix,
+            };
+          });
           await send(
             kinds.size ? m.choices.addKind(args) : m.choices.noPlugins(args),
             choices,
-            m.choices.values(
-              choices
-                .map(
-                  ({ label, value }) => `/add ${value.split(' ')[0]} ${label}`,
-                )
-                .join(' · '),
-            ),
+            m.choices.values(choices.map(({ text }) => text).join(' · ')),
           );
           break;
         }

@@ -884,6 +884,8 @@ export interface PlatformFactory {
     config: PlatformInstanceConfig,
     ctx: PluginFactoryContext,
   ): PlatformAdapter | Promise<PlatformAdapter>;
+  /** Display name for guided setup choices and platform status. */
+  label?: string;
   /** Hosted media also requires verified public webhook ingress. */
   requires?: readonly ('webhook' | 'media-host')[];
 }

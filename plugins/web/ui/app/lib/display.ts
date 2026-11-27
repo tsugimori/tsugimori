@@ -23,7 +23,16 @@ export function taskHref(taskId: string) {
 }
 
 export function platformLabel(kind: string) {
-  return kind === 'telegram' ? 'Telegram' : kind === 'line' ? 'LINE' : kind;
+  switch (kind) {
+    case 'telegram':
+      return 'Telegram';
+    case 'line':
+      return 'LINE';
+    case 'teams-personal':
+      return 'Teams Personal';
+    default:
+      return kind;
+  }
 }
 
 export function chatTitle(chat: AdminChat) {

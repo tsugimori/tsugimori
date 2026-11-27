@@ -2,7 +2,7 @@ import type { MediaFile } from '@tsugimori/plugin-sdk';
 
 import { sniffImageMime, ToolFailure } from '@tsugimori/plugin-sdk';
 
-import type { teamsSession } from './auth.ts';
+import type { teamsPersonalSession } from './auth.ts';
 
 import {
   asmId,
@@ -151,7 +151,7 @@ export interface Uploaded {
 
 export async function uploadMedia(
   fetch: typeof globalThis.fetch,
-  auth: ReturnType<typeof teamsSession>,
+  auth: ReturnType<typeof teamsPersonalSession>,
   chat: string,
   file: MediaFile,
   signal: AbortSignal,

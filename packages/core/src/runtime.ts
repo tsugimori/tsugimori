@@ -41,6 +41,7 @@ type AgentAttachmentStatus = AttachmentStatus & {
   implementation?: string;
   kind: string;
 };
+type PlatformAttachmentStatus = AttachmentStatus & { label?: string };
 export type PlatformNotice =
   | { kind: 'unavailable' | 'recovered' }
   | { kind: 'environment'; report: CheckReport };
@@ -125,14 +126,15 @@ export class Runtime {
           (!item.capabilities || item.capabilities.includes(category)),
       );
     const platforms = this.config.platforms.map(
-      ({ enabled, id }): AttachmentStatus => {
-        if (enabled === false) return { id, state: 'disabled' };
+      ({ enabled, id, kind }): PlatformAttachmentStatus => {
+        const identity = { id, label: this.#deps.registry.platformLabel(kind) };
+        if (enabled === false) return { ...identity, state: 'disabled' };
         const entry = this.#adapters.get(id);
         if (entry?.state === 'active') {
           if (entry.adapter.login !== 'required')
-            return { id, state: 'running' };
+            return { ...identity, state: 'running' };
           return {
-            id,
+            ...identity,
             state: 'unavailable',
             failure: {
               id: 'platform-login',
@@ -151,15 +153,15 @@ export class Runtime {
         }
         if (entry?.retryAt !== undefined)
           return {
-            id,
+            ...identity,
             state: 'retrying',
             attempt: entry.attempt,
             retryAt: entry.retryAt,
           };
         if (entry?.state === 'starting' && !entry.failure)
-          return { id, state: 'starting' };
+          return { ...identity, state: 'starting' };
         return {
-          id,
+          ...identity,
           state: 'unavailable',
           failure: entry?.failure ?? failure('platform', id),
         };

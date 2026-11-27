@@ -18,12 +18,12 @@ import type { Socket } from './trouter.ts';
 import type { Wait } from './wire.ts';
 
 import { downloadMedia, fileMaxBytes, imageMaxBytes } from './attachments.ts';
-import { LoginRequired, microsoftAuth, teamsSession } from './auth.ts';
+import { LoginRequired, microsoftAuth, teamsPersonalSession } from './auth.ts';
 import { chatApi } from './chat-api.ts';
 import { credentialStore } from './credentials.ts';
 import { inboundMessages } from './history.ts';
-import { teamsPresence } from './presence.ts';
-import { checks, loginCheck, teamsLogin } from './setup.ts';
+import { teamsPersonalPresence } from './presence.ts';
+import { checks, loginCheck, teamsPersonalLogin } from './setup.ts';
 import { listen } from './trouter.ts';
 import { prepareImage, uploadMedia, validateUpload } from './upload.ts';
 import { chatKind, mri, waitFor } from './wire.ts';
@@ -34,7 +34,7 @@ interface Dependencies {
   wait?: Wait;
 }
 
-export function createTeamsAdapter(
+export function createTeamsPersonalAdapter(
   deps: Dependencies,
   {
     account,
@@ -54,11 +54,11 @@ export function createTeamsAdapter(
     const signal = ctx.signal
       ? AbortSignal.any([ctx.signal, controller.signal])
       : controller.signal;
-    const auth = teamsSession(microsoft, store, account, signal);
+    const auth = teamsPersonalSession(microsoft, store, account, signal);
     const api = chatApi(fetch, auth);
     const inbound = inboundMessages(ctx, api, account ?? '');
     const warn = (event: string) => ctx.logWarning?.(event);
-    const presence = teamsPresence(fetch, auth, warn, deps.wait);
+    const presence = teamsPersonalPresence(fetch, auth, warn, deps.wait);
     const images = new WeakMap<
       QueuedMedia,
       { message: MediaUpload; size: ReturnType<typeof prepareImage> }
@@ -105,7 +105,9 @@ export function createTeamsAdapter(
       deps.wait,
     ).then(
       () => {
-        ready.reject(signal.reason ?? new Error('Teams receiver stopped'));
+        ready.reject(
+          signal.reason ?? new Error('Teams Personal receiver stopped'),
+        );
       },
       (error: unknown) => {
         if (error instanceof LoginRequired || auth.required) {
@@ -113,10 +115,16 @@ export function createTeamsAdapter(
           const failure = loginCheck(id);
           ready.reject(new PlatformStartError(failure.detail, { failure }));
           if (!signal.aborted)
-            ctx.logWarning?.('teams.login_required', failure.fix?.hint);
+            ctx.logWarning?.(
+              'teams_personal.login_required',
+              failure.fix?.hint,
+            );
         } else {
-          ready.reject(new Error('Could not start the Teams receiver'));
-          if (!signal.aborted) ctx.logWarning?.('teams.receiver_failed');
+          ready.reject(
+            new Error('Could not start the Teams Personal receiver'),
+          );
+          if (!signal.aborted)
+            ctx.logWarning?.('teams_personal.receiver_failed');
         }
       },
     );
@@ -138,7 +146,7 @@ export function createTeamsAdapter(
   let stopping: Promise<void> | undefined;
 
   function operation(signal?: AbortSignal) {
-    if (!active) throw new Error('Teams receiver is stopped');
+    if (!active) throw new Error('Teams Personal receiver is stopped');
     const combined = signal
       ? AbortSignal.any([active.signal, signal])
       : active.signal;
@@ -154,7 +162,7 @@ export function createTeamsAdapter(
         await current.session.api.typing(chatId, current.signal);
       } catch {
         if (current.signal.aborted) return;
-        current.session.warn('teams.typing_failed');
+        current.session.warn('teams_personal.typing_failed');
       }
       await wait(4000, current.signal);
     }
@@ -162,7 +170,7 @@ export function createTeamsAdapter(
 
   return {
     id,
-    kind: 'teams',
+    kind: 'teams-personal',
     capabilities: {
       deleteEvents: true,
       files: { maxBytes: fileMaxBytes },
@@ -215,7 +223,7 @@ export function createTeamsAdapter(
           item.message.replyTo !== message.replyTo
         )
           throw new ToolFailure(
-            'Teams queued image belongs to a different reply',
+            'Teams Personal queued image belongs to a different reply',
           );
         return { ...item, handle };
       });
@@ -308,21 +316,23 @@ export function createTeamsAdapter(
       if (!current || current.signal.aborted || signal.aborted) return;
       void typing(chat.chatId, signal).catch(() => {
         if (!signal.aborted && !current.signal.aborted)
-          current.warn('teams.typing_failed');
+          current.warn('teams_personal.typing_failed');
       });
     },
     async setPresence({ state, text }, signal) {
       signal?.throwIfAborted();
-      if (!active) throw new Error('Teams receiver is stopped');
+      if (!active) throw new Error('Teams Personal receiver is stopped');
       if (text !== undefined)
-        throw new ToolFailure('Teams presence does not support status text');
+        throw new ToolFailure(
+          'Teams Personal presence does not support status text',
+        );
       if (state === 'offline') {
         await active.presence.offline(signal ?? AbortSignal.timeout(1000));
       } else if (state === 'online') {
         active.signal.throwIfAborted();
         active.presence.online();
       } else {
-        throw new ToolFailure('Unsupported Teams presence state');
+        throw new ToolFailure('Unsupported Teams Personal presence state');
       }
     },
     async deleteMessage(message) {
@@ -341,8 +351,11 @@ export function createTeamsAdapter(
   };
 }
 
-const teams: PlatformFactory = ({ id, options }, { fetch, workspace }) =>
-  createTeamsAdapter(
+const teamsPersonal: PlatformFactory = (
+  { id, options },
+  { fetch, workspace },
+) =>
+  createTeamsPersonalAdapter(
     { fetch },
     {
       id,
@@ -352,10 +365,12 @@ const teams: PlatformFactory = ({ id, options }, { fetch, workspace }) =>
     },
   );
 
+teamsPersonal.label = 'Teams Personal';
+
 export default definePlugin({
-  name: 'platform-teams',
-  adapters: { teams },
+  name: 'platform-teams-personal',
+  adapters: { 'teams-personal': teamsPersonal },
   checks,
   credentialNames: () => [],
-  setupSteps: [teamsLogin()],
+  setupSteps: [teamsPersonalLogin()],
 });

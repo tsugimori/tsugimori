@@ -32,7 +32,7 @@
       "path": "./plugins/platform-line/tsconfig.build.json"
     },
     {
-      "path": "./plugins/platform-teams/tsconfig.build.json"
+      "path": "./plugins/platform-teams-personal/tsconfig.build.json"
     },
     {
       "path": "./plugins/agent-codex/tsconfig.build.json"

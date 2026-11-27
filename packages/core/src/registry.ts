@@ -80,6 +80,10 @@ export class PluginRegistry implements PluginKinds {
     return new Set(this.#platforms.keys());
   }
 
+  platformLabel(kind: string) {
+    return this.#platforms.get(kind)?.label;
+  }
+
   get agentKinds(): ReadonlySet<string> {
     return new Set(this.#agents.keys());
   }

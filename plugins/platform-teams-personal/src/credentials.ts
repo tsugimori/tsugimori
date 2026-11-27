@@ -42,11 +42,11 @@ export function credentialStore(workspace: string, home: string) {
         });
       }
       if (!(await lstat(directory)).isDirectory())
-        throw new Error('Invalid Teams credential directory');
+        throw new Error('Invalid Teams Personal credential directory');
     }
     if (create) await chmod(directory, 0o700);
     if ((await lstat(directory)).mode & 0o077)
-      throw new Error('Unsafe Teams credential directory permissions');
+      throw new Error('Unsafe Teams Personal credential directory permissions');
     return directory;
   }
 
@@ -60,20 +60,20 @@ export function credentialStore(workspace: string, home: string) {
         try {
           const stat = await file.stat();
           if (!stat.isFile() || stat.mode & 0o077 || stat.size > 64_000)
-            throw new Error('Unsafe Teams credential file');
+            throw new Error('Unsafe Teams Personal credential file');
           const data = json(await file.readFile('utf8'));
           const account = mri(data.account);
           const displayName = string(data.displayName);
           const refreshToken = string(data.refreshToken);
           if (!account || !displayName || !refreshToken)
-            throw new Error('Invalid Teams credential file');
+            throw new Error('Invalid Teams Personal credential file');
           return { account, displayName, refreshToken };
         } finally {
           await file.close();
         }
       } catch (error) {
         if (!missing(error))
-          throw new Error('Could not read the Teams login file');
+          throw new Error('Could not read the Teams Personal login file');
       }
     },
     async save(login: SavedLogin) {
@@ -90,7 +90,7 @@ export function credentialStore(workspace: string, home: string) {
           await rm(temporary, { force: true });
         }
       } catch {
-        throw new Error('Could not save the Teams login file');
+        throw new Error('Could not save the Teams Personal login file');
       }
     },
     async clear() {
@@ -98,7 +98,9 @@ export function credentialStore(workspace: string, home: string) {
         await rm(join(await directory(false), credentialName), { force: true });
       } catch (error) {
         if (!missing(error))
-          throw new Error('Could not clear the rejected Teams login file');
+          throw new Error(
+            'Could not clear the rejected Teams Personal login file',
+          );
       }
     },
   };

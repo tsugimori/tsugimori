@@ -257,9 +257,9 @@ importers:
       '@tsugimori/platform-line':
         specifier: workspace:*
         version: link:../../plugins/platform-line
-      '@tsugimori/platform-teams':
+      '@tsugimori/platform-teams-personal':
         specifier: workspace:*
-        version: link:../../plugins/platform-teams
+        version: link:../../plugins/platform-teams-personal
       '@tsugimori/platform-telegram':
         specifier: workspace:*
         version: link:../../plugins/platform-telegram
@@ -395,7 +395,7 @@ importers:
         specifier: workspace:*
         version: link:../../packages/plugin-sdk
 
-  plugins/platform-teams:
+  plugins/platform-teams-personal:
     dependencies:
       '@tsugimori/plugin-sdk':
         specifier: workspace:*

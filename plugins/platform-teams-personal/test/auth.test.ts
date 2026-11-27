@@ -8,9 +8,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
-import { LoginRequired, microsoftAuth, teamsSession } from '../src/auth.ts';
+import {
+  LoginRequired,
+  microsoftAuth,
+  teamsPersonalSession,
+} from '../src/auth.ts';
 import { credentialName, credentialStore } from '../src/credentials.ts';
-import { checks, teamsLogin } from '../src/setup.ts';
+import { checks, teamsPersonalLogin } from '../src/setup.ts';
 
 const account = '8:live:.cid.fixture';
 const token = `header.${Buffer.from(JSON.stringify({ skypeid: account.slice(2) })).toString('base64url')}.signature`;
@@ -21,9 +25,9 @@ const skypeToken = {
 };
 
 async function fixture(t: TestContext) {
-  const workspace = await mkdtemp(join(tmpdir(), 'teams-auth-'));
+  const workspace = await mkdtemp(join(tmpdir(), 'teams-personal-auth-'));
   t.after(() => rm(workspace, { recursive: true, force: true }));
-  const home = platformHome(workspace, 'teams-home');
+  const home = platformHome(workspace, 'teams-personal-home');
   return { workspace, home, credentials: credentialStore(workspace, home) };
 }
 
@@ -98,8 +102,8 @@ test('setup shows only the verification URL and user code and saves a confirmed 
     return Response.json(skypeToken);
   };
   let config = {
-    id: 'teams-home',
-    kind: 'teams',
+    id: 'teams-personal-home',
+    kind: 'teams-personal',
     options: { accountMri: '8:old', custom: true },
   };
   const context = {
@@ -134,7 +138,7 @@ test('setup shows only the verification URL and user code and saves a confirmed 
     },
   } satisfies SetupContext;
   const waits: number[] = [];
-  const step = teamsLogin(async (ms) => {
+  const step = teamsPersonalLogin(async (ms) => {
     waits.push(ms);
   });
   await assert.rejects(step.run(context), /account was declined/);
@@ -202,7 +206,7 @@ test('refresh coalesces, atomically rotates the stored grant, and stops after re
       { status: 400 },
     );
   };
-  const session = teamsSession(
+  const session = teamsPersonalSession(
     microsoftAuth(fetch, () => now),
     credentials,
     account,
@@ -264,7 +268,7 @@ test('Graph and chat token grants share rotation while Graph consent failures ke
       });
     return Response.json({ error: 'consent_required' }, { status: 400 });
   };
-  const session = teamsSession(
+  const session = teamsPersonalSession(
     microsoftAuth(fetch),
     credentials,
     account,

@@ -16,7 +16,7 @@ import type { Socket } from '../src/trouter.ts';
 import type { Data, Wait } from '../src/wire.ts';
 
 import { credentialStore } from '../src/credentials.ts';
-import { createTeamsAdapter } from '../src/index.ts';
+import { createTeamsPersonalAdapter } from '../src/index.ts';
 import { listen } from '../src/trouter.ts';
 import { prepareImage } from '../src/upload.ts';
 
@@ -211,26 +211,26 @@ test('Trouter registers and renews, acks after delivery, and repairs on loss and
 });
 
 test('adapter reports rejected refresh as login required and stops repeatedly', async (t) => {
-  const workspace = await mkdtemp(join(tmpdir(), 'teams-rejected-'));
+  const workspace = await mkdtemp(join(tmpdir(), 'teams-personal-rejected-'));
   t.after(() => rm(workspace, { recursive: true, force: true }));
-  const home = platformHome(workspace, 'teams');
+  const home = platformHome(workspace, 'teams-personal');
   await credentialStore(workspace, home).save({
     account: '8:self',
     refreshToken: 'fixture',
     displayName: 'Offline fixture',
   });
-  const adapter = createTeamsAdapter(
+  const adapter = createTeamsPersonalAdapter(
     {
       fetch: async () =>
         Response.json({ error: 'invalid_grant' }, { status: 400 }),
       socket: () =>
         assert.fail('Rejected credentials must never open a WebSocket'),
     },
-    { id: 'teams', account: '8:self', workspace, home },
+    { id: 'teams-personal', account: '8:self', workspace, home },
   );
   await assert.rejects(
     adapter.start({ emit: async () => {} }),
-    /Teams sign-in required/,
+    /Teams Personal sign-in required/,
   );
   assert.equal(adapter.login, 'required');
   await Promise.all([adapter.stop(), adapter.stop()]);
@@ -238,16 +238,16 @@ test('adapter reports rejected refresh as login required and stops repeatedly', 
 });
 
 test('adapter waits for gateway readiness before delivery and cancels that wait on stop', async (t) => {
-  const workspace = await mkdtemp(join(tmpdir(), 'teams-readiness-'));
+  const workspace = await mkdtemp(join(tmpdir(), 'teams-personal-readiness-'));
   t.after(() => rm(workspace, { recursive: true, force: true }));
-  const home = platformHome(workspace, 'teams');
+  const home = platformHome(workspace, 'teams-personal');
   await credentialStore(workspace, home).save({
     account: '8:self',
     refreshToken: 'fixture',
     displayName: 'Offline fixture',
   });
   let nextSocket = Promise.withResolvers<FakeSocket>();
-  const adapter = createTeamsAdapter(
+  const adapter = createTeamsPersonalAdapter(
     {
       fetch: async (input) => {
         const url = new URL(String(input));
@@ -266,7 +266,7 @@ test('adapter waits for gateway readiness before delivery and cancels that wait 
         return socket;
       },
     },
-    { id: 'teams', account: '8:self', workspace, home },
+    { id: 'teams-personal', account: '8:self', workspace, home },
   );
   t.after(() => adapter.stop());
 
@@ -327,9 +327,9 @@ async function adapterFixture(
   wait?: Wait,
   scenario: AdapterStartScenario = 'normal',
 ) {
-  const workspace = await mkdtemp(join(tmpdir(), 'teams-phase-2-'));
+  const workspace = await mkdtemp(join(tmpdir(), 'teams-personal-phase-2-'));
   t.after(() => rm(workspace, { recursive: true, force: true }));
-  const home = platformHome(workspace, 'teams');
+  const home = platformHome(workspace, 'teams-personal');
   const account = '8:self';
   await credentialStore(workspace, home).save({
     account,
@@ -341,7 +341,7 @@ async function adapterFixture(
   const entered = Promise.withResolvers<void>();
   let startupCalls = 0;
   let messagingEndpoint: string | null = null;
-  const adapter = createTeamsAdapter(
+  const adapter = createTeamsPersonalAdapter(
     {
       wait,
       socket(url) {
@@ -387,7 +387,7 @@ async function adapterFixture(
         return respond(input, init);
       },
     },
-    { id: 'teams', account, workspace, home },
+    { id: 'teams-personal', account, workspace, home },
   );
   t.after(() => adapter.stop());
   return {
@@ -424,7 +424,7 @@ function media(bytes: Uint8Array, name: string): MediaUpload {
   };
 }
 
-test('Teams reads JPEG, PNG, GIF, and WebP display dimensions with pixel limits', () => {
+test('Teams Personal reads JPEG, PNG, GIF, and WebP display dimensions with pixel limits', () => {
   const png = Buffer.from(
     '89504e470d0a1a0a0000000d494844520000032000000190',
     'hex',
@@ -456,7 +456,7 @@ test('Teams reads JPEG, PNG, GIF, and WebP display dimensions with pixel limits'
   );
 });
 
-test('Teams queues inline images with a single caption receipt and sends original files', async (t) => {
+test('Teams Personal queues inline images with a single caption receipt and sends original files', async (t) => {
   const calls: string[] = [];
   const messages: Data[] = [];
   let object = 0;
@@ -556,7 +556,7 @@ test('Teams queues inline images with a single caption receipt and sends origina
   );
 });
 
-test('Teams reacts with native keys and limits edits and deletes to the signed-in account', async (t) => {
+test('Teams Personal reacts with native keys and limits edits and deletes to the signed-in account', async (t) => {
   const methods: string[] = [];
   const quote =
     '<blockquote itemtype="http://schema.skype.com/Reply" itemid="111"><p>Old quote</p></blockquote>';
@@ -641,7 +641,7 @@ function controlledWait() {
   return { pauses, wait };
 }
 
-test('Teams typing refreshes every four seconds and stops on caller abort', async (t) => {
+test('Teams Personal typing refreshes every four seconds and stops on caller abort', async (t) => {
   const { pauses, wait } = controlledWait();
   let controls = 0;
   const { adapter, warnings } = await connectedAdapter(
@@ -676,7 +676,7 @@ test('Teams typing refreshes every four seconds and stops on caller abort', asyn
   assert.deepEqual(warnings, []);
 });
 
-test('Teams publishes and refreshes an isolated presence endpoint, repairs it, and cleans up', async (t) => {
+test('Teams Personal publishes and refreshes an isolated presence endpoint, repairs it, and cleans up', async (t) => {
   const { pauses, wait } = controlledWait();
   const methods: string[] = [];
   let endpoint: string | null = null;
@@ -730,7 +730,7 @@ test('Teams publishes and refreshes an isolated presence endpoint, repairs it, a
   assert.equal(methods.length, 0);
   await assert.rejects(
     f.adapter.setPresence!({ state: 'busy' }),
-    /Unsupported Teams presence state/,
+    /Unsupported Teams Personal presence state/,
   );
   await f.adapter.setPresence!({ state: 'online' });
   await flush();
@@ -768,13 +768,13 @@ test('Teams publishes and refreshes an isolated presence endpoint, repairs it, a
   );
   assert.equal(pauses[4]?.signal.aborted, true);
   assert.deepEqual(f.warnings, [
-    'teams.presence_refresh_failed',
-    'teams.presence_refresh_failed',
+    'teams_personal.presence_refresh_failed',
+    'teams_personal.presence_refresh_failed',
   ]);
 });
 
 test(
-  'Teams conforms to the platform contract',
+  'Teams Personal conforms to the platform contract',
   { timeout: 5000 },
   async (t) => {
     const chatId = '8:peer';
@@ -791,7 +791,7 @@ test(
         files: media(Buffer.from('test'), 'test.txt'),
       },
       oversizedError: /uploads require/i,
-      startupError: /Teams sign-in required/,
+      startupError: /Teams Personal sign-in required/,
       async create(scenario) {
         const { pauses, wait } = controlledWait();
         const typed = Promise.withResolvers<void>();

@@ -7,9 +7,11 @@ import { credentialName, credentialStore } from './credentials.ts';
 
 export function loginCheck(id: string, signedIn = false): CheckItem {
   return {
-    id: 'teams-login',
-    title: 'Teams sign-in',
-    detail: signedIn ? 'Teams sign-in is saved.' : 'Teams sign-in required.',
+    id: 'teams-personal-login',
+    title: 'Teams Personal sign-in',
+    detail: signedIn
+      ? 'Teams Personal sign-in is saved.'
+      : 'Teams Personal sign-in required.',
     login: signedIn ? 'signed-in' : 'required',
     status: signedIn ? 'ok' : 'fail',
     capabilities: ['platform'],
@@ -18,10 +20,12 @@ export function loginCheck(id: string, signedIn = false): CheckItem {
       : { hint: `Run /login ${id} from another platform or the terminal.` },
     localized: {
       'zh-TW': {
-        title: 'Teams 登入',
-        detail: signedIn ? 'Teams 登入已儲存。' : '需要登入 Teams。',
+        title: 'Teams 個人版登入',
+        detail: signedIn
+          ? 'Teams 個人版登入已儲存。'
+          : '需要登入 Teams 個人版。',
         hint: signedIn
-          ? 'Teams 登入已儲存。'
+          ? 'Teams 個人版登入已儲存。'
           : `請從另一個平台或終端機執行 /login ${id}。`,
       },
     },
@@ -42,26 +46,27 @@ export async function checks({ entry, workspace }: CheckContext) {
     return [
       {
         ...loginCheck(entry.id),
-        detail: 'The saved Teams login could not be read. Sign in again.',
+        detail:
+          'The saved Teams Personal login could not be read. Sign in again.',
       },
     ];
   }
 }
 
-export function teamsLogin(wait?: Parameters<typeof microsoftAuth>[2]) {
+export function teamsPersonalLogin(wait?: Parameters<typeof microsoftAuth>[2]) {
   return {
     id: 'login',
     title: 'Sign in to Teams Personal',
     localized: { 'zh-TW': '登入 Teams 個人版' },
     asks: [
       {
-        text: 'Confirm the Teams account',
-        localized: { 'zh-TW': '確認 Teams 帳號' },
+        text: 'Confirm the Teams Personal account',
+        localized: { 'zh-TW': '確認 Teams 個人版帳號' },
       },
     ],
     saves: {
-      text: 'Teams sign-in in the platform home',
-      localized: { 'zh-TW': '將 Teams 登入資料儲存到平台主目錄' },
+      text: 'Teams Personal sign-in in the platform home',
+      localized: { 'zh-TW': '將 Teams 個人版登入資料儲存到平台主目錄' },
     },
     async run(ctx) {
       const { entry, fetch, locale, signal, workspace } = ctx;
@@ -83,17 +88,17 @@ export function teamsLogin(wait?: Parameters<typeof microsoftAuth>[2]) {
         choices: yesNoChoices,
         text: switching
           ? zh
-            ? `已登入 ${identity}。要將平台從 ${existing} 改為此帳號嗎？`
-            : `Signed in as ${identity}. Switch this platform from ${existing} to this account?`
+            ? `已登入 ${identity}。要將 Teams 個人版從 ${existing} 改為此帳號嗎？`
+            : `Signed in as ${identity}. Switch Teams Personal from ${existing} to this account?`
           : zh
-            ? `已登入 ${identity}。要確認此帳號嗎？`
-            : `Signed in as ${identity}. Confirm this account?`,
+            ? `已登入 ${identity}。要確認此 Teams 個人版帳號嗎？`
+            : `Signed in as ${identity}. Confirm this Teams Personal account?`,
       });
       if (answer.trim().toLowerCase() !== 'yes')
         throw new SetupError(
           zh
-            ? '未確認 Teams 帳號。請重新執行設定以登入。'
-            : 'Teams account was declined. Run setup again to sign in.',
+            ? '未確認 Teams 個人版帳號。請重新執行設定以登入。'
+            : 'Teams Personal account was declined. Run setup again to sign in.',
         );
       signal.throwIfAborted();
       const store = credentialStore(

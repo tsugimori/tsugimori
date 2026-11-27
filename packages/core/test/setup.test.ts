@@ -170,9 +170,15 @@ test('owner DM setup includes a usable code and contact link without saving the 
     contactLink,
     setupSteps: [configureTrial],
   });
+  Object.assign(target.plugin.adapters.trial!, { label: 'Trial Platform' });
   const { logs, store, trace, workspace } = await fixture(
     t,
     new PluginRegistry([origin.plugin, target.plugin]),
+  );
+  await origin.receive('menu', '/add platform');
+  assert.match(
+    origin.sent.at(-1)?.text ?? '',
+    /Trial Platform \(\/add platform trial\)/,
   );
   await origin.receive('add', '/add platform trial --id target');
   const finish = await until(() =>
@@ -213,6 +219,8 @@ test('owner DM setup includes a usable code and contact link without saving the 
   await target.receive('claim', `/pair ${code}`, { raw: { code } });
   assert.equal(store.getOwner('target'), ownerId);
   assert.equal(target.sent.at(-1)?.text, 'Owner paired.');
+  await origin.receive('status', '/status');
+  assert.match(origin.sent.at(-1)?.text ?? '', /target · Trial Platform/);
   assert.equal(
     store.getMessage({ adapterId: 'target', chatId: ownerId }, 'claim')?.text,
     '/pair [redacted]',

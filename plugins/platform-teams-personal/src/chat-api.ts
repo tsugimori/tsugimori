@@ -3,7 +3,7 @@ import type { AdapterContext, OutboundMessage } from '@tsugimori/plugin-sdk';
 import { SendFailure, ToolFailure } from '@tsugimori/plugin-sdk';
 import { randomInt } from 'node:crypto';
 
-import type { teamsSession } from './auth.ts';
+import type { teamsPersonalSession } from './auth.ts';
 import type { Uploaded } from './upload.ts';
 import type { Data } from './wire.ts';
 
@@ -78,7 +78,7 @@ function confirmedId(raw: Data) {
 
 export function chatApi(
   fetch: typeof globalThis.fetch,
-  auth: ReturnType<typeof teamsSession>,
+  auth: ReturnType<typeof teamsPersonalSession>,
 ) {
   async function call(
     url: URL | string,

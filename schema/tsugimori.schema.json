@@ -137,7 +137,7 @@
           },
           {
             "if": {
-              "properties": { "kind": { "const": "teams" } }
+              "properties": { "kind": { "const": "teams-personal" } }
             },
             "then": {
               "properties": {

@@ -338,7 +338,10 @@ export function statusCard(
 
   const { platforms, agents } = runtime.attachments;
   const components = [
-    ...platforms.map((entry) => ({ name: entry.id, entry })),
+    ...platforms.map((entry) => ({
+      name: entry.label ? `${entry.id}${separator}${entry.label}` : entry.id,
+      entry,
+    })),
     ...agents.map((entry) => ({ name: agentName(entry), entry })),
   ];
   const ingress = webhookCheckItem(webhook);

@@ -363,7 +363,7 @@ export async function listen(
     } catch (error) {
       if (signal.aborted) return;
       if (!established || error instanceof LoginRequired) throw error;
-      deps.warn('teams.trouter_disconnected');
+      deps.warn('teams_personal.trouter_disconnected');
     }
     if (!established && (!redirected || failures >= 3) && !signal.aborted)
       throw new Error('Teams disconnected before registration');

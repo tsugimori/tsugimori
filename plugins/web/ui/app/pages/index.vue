@@ -19,6 +19,7 @@ import {
   chatHref,
   chatKey,
   chatTitle,
+  platformLabel,
   routeLabel,
   statusStyle,
   summaryProgress,
@@ -368,7 +369,9 @@ function bytes(value: number) {
           />
           <select v-model="platform" :aria-label="t('Platform', '平台')">
             <option value="">{{ t('All platforms', '所有平台') }}</option>
-            <option v-for="item in platforms" :key="item">{{ item }}</option>
+            <option v-for="item in platforms" :key="item" :value="item">
+              {{ platformLabel(item) }}
+            </option>
           </select>
           <select
             :value="agent"

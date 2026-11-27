@@ -145,7 +145,10 @@ export function inboundMessages(
       );
     }
     if (next && !covered)
-      ctx.logWarning?.('teams.history_gap', `${chat}: page limit reached`);
+      ctx.logWarning?.(
+        'teams_personal.history_gap',
+        `${chat}: page limit reached`,
+      );
   }
 
   return {
@@ -157,7 +160,7 @@ export function inboundMessages(
     async catchUp(signal: AbortSignal, loss: boolean) {
       if (loss && !chats.size)
         ctx.logWarning?.(
-          'teams.history_gap',
+          'teams_personal.history_gap',
           'No previously observed conversations',
         );
       for (const [chat, state] of [...chats]) {
@@ -167,14 +170,14 @@ export function inboundMessages(
         } catch {
           signal.throwIfAborted();
           ctx.logWarning?.(
-            'teams.history_gap',
+            'teams_personal.history_gap',
             `${chat}: history read or delivery failed`,
           );
         }
       }
       if (loss && chats.size)
         ctx.logWarning?.(
-          'teams.message_loss',
+          'teams_personal.message_loss',
           'Only previously observed conversations can be recovered',
         );
     },

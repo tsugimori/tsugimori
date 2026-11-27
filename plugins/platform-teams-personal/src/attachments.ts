@@ -2,7 +2,7 @@ import type { InboundAttachment } from '@tsugimori/plugin-sdk';
 
 import { attachmentBytes, attachmentMime } from '@tsugimori/plugin-sdk';
 
-import type { teamsSession } from './auth.ts';
+import type { teamsPersonalSession } from './auth.ts';
 import type { Data } from './wire.ts';
 
 import { attribute, plainText } from './text.ts';
@@ -229,7 +229,7 @@ function downloadReference(fileId: string | undefined): Reference {
   throw new Error('Invalid Teams attachment reference');
 }
 
-type Auth = ReturnType<typeof teamsSession>;
+type Auth = ReturnType<typeof teamsPersonalSession>;
 
 export async function asmRequest(
   fetch: typeof globalThis.fetch,

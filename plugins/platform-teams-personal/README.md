@@ -1,16 +1,16 @@
 # Teams Personal
 
-The Teams platform connects a dedicated Microsoft personal account to Tsugimori
+The Teams Personal plugin connects a dedicated Microsoft personal account to Tsugimori
 through Teams Free (`teams.live.com`). Use a separate personal account to
 message it as the owner.
 
-- From another connected platform, run `/add platform teams --id teams-home`.
-  In a terminal, run `tsugimori add platform teams --id teams-home --dir <workspace>`.
+- From another connected platform, run `/add platform teams-personal --id teams-personal-home`.
+  In a terminal, run `tsugimori add platform teams-personal --id teams-personal-home --dir <workspace>`.
 - Open the Microsoft verification URL, enter the device code, and sign in as the
   account that Tsugimori should use. Confirm its display name and MRI when
   prompted. Then pair the owner through Teams using the usual pairing flow.
-- Run `/login teams-home` from another platform or
-  `tsugimori setup login teams-home --dir <workspace>` in a terminal to sign in
+- Run `/login teams-personal-home` from another platform or
+  `tsugimori setup login teams-personal-home --dir <workspace>` in a terminal to sign in
   again. The receiver stops during sign-in. A confirmed login restores the prior
   enabled state. If you cancel, rerun login to resume. Login from the target
   platform itself is refused because the setup conversation needs that receiver.
@@ -40,7 +40,7 @@ conversation. If a send's result is uncertain, the adapter checks for the
 reserved client message ID in history and reports any remaining uncertainty.
 
 The framework can send audio as an original file. It currently has no inbound
-reaction event. Teams presence supports the framework's `online` and `offline`
+reaction event. Teams Personal presence supports the framework's `online` and `offline`
 states. The mappings for `idle`, `busy`, and status text are unverified.
 
 Phase 2 is covered by offline tests. Live uploads and downloads, Graph consent

@@ -21,7 +21,7 @@ export interface ChatToken {
 
 export class LoginRequired extends Error {
   constructor() {
-    super('Teams sign-in required');
+    super('Teams Personal sign-in required');
   }
 }
 
@@ -148,7 +148,9 @@ export function microsoftAuth(
       await response.body?.cancel();
       if (response.status === 401 || response.status === 403)
         throw new LoginRequired();
-      throw new Error(`Teams authorization failed (HTTP ${response.status})`);
+      throw new Error(
+        `Teams Personal authorization failed (HTTP ${response.status})`,
+      );
     }
     const result = await readJson(response);
     const tokens = object(result.tokens);
@@ -268,7 +270,7 @@ export function microsoftAuth(
           refreshToken: string(refreshed.refresh_token) ?? initial,
         };
       }
-      throw new Error('Teams device code expired');
+      throw new Error('Teams Personal device code expired');
     },
   };
 
@@ -300,7 +302,7 @@ export function microsoftAuth(
   }
 }
 
-export function teamsSession(
+export function teamsPersonalSession(
   auth: ReturnType<typeof microsoftAuth>,
   credentials: ReturnType<typeof credentialStore>,
   account: string | undefined,

@@ -12,7 +12,7 @@ import { test } from 'node:test';
 import type { Data } from '../src/wire.ts';
 
 import { downloadMedia } from '../src/attachments.ts';
-import { microsoftAuth, teamsSession } from '../src/auth.ts';
+import { microsoftAuth, teamsPersonalSession } from '../src/auth.ts';
 import { chatApi } from '../src/chat-api.ts';
 import { credentialStore } from '../src/credentials.ts';
 import { inboundMessages } from '../src/history.ts';
@@ -137,11 +137,11 @@ test('renders Markdown, escaped links, code and explicit Teams mentions', () => 
 });
 
 async function fixtureApi(t: TestContext, respond: typeof globalThis.fetch) {
-  const workspace = await mkdtemp(join(tmpdir(), 'teams-chat-'));
+  const workspace = await mkdtemp(join(tmpdir(), 'teams-personal-chat-'));
   t.after(() => rm(workspace, { recursive: true, force: true }));
   const credentials = credentialStore(
     workspace,
-    platformHome(workspace, 'teams'),
+    platformHome(workspace, 'teams-personal'),
   );
   await credentials.save({
     account: self,
@@ -166,7 +166,12 @@ async function fixtureApi(t: TestContext, respond: typeof globalThis.fetch) {
     }
     return respond(input, init);
   };
-  const auth = teamsSession(microsoftAuth(fetch), credentials, self, signal);
+  const auth = teamsPersonalSession(
+    microsoftAuth(fetch),
+    credentials,
+    self,
+    signal,
+  );
   return { api: chatApi(fetch, auth), auth, fetch, signal };
 }
 

@@ -26,7 +26,7 @@ import {
 import { SetupError } from '@tsugimori/core';
 import sandbox from '@tsugimori/exec-local-sandbox';
 import line from '@tsugimori/platform-line';
-import teams from '@tsugimori/platform-teams';
+import teamsPersonal from '@tsugimori/platform-teams-personal';
 import telegram from '@tsugimori/platform-telegram';
 import { SqliteStore } from '@tsugimori/storage-sqlite';
 import tunnel, { NamedTunnel, QuickTunnel } from '@tsugimori/tunnel-cloudflare';
@@ -56,7 +56,7 @@ export async function main(
   registry = new PluginRegistry([
     telegram,
     line,
-    teams,
+    teamsPersonal,
     codex,
     claude,
     sandbox,

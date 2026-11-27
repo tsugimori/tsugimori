@@ -31,7 +31,8 @@ the delivered `SendPart.mediaId`, or report all the handle IDs in
 
 ## Adding a platform
 
-Register an adapter factory in `definePlugin({ adapters: { … } })`. Declare
+Register an adapter factory in `definePlugin({ adapters: { … } })`. Set its
+`label` for a display name in `/add` and `/status`. Declare
 only the capabilities the adapter implements, with positive byte limits for
 media. Use `sendImage`, `sendFile`, `sendAudio`, `sendReaction`, and
 `sendSticker` for their corresponding capabilities. Stickers can be searched
@@ -62,10 +63,10 @@ Run `checkAdapterContract` from `@tsugimori/plugin-sdk/contract-test` in the
 plugin's tests. Pass one `{ create, message, media, startupError }` object.
 Have `create(scenario)` return a fresh adapter and its fake counters for
 `normal`, `failed`, and `pending` startup. Add a `receive` hook to replay
-native events and declare how the fixture handles its own echo. Teams
+native events and declare how the fixture handles its own echo. Teams Personal
 suppresses its own echoes because the gateway records delivery from receipts.
-Supply valid
-samples for advertised uploads and fake typing observations when implemented.
+Supply valid samples for advertised uploads and fake typing observations when
+implemented.
 Use `checkAgentContract` from the same entry point for connector lifecycle,
 event shape, and provider failure checks.
 

@@ -11,7 +11,7 @@ The check runs TypeScript, Svelte diagnostics, ESLint, Prettier, Node's test run
 
 Write commit messages in [Conventional Commits](https://www.conventionalcommits.org/) form, for example `feat(line): add quick-reply buttons`. `corepack pnpm install` points Git at `.githooks`, whose `commit-msg` hook runs commitlint with `@commitlint/config-conventional`. Run `corepack pnpm lint:commits` to check the commits between `origin/main` and `HEAD`.
 
-Core libraries and the CLI live in `packages/`. Official plugins belong in `plugins/` and import framework contracts from `@tsugimori/plugin-sdk`. Keep platform and agent implementations out of the core packages. Use `definePlugin` for plugin definitions and register their factories by kind. For external approval requests, await `AgentIO.requestApproval` before performing the operation.
+Core libraries and the CLI live in `packages/`. Official plugins belong in `plugins/` and import framework contracts from `@tsugimori/plugin-sdk`. Keep platform and agent implementations out of the core packages. Use `definePlugin` for plugin definitions and register their factories by kind. Use a distinct kind for each platform integration, such as `teams-personal` for Microsoft personal accounts. For external approval requests, await `AgentIO.requestApproval` before performing the operation.
 
 Change the SQLite schema in `packages/storage-sqlite/src/schema.ts` and run `corepack pnpm --filter @tsugimori/storage-sqlite db:generate` to generate migrations. Keep SQL and SQLite details in the storage implementation. Keep deployment data and credentials in a separate workspace. Record timing through `Tracer` and keep secrets out of logs and trace attributes.
 
