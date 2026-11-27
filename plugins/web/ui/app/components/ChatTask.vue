@@ -1,9 +1,19 @@
 <script setup lang="ts">
 import type { AdminConversation, AdminTask } from '@tsugimori/plugin-sdk';
 
+import { ChevronRight } from '@lucide/vue';
+
 import { statusStyle, tokenPair, taskHref } from '../lib/display.ts';
 import { duration } from '../lib/format.ts';
 import { taskLanes, toolStatus } from '../lib/timeline.ts';
+
+// Render a native button even when PrimeVue registers Button globally.
+const TaskHeader = defineComponent({
+  props: { expandable: Boolean },
+  setup(props, { slots }) {
+    return () => h(props.expandable ? 'button' : 'div', slots.default?.());
+  },
+});
 
 const props = defineProps<{
   task: AdminTask;
@@ -20,6 +30,10 @@ const status = computed(() =>
     : props.task.status,
 );
 const open = ref<boolean>();
+const expandable = computed(
+  () => props.task.tools.length > 0 || Boolean(props.task.error),
+);
+const expanded = computed(() => open.value ?? active.value);
 const lanes = computed(() => taskLanes(props.task, start.value, end.value));
 const rows = computed(() =>
   [
@@ -35,6 +49,10 @@ const rows = computed(() =>
     })),
   ].sort((a, b) => a.at - b.at),
 );
+
+function toggle() {
+  open.value = !expanded.value;
+}
 </script>
 
 <template>
@@ -44,13 +62,27 @@ const rows = computed(() =>
     :class="{ 'live-task': active }"
   >
     <div class="chat-task-head">
-      <button
-        class="chat-task-toggle text-button"
-        type="button"
-        :aria-expanded="open ?? active"
-        :aria-controls="'task-body-' + task.id"
-        @click="open = !(open ?? active)"
+      <TaskHeader
+        :expandable="expandable"
+        class="chat-task-summary"
+        :class="{ 'chat-task-toggle text-button': expandable }"
+        v-bind="
+          expandable
+            ? {
+                type: 'button',
+                'aria-expanded': expanded,
+                'aria-controls': 'task-body-' + task.id,
+                onClick: toggle,
+              }
+            : {}
+        "
       >
+        <ChevronRight
+          v-if="expandable"
+          class="chat-task-chevron"
+          :size="16"
+          aria-hidden="true"
+        />
         <StateTag
           :status="task.silent ? 'idle' : status"
           :label="task.silent ? m.silent : undefined"
@@ -67,13 +99,16 @@ const rows = computed(() =>
             {{ m.tokens }}</small
           >
         </span>
-      </button>
+        <span v-if="!expanded && task.tools.length" class="chat-task-hint">
+          {{ m.showTools(task.tools.length) }}
+        </span>
+      </TaskHeader>
       <NuxtLink :to="taskHref(task.id)" class="section-link"
         >{{ t('Task details', '任務詳情') }} →</NuxtLink
       >
     </div>
     <div v-if="task.tools.length" class="chat-lane">
-      <div v-if="open ?? active" class="timing-lane">
+      <div v-if="expanded" class="timing-lane">
         <span>{{ m.modelLane }}</span><TimingTrack
           :segments="
             lanes.model.map(({ left, width }) => ({ at: left, width }))
@@ -95,7 +130,7 @@ const rows = computed(() =>
     <div :id="'task-body-' + task.id" class="chat-task-body">
       <template v-for="row in rows" :key="row.key">
         <ChatTool
-          v-if="'tool' in row && (open ?? active)"
+          v-if="'tool' in row && expanded"
           :tool="row.tool"
           :task-id="task.id"
           :start="start"
@@ -106,7 +141,7 @@ const rows = computed(() =>
           :chat="task"
         />
       </template>
-      <p v-if="task.error && (open ?? active)" class="error-text">
+      <p v-if="task.error && expanded" class="error-text">
         {{ task.error }}
       </p>
     </div>

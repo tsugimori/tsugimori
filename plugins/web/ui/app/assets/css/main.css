@@ -1338,7 +1338,7 @@ input[type='date'],
   padding: 3px 6px;
   font-size: 12px;
 }
-.chat-task-toggle {
+.chat-task-summary {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
@@ -1347,13 +1347,41 @@ input[type='date'],
   min-width: 0;
   text-align: left;
   min-height: 34px;
+  padding: 3px 4px;
 }
-.chat-task-toggle .muted {
+.chat-task-summary .muted {
   font-size: 11px;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
-.chat-task-toggle small {
+.chat-task-summary small {
   display: block;
   font-size: inherit;
+}
+.chat-task-toggle {
+  border-radius: 4px;
+}
+.chat-task-toggle:is(:hover, :focus-visible) {
+  background: var(--state-run-bg);
+}
+.chat-task-toggle:focus-visible {
+  outline-offset: 0;
+}
+.chat-task-chevron,
+.chat-task-hint {
+  color: var(--link);
+}
+.chat-task-toggle[aria-expanded='true'] .chat-task-chevron {
+  transform: rotate(90deg);
+}
+.chat-task-hint {
+  font-size: 11px;
+  font-weight: 650;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .chat-task-chevron {
+    transition: transform 150ms ease;
+  }
 }
 .chat-lane,
 .chat-task-body {
