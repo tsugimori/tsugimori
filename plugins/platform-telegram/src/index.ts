@@ -2,6 +2,7 @@ import type {
   AdapterContext,
   ApprovalFeedback,
   ApprovalReaction,
+  ChoiceUpdate,
   InboundMessage,
   MediaDestination,
   MediaUpload,
@@ -76,6 +77,15 @@ const unavailableScopeReasons = [
 ];
 
 export { splitText };
+
+function inlineKeyboard(
+  buttons: OutboundMessage['buttons'],
+  approval?: boolean,
+) {
+  return buttonRows(buttons ?? [], approval).map((row) =>
+    row.map(({ id, label }) => ({ text: label, callback_data: id })),
+  );
+}
 
 function commandScope(scope: PlatformCommandScope) {
   if ('userId' in scope) {
@@ -429,9 +439,7 @@ export class TelegramAdapter implements PlatformAdapter {
       throw new SendFailure({ parts, deliveryUnknown: false }, error);
     }
     const controls = message.approval ? messages.length - 1 : 0;
-    const keyboard = buttonRows(message.buttons ?? [], message.approval).map(
-      (row) => row.map(({ id, label }) => ({ text: label, callback_data: id })),
-    );
+    const keyboard = inlineKeyboard(message.buttons, message.approval);
     try {
       for (const [index, part] of messages.entries()) {
         const { text, entities } = part;
@@ -777,6 +785,37 @@ export class TelegramAdapter implements PlatformAdapter {
         0,
       );
     } catch (error) {
+      await this.#recordMigration(chatId, error);
+      throw error;
+    }
+  }
+
+  async updateChoices(update: ChoiceUpdate, signal?: AbortSignal) {
+    const { buttons, chatId, messageId } = update;
+    const parts = telegramMessageParts(update, this.#ctx?.getUser);
+    if (parts.length !== 1)
+      throw new Error('A Telegram menu edit must fit in one message');
+    const { text, entities } = parts[0]!;
+    const attached = this.#signal();
+    try {
+      await this.#api.call(
+        'editMessageText',
+        {
+          chat_id: chatId,
+          message_id: Number(messageId),
+          text,
+          entities,
+          reply_markup: { inline_keyboard: inlineKeyboard(buttons) },
+        },
+        signal ? AbortSignal.any([attached, signal]) : attached,
+      );
+    } catch (error) {
+      if (
+        error instanceof BotApiError &&
+        error.code === 400 &&
+        /\bmessage is not modified\b/i.test(error.description ?? '')
+      )
+        return;
       await this.#recordMigration(chatId, error);
       throw error;
     }

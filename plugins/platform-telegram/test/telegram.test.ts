@@ -641,6 +641,72 @@ test(
   },
 );
 
+test('edits a choice message with formatted text and a replacement keyboard', async (t) => {
+  const edits: Record<string, unknown>[] = [];
+  const fakeFetch: typeof fetch = async (input, init) => {
+    const method = String(input).split('/').at(-1);
+    if (method === 'getMe') return ok(me);
+    if (method === 'getUpdates') return longPoll(init);
+    assert.equal(method, 'editMessageText');
+    assert.ok(typeof init?.body === 'string');
+    edits.push(JSON.parse(init.body));
+    return edits.length === 1
+      ? ok(true)
+      : Response.json(
+          {
+            ok: false,
+            error_code: 400,
+            description: 'Bad Request: message is not modified',
+          },
+          { status: 400 },
+        );
+  };
+  const adapter = new TelegramAdapter({ fetch: fakeFetch }, 'tg', '1:fake');
+  t.after(() => adapter.stop());
+  await adapter.start({ emit: () => Promise.resolve() });
+  const update = {
+    chatId: '-1001',
+    threadId: '17',
+    messageId: '50',
+    text: '**Pick** a model',
+    format: 'markdown' as const,
+    buttons: [
+      { id: 'choice:one', label: 'One' },
+      { id: 'choice:two', label: 'Two' },
+      { id: 'choice:long', label: 'A model with a very long name' },
+    ],
+  };
+  await adapter.updateChoices(update);
+  await adapter.updateChoices(update);
+  assert.equal(edits.length, 2);
+  assert.deepEqual(edits[0], {
+    chat_id: '-1001',
+    message_id: 50,
+    text: 'Pick a model',
+    entities: [{ type: 'bold', offset: 0, length: 4 }],
+    reply_markup: {
+      inline_keyboard: [
+        [
+          { text: 'One', callback_data: 'choice:one' },
+          { text: 'Two', callback_data: 'choice:two' },
+        ],
+        [
+          {
+            text: 'A model with a very long name',
+            callback_data: 'choice:long',
+          },
+        ],
+      ],
+    },
+  });
+  assert.deepEqual(edits[1], edits[0]);
+  await assert.rejects(
+    adapter.updateChoices({ ...update, text: '🌙'.repeat(2_049) }),
+    /must fit in one message/,
+  );
+  assert.equal(edits.length, 2);
+});
+
 test(
   'typing refreshes until cancelled and approval feedback answers before editing',
   { timeout: 4_000 },

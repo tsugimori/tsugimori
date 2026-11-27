@@ -45,7 +45,11 @@ import {
 import { Tracer } from '@tsugimori/trace';
 import { isDeepStrictEqual } from 'node:util';
 
-import type { ChoiceHandler } from './chat-choices.ts';
+import type {
+  ChoiceAddress,
+  ChoiceHandler,
+  ChoiceReplacement,
+} from './chat-choices.ts';
 import type { Command } from './chat-commands.ts';
 import type { Logger } from './hooks.ts';
 import type { MemoryResult } from './memory.ts';
@@ -964,10 +968,14 @@ export class Gateway {
   async #process(
     adapter: PlatformAdapter,
     inbound: PlatformInboundEvent,
-    finishChoice?: (text: string) => Promise<void>,
+    selectedChoice?: {
+      address: ChoiceAddress;
+      finish(text: string): Promise<void>;
+    },
   ) {
     const at = Date.now();
     const { store } = this.#deps;
+    const finishChoice = selectedChoice?.finish;
     if (inbound.type === 'chat-migrated')
       this.#commandMenus.migrateChat(adapter, inbound);
     const original =
@@ -1276,8 +1284,11 @@ export class Gateway {
               stored.seq,
               owner,
               command,
-              finish,
-              commandDecision,
+              {
+                address: selectedChoice?.address,
+                finish,
+                onTask: commandDecision,
+              },
             );
           } catch (error) {
             await finish?.(
@@ -2150,8 +2161,15 @@ export class Gateway {
     seq: number,
     owner: boolean,
     { name, args }: Command,
-    finish?: (text: string) => Promise<void>,
-    onTask?: (taskId: string) => void,
+    {
+      address,
+      finish,
+      onTask,
+    }: {
+      address?: ChoiceAddress;
+      finish?: (text: string) => Promise<void>;
+      onTask?: (taskId: string) => void;
+    } = {},
   ) {
     const { store } = this.#deps;
     const { locale } = this.#runtime.config;
@@ -2162,6 +2180,7 @@ export class Gateway {
     const respond =
       (
         finish?: (text: string) => Promise<void>,
+        existing?: ChoiceAddress,
         selection = selectedCommand,
       ): CommandSend =>
       async (
@@ -2191,14 +2210,25 @@ export class Gateway {
           else await this.#outbound.send(adapter, reply(message, body));
           return;
         }
-        if (finish) await finish(selection);
+        const replace =
+          finish && existing
+            ? { address: existing, fallback: () => finish(selection) }
+            : undefined;
+        if (!replace && finish) await finish(selection);
         const choicesPerPage =
           choices.length <= Math.min(defaultChoicesPerPage, limit)
             ? choices.length
             : Math.min(defaultChoicesPerPage, limit - 2);
         const pages = Math.ceil(choices.length / choicesPerPage);
-        const showPage = async (index: number) => {
-          if (this.#isStopping() || canChoose?.() === false) return;
+        const showPage = async (index: number, replace?: ChoiceReplacement) => {
+          if (replace && !adapter.updateChoices) {
+            await replace.fallback();
+            replace = undefined;
+          }
+          if (this.#isStopping() || canChoose?.() === false) {
+            await replace?.fallback();
+            return;
+          }
           const offset = index * choicesPerPage;
           const page = choices.slice(offset, offset + choicesPerPage);
           const prompt = [
@@ -2220,8 +2250,10 @@ export class Gateway {
             async (choice, edit, event) => {
               if (choice === previous || choice === next) {
                 const target = index + (choice === previous ? -1 : 1);
-                await edit(prompt);
-                await showPage(target);
+                await showPage(target, {
+                  address: event,
+                  fallback: () => edit(prompt),
+                });
                 return;
               }
               if (select) {
@@ -2242,7 +2274,7 @@ export class Gateway {
                       userId: message.userId,
                     }),
                     { name: choiceCommand, args: choice.value },
-                    edit,
+                    { address: event, finish: edit },
                   ),
               );
             },
@@ -2251,12 +2283,13 @@ export class Gateway {
               command: select ? undefined : choiceCommand,
               deliver: (outbound) => this.#outbound.send(adapter, outbound),
               expires: true,
+              replace,
             },
           );
         };
-        await showPage(0);
+        await showPage(0, replace);
       };
-    const send = respond(finish);
+    const send = respond(finish, address);
     const setup = async (request: Parameters<ChatSetup['start']>[2]) => {
       const started = await this.#chatSetup.start(adapter, message, request);
       if (!started) await send(m.setup.alreadyRunning);
@@ -2346,7 +2379,10 @@ export class Gateway {
               userId: event.userId,
               userUsername: event.userUsername,
             };
-            return this.#process(adapter, selected, edit);
+            return this.#process(adapter, selected, {
+              address: event,
+              finish: edit,
+            });
           },
         });
         break;
@@ -2527,7 +2563,11 @@ export class Gateway {
           /^(agent|platform)\s+([A-Za-z0-9_][A-Za-z0-9_.:-]*)$/.exec(args);
         if (!match?.[2]) await send(removal.usage);
         else {
-          if (finish) await finish(selectedCommand);
+          const replace =
+            finish && address && adapter.updateChoices
+              ? { address, fallback: () => finish(selectedCommand) }
+              : undefined;
+          if (!replace && finish) await finish(selectedCommand);
           await this.#chatRemoval.start(
             adapter,
             chat,
@@ -2537,6 +2577,7 @@ export class Gateway {
               id: match[2],
             },
             locale,
+            replace,
           );
         }
         break;
@@ -2611,13 +2652,14 @@ export class Gateway {
           await send(current, choices, describePage(choices), {
             canChoose,
             describePage,
-            select: (choice, edit) =>
+            select: (choice, edit, event) =>
               this.#trace.span(
                 'trigger.command',
                 { ...chat, command: name },
                 () => {
                   const send = respond(
                     edit,
+                    event,
                     m.choices.answer(`/model ${choice.value}`),
                   );
                   return choice === reset

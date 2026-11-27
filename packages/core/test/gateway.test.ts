@@ -6,6 +6,7 @@ import type {
   AgentRequest,
   ApprovalFeedback,
   ApprovalReaction,
+  ChoiceUpdate,
   ImageLimits,
   InboundMessage,
   OutboundMessage,
@@ -147,6 +148,7 @@ async function fixture(
     durable?: boolean;
     envFixture?: string;
     imageLimits?: ImageLimits;
+    listModels?: AgentConnector['listModels'];
     locale?: 'en' | 'zh-TW';
     onScopedTool?: (args: unknown, userId: string) => void;
     outboundPush?: PlatformCapabilities['outboundPush'];
@@ -191,6 +193,7 @@ async function fixture(
           describeDefaults: options.describeDefaults,
           describeQuota: options.describeQuota,
           describeSession: options.describeSession,
+          listModels: options.listModels,
           run,
           supportsSessionFork: options.supportsSessionFork,
           settings: options.agentSettings?.(id),
@@ -1921,6 +1924,132 @@ test('/help paginates within the inline button limit and falls back to text', as
   assert.match(fallback.text, /^\/new · Start a new conversation$/m);
   assert.doesNotMatch(fallback.text, /^\/deny ·/m);
 });
+
+test('command pages and submenus replace the tapped message and keep its reply link', async (t) => {
+  const { platform, store } = await fixture(t, async function* () {}, true, {
+    listModels: () => ['one', 'two'],
+  });
+  const updates: ChoiceUpdate[] = [];
+  platform.platform.updateChoices = async (update) => {
+    updates.push(update);
+  };
+  platform.platform.capabilities.maxInlineButtons = 13;
+  const thread = { threadId: '17' };
+  const topic = { ...chat, chatId: 'room_17' };
+  let query = 0;
+  const press = async (
+    menu: Pick<OutboundMessage, 'buttons' | 'chatId' | 'threadId'> & {
+      messageId: string;
+    },
+    label: string,
+  ) => {
+    const button = menu.buttons?.find((entry) => entry.label === label);
+    assert.ok(button);
+    await platform.emit({
+      type: 'callback',
+      callbackId: button.id,
+      chatId: menu.chatId,
+      messageId: menu.messageId,
+      queryId: `query-${++query}`,
+      threadId: menu.threadId,
+      userId: 'owner',
+    });
+  };
+
+  await platform.emit(inbound('help', '/help', thread));
+  const first = platform.sent[0]!;
+  await press(first, 'Next');
+  const second = updates[0]!;
+  assert.match(second.text, /Page 2 of 3/);
+  assert.equal(second.messageId, first.messageId);
+  assert.equal(second.chatId, first.chatId);
+  assert.equal(second.threadId, thread.threadId);
+  await press(first, 'Next');
+  assert.equal(
+    platform.feedback.at(-1)?.notice,
+    'This selection is unavailable.',
+  );
+  assert.equal(updates.length, 1);
+
+  await press(second, '/model');
+  const providers = updates[1]!;
+  assert.equal(providers.messageId, first.messageId);
+  assert.deepEqual(
+    providers.buttons.map(({ label }) => label),
+    ['test', 'default'],
+  );
+  await press(providers, 'test');
+  const models = updates[2]!;
+  assert.equal(models.messageId, first.messageId);
+  assert.match(models.text, /Choose a model for test/);
+  assert.deepEqual(
+    models.buttons.map(({ label }) => label),
+    ['one', 'two', 'default'],
+  );
+  assert.equal(store.getChat(topic)?.model, null);
+  await press(models, 'one');
+  assert.equal(store.getChat(topic)?.model, 'one');
+  assert.equal(platform.feedback.at(-1)?.messageId, first.messageId);
+  assert.equal(platform.feedback.at(-1)?.decisionText, 'Model set to one.');
+  assert.equal(platform.sent.length, 1);
+
+  await platform.emit(inbound('model', '/model', thread));
+  const next = platform.sent[1]!;
+  await press(next, 'test');
+  const nextModels = updates[3]!;
+  await platform.emit(
+    inbound('typed-model', '/model test two', {
+      ...thread,
+      replyTo: { id: next.messageId },
+    }),
+  );
+  assert.equal(store.getChat(topic)?.model, 'two');
+  assert.equal(platform.feedback.at(-1)?.messageId, next.messageId);
+  assert.equal(platform.feedback.at(-1)?.decisionText, 'Model set to two.');
+  assert.equal(platform.sent.length, 2);
+  await press(nextModels, 'two');
+  assert.equal(
+    platform.feedback.at(-1)?.notice,
+    'This selection is unavailable.',
+  );
+});
+
+for (const failedUpdate of [false, true]) {
+  test(`a submenu is delivered once when message editing ${failedUpdate ? 'fails' : 'is unsupported'}`, async (t) => {
+    const { platform } = await fixture(t, async function* () {});
+    if (failedUpdate)
+      platform.platform.updateChoices = async () => {
+        throw new Error('Cannot edit message');
+      };
+    await platform.emit(inbound('model', '/model'));
+    const original = platform.sent[0]!;
+    const send = platform.platform.send.bind(platform.platform);
+    platform.platform.send = (outbound, options) => {
+      assert.equal(
+        platform.feedback.at(-1)?.decisionText,
+        'Selected: /model test',
+      );
+      assert.equal(platform.feedback.at(-1)?.messageId, original.messageId);
+      return send(outbound, options);
+    };
+    const [provider] = original.buttons!;
+    await platform.emit({
+      type: 'callback',
+      callbackId: provider!.id,
+      chatId: original.chatId,
+      messageId: original.messageId,
+      userId: 'owner',
+    });
+    assert.equal(platform.sent.length, 2);
+    const submenu = platform.sent[1]!;
+    assert.notEqual(submenu.messageId, original.messageId);
+    assert.match(submenu.text, /Choose a model for test/);
+    assert.deepEqual(
+      submenu.buttons?.map(({ label }) => label),
+      ['default'],
+    );
+  });
+}
 
 test(
   'session commands honor the allowlist and localize usage and busy replies',

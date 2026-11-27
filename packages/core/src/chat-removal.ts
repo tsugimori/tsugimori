@@ -8,7 +8,7 @@ import type { RemovalTarget } from '@tsugimori/storage';
 
 import { SetupError } from '@tsugimori/plugin-sdk';
 
-import type { ChatChoices } from './chat-choices.ts';
+import type { ChatChoices, ChoiceReplacement } from './chat-choices.ts';
 import type { Logger } from './hooks.ts';
 import type { Outbound } from './outbound.ts';
 import type { Removal, RemovalPlan } from './removal.ts';
@@ -61,10 +61,14 @@ export class ChatRemoval {
     message: InboundMessage,
     target: RemovalTarget,
     locale: Config['locale'],
+    replace?: ChoiceReplacement,
   ) {
     const { outbound, removal } = this.#deps;
     const m = removalMessages(locale);
-    const send = (text: string) => outbound.send(adapter, reply(message, text));
+    const send = async (text: string) => {
+      await replace?.fallback();
+      return outbound.send(adapter, reply(message, text));
+    };
     if (this.#pending || this.#sending) {
       await send(m.busy);
       return;
@@ -96,7 +100,7 @@ export class ChatRemoval {
               choiceLabel(choice, locale),
             );
           },
-          { active: () => this.#pending?.plan === plan },
+          { active: () => this.#pending?.plan === plan, replace },
         );
         finish = buttons.finish;
         receipt = { messageId: buttons.address.messageId };

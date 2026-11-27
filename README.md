@@ -136,6 +136,8 @@ sticker catalog.
 | `/previews`                                      | Owner                                                     | Lists open previews on this adapter.                                                                        |
 | `/preview close <id>`                            | Owner                                                     | Closes a preview on this adapter.                                                                           |
 
+On Telegram, tapping through command menus such as `/help` and `/model` updates the same message. **Previous** and **Next** also update it in place. If the menu cannot be edited, the bot posts the next step in a new message, as it does with LINE quick replies.
+
 Use `/model <agentId>` to list a provider's models, or `/model <agentId> <model>` to select both directly. With one argument, configured agent IDs take precedence over model names. Use `/model <model>` for other model names on the current provider. `/model <agentId> default` uses that provider's default model. `/model default` clears both chat overrides and restores the configured route. Switching providers starts a fresh session and reports any incompatible thinking or fast overrides it clears.
 
 `/btw` and `/ask` questions and answers stay out of ordinary recent history, history tools, and summaries. An explicit reply can include them in its thread.

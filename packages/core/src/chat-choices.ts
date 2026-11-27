@@ -18,9 +18,7 @@ import { conversationId } from './outbound.ts';
 import { systemMessages } from './system-messages.ts';
 
 type Callback = Extract<PlatformInboundEvent, { type: 'callback' }>;
-type Address = Pick<OutboundMessage, 'chatId' | 'threadId'> & {
-  messageId: string;
-};
+export type ChoiceAddress = Pick<Callback, 'chatId' | 'messageId' | 'threadId'>;
 type Finish = (text: string, retainPrompt?: boolean) => Promise<void>;
 export type ChoiceHandler = (
   choice: PromptChoice,
@@ -56,8 +54,13 @@ interface PendingChoice {
   canChoose(): boolean;
   choose(event: Callback): void | Promise<void>;
   finish: Finish;
-  ready: Promise<Address | undefined>;
+  ready: Promise<ChoiceAddress | undefined>;
   userId: string;
+}
+
+export interface ChoiceReplacement {
+  address: ChoiceAddress;
+  fallback(): Promise<void>;
 }
 
 interface ChoiceOptions {
@@ -66,6 +69,7 @@ interface ChoiceOptions {
   command?: Command['name'];
   deliver?(message: OutboundMessage): Promise<SendReceipt>;
   expires?: boolean;
+  replace?: ChoiceReplacement;
 }
 
 interface LinkedReply {
@@ -95,11 +99,12 @@ export class ChatChoices {
       command,
       deliver = (outbound) => adapter.send(outbound),
       expires = false,
+      replace,
     }: ChoiceOptions = {},
   ) {
     const locale = this.#deps.locale();
     const m = systemMessages(locale).choices;
-    const ready = Promise.withResolvers<Address | undefined>();
+    const ready = Promise.withResolvers<ChoiceAddress | undefined>();
     let finished = false;
     let replyKey: string | undefined;
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -111,7 +116,10 @@ export class ChatChoices {
     const deactivate = () => {
       clearTimeout(timer);
       for (const { id } of buttons) this.#pending.delete(id);
-      if (replyKey) this.#replies.delete(replyKey);
+      if (replyKey) {
+        this.#replies.delete(replyKey);
+        replyKey = undefined;
+      }
     };
     const finish: Finish = async (text, retainPrompt) => {
       if (finished) return;
@@ -140,19 +148,25 @@ export class ChatChoices {
       });
     }
     try {
-      const receipt = await deliver({
+      const outbound = {
         ...message,
         buttons: buttons.map(({ id, label }) => ({ id, label })),
-      });
-      const delivered = receipt.parts?.find(
-        ({ messageId }) => messageId === receipt.messageId,
-      );
-      const address = {
-        chatId: delivered?.chatId ?? message.chatId,
-        threadId:
-          delivered?.chatId === undefined ? message.threadId : undefined,
-        messageId: receipt.messageId,
       };
+      let address =
+        replace && (await this.#update(adapter, outbound, replace.address));
+      if (!address) {
+        await replace?.fallback();
+        const receipt = await deliver(outbound);
+        const delivered = receipt.parts?.find(
+          ({ messageId }) => messageId === receipt.messageId,
+        );
+        address = {
+          chatId: delivered?.chatId ?? message.chatId,
+          threadId:
+            delivered?.chatId === undefined ? message.threadId : undefined,
+          messageId: receipt.messageId,
+        };
+      }
       if (command && !finished) {
         replyKey = this.#replyKey(adapter, address);
         this.#replies.set(replyKey, {
@@ -261,14 +275,14 @@ export class ChatChoices {
 
   #replyKey(
     adapter: PlatformAdapter,
-    { chatId, threadId, messageId }: Address,
+    { chatId, threadId, messageId }: ChoiceAddress,
   ) {
     return JSON.stringify([adapter.id, chatId, threadId, messageId]);
   }
 
   async #feedback(
     adapter: PlatformAdapter,
-    { chatId, messageId, threadId }: Address,
+    { chatId, messageId, threadId }: ChoiceAddress,
     feedback: {
       decisionText?: string;
       notice: string;
@@ -286,6 +300,51 @@ export class ChatChoices {
       this.#deps.log({
         level: 'warn',
         event: 'choice.feedback_failed',
+        adapterId: adapter.id,
+      });
+    }
+  }
+
+  async #update(
+    adapter: PlatformAdapter,
+    {
+      allowTextMentions,
+      buttons,
+      entities,
+      format,
+      mentions,
+      parseTextMentions,
+      text,
+    }: OutboundMessage & {
+      buttons: NonNullable<OutboundMessage['buttons']>;
+    },
+    { chatId, messageId, threadId }: ChoiceAddress,
+  ) {
+    const updateChoices = adapter.updateChoices?.bind(adapter);
+    if (!updateChoices) return;
+    try {
+      await this.#deps.trace.span(
+        'choice.update',
+        { adapterId: adapter.id, chatId: conversationId({ chatId, threadId }) },
+        () =>
+          updateChoices({
+            chatId,
+            messageId,
+            threadId,
+            text,
+            buttons,
+            format,
+            entities,
+            mentions,
+            parseTextMentions,
+            allowTextMentions,
+          }),
+      );
+      return { chatId, messageId, threadId };
+    } catch {
+      this.#deps.log({
+        level: 'warn',
+        event: 'choice.update_failed',
         adapterId: adapter.id,
       });
     }

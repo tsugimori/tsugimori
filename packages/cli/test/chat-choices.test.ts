@@ -244,10 +244,8 @@ test(
     const categories = await f.prompt('Usage: /add');
     const [agent] = buttons(categories, ['Agent', 'Platform']);
     await f.press(categories.id, agent!);
-    assert.deepEqual((await f.edit(categories.id)).reply_markup, {
-      inline_keyboard: [],
-    });
-    const kinds = await f.prompt('Choose a plugin for /add agent');
+    const kinds = await f.edit(categories.id);
+    assert.match(kinds.text, /Choose a plugin for \/add agent/);
     const [demo] = buttons(kinds, ['demo']);
     await f.press(kinds.id, demo!);
     assert.match((await f.edit(kinds.id)).text, /\/add agent demo/);
@@ -326,11 +324,11 @@ test(
     assert.match(first.text, /model-0 · model-1/);
     assert.doesNotMatch(first.text, /\bmodel-80\b/);
     const next = buttons(first, [...models.slice(0, 80), 'Next']).at(-1)!;
+    const sent = f.sent.length;
     await f.press(first.id, next);
-    assert.deepEqual((await f.edit(first.id)).reply_markup, {
-      inline_keyboard: [],
-    });
-    const second = await f.prompt('Page 2 of 2');
+    assert.equal(f.sent.length, sent);
+    const second = await f.edit(first.id);
+    assert.match(second.text, /Page 2 of 2/);
     assert.match(second.text, /model-104 · default/);
     const [last] = buttons(second, [
       ...models.slice(80),
@@ -383,7 +381,8 @@ test(
     );
     await f.press(providers.id, first!);
     assert.equal(f.store.getChat(chat)?.agentId, null);
-    const models = await f.prompt('Choose a model for first.');
+    const models = await f.edit(providers.id);
+    assert.match(models.text, /Choose a model for first\./);
     const selected = buttons(models, [
       'one',
       'two',
@@ -428,7 +427,8 @@ test(
     ]);
     await f.press(agents.id, secondProvider!);
     assert.equal(f.store.getChat(chat)?.agentId, null);
-    const secondModels = await f.prompt('Choose a model for second.');
+    const secondModels = await f.edit(agents.id);
+    assert.match(secondModels.text, /Choose a model for second\./);
     assert.match(
       secondModels.text,
       /second-long-model-full-name · short · default/,
@@ -560,12 +560,21 @@ test(
 );
 
 test(
-  'Telegram /remove confirmation offers Delete and Cancel buttons for the owner only',
+  'Telegram /remove opens confirmation in place and offers buttons for the owner only',
   { timeout: 6_000 },
   async (t) => {
     const f = await fixture(t);
-    await f.say('/remove agent second');
-    const first = await f.prompt('Press Delete or reply yes');
+    await f.say('/remove');
+    const menu = await f.prompt('Usage: /remove');
+    const [, agent] = buttons(menu, ['Platform', 'Agent']);
+    const sent = f.sent.length;
+    await f.press(menu.id, agent!);
+    const agents = await f.edit(menu.id);
+    const [secondAgent] = buttons(agents, ['second', 'disabled']);
+    await f.press(menu.id, secondAgent!);
+    const first = await f.edit(menu.id);
+    assert.match(first.text, /Press Delete or reply yes/);
+    assert.equal(f.sent.length, sent);
     const [, cancel] = buttons(first, ['Delete', 'Cancel']);
     assert.match(
       (await f.press(first.id, cancel!, owner + 1)) ?? '',

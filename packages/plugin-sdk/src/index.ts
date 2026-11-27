@@ -207,6 +207,14 @@ export interface OutboundMessage {
   threadId?: string;
 }
 
+export type ChoiceUpdate = Omit<
+  OutboundMessage,
+  'approval' | 'buttons' | 'replyTo'
+> & {
+  buttons: NonNullable<OutboundMessage['buttons']>;
+  messageId: string;
+};
+
 export interface TextRange {
   length: number;
   offset: number;
@@ -384,6 +392,8 @@ export interface PlatformAdapter {
     chat: Pick<OutboundMessage, 'chatId' | 'threadId'>,
     signal: AbortSignal,
   ): void;
+  /** Replace the text and buttons on an existing bot message. Throw if it cannot be edited. */
+  updateChoices?(update: ChoiceUpdate, signal?: AbortSignal): Promise<void>;
 }
 
 export interface ContextBlock {
