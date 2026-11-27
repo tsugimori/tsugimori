@@ -4402,6 +4402,7 @@ test(
     let next = 0;
     const opened: { id: string; provider: string; ttlMs: number }[] = [];
     const closed: string[] = [];
+    const referenceDirectories: (string | undefined)[] = [];
     function provider(id: string): TunnelProvider {
       return {
         id,
@@ -4427,7 +4428,8 @@ test(
       execBackends: [
         {
           id: 'local-sandbox',
-          async start() {
+          async start(scope) {
+            referenceDirectories.push(scope.references);
             const ports = new Set<number>();
             return {
               async exposePort(port) {
@@ -4483,6 +4485,9 @@ test(
     await f.gateway.idle();
     await f.platform.emit(inbound('owner-preview', 'Start preview', group));
     await f.gateway.idle();
+    assert.deepEqual(referenceDirectories, [
+      join(dirname(f.path), 'references'),
+    ]);
     assert.deepEqual(
       opened.map(({ provider, ttlMs }) => [provider, ttlMs]),
       [

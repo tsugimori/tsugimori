@@ -35,6 +35,7 @@ export function sandboxScope(
     workdir,
     writable: [workdir],
     network: 'none',
+    references: join(workspace, 'references'),
     denyRead: [
       ...['.ssh', '.cloudflared', '.codex', '.claude', '.aws'].map((name) =>
         join(home, name),
@@ -211,7 +212,7 @@ export class Executions {
       {
         name: 'exec.run',
         description:
-          'Run a command in the chat sandbox. Supply backgroundPort to start a persistent HTTP service listening on that port inside the sandbox. Use argv instead of a shell command string.',
+          'Run a command in the chat sandbox. /references holds read-only shared reference files listed in AGENTS.md. Supply backgroundPort to start a persistent HTTP service listening on that port inside the sandbox. Use argv instead of a shell command string.',
         schema: object(
           {
             cmd: {

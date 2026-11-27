@@ -464,6 +464,8 @@ export interface ToolDefinition<A = unknown> {
 export interface ExecScope {
   denyRead: string[];
   network: 'none' | 'allow';
+  /** Host directory for the read-only /references mount. */
+  references?: string;
   workdir: string;
   writable: string[];
 }

@@ -32,3 +32,5 @@ Install `bwrap` and enable unprivileged user namespaces on the Linux host. `core
 | `exec.stop`               | Stops this chat's execution session and its background services.                                                                                                                                                                       |
 
 Commands run with a minimal environment and isolated network. Persistent writes go to the chat workdir, mounted as `/workspace` inside the sandbox. A service started with `exec.run` and `backgroundPort` can be published from that chat through the [preview plugin](../tunnel-cloudflare/README.md). Rule and skill edits can be recorded by the gateway when Git is available. Agent connectors have their own built-in tool policies in addition to these gateway tools.
+
+Place shared reference files in `references/` next to the workspace's `AGENTS.md` and list them there. Every chat can use `exec.run` to read the files at `/references`. The mount is read-only and subject to `denyRead`.

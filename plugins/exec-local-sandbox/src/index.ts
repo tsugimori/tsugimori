@@ -8,13 +8,22 @@ import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 
 import { definePlugin, ToolFailure } from '@tsugimori/plugin-sdk';
 import { spawn } from 'node:child_process';
-import { lstat, mkdir, realpath } from 'node:fs/promises';
-import { isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { lstat, mkdir, readdir, realpath } from 'node:fs/promises';
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+  sep,
+} from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { createRelay } from './relay.ts';
 
 const sandboxRoot = '/workspace';
+const sandboxReferences = '/references';
 const node = '/run/bin/node';
 const worker = '/run/tsugimori-worker.ts';
 const control = '/run/tsugimori-control.sock';
@@ -55,6 +64,49 @@ async function existing(path: string) {
     )
       throw error;
   }
+}
+
+async function checkReferenceLinks(
+  directory: string,
+  workspace: string,
+  denied: ReadonlySet<string>,
+) {
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    const path = join(directory, entry.name);
+    if (denied.has(path)) continue;
+    if (entry.isDirectory()) await checkReferenceLinks(path, workspace, denied);
+    else if (entry.isSymbolicLink()) {
+      const target = await realpath(path).catch(() => undefined);
+      if (!target || !inside(workspace, target))
+        throw new ToolFailure(
+          'Shared reference links must stay inside the workspace',
+        );
+    }
+  }
+}
+
+async function referenceMount(source: string, denyRead: string[]) {
+  const workspace = await realpath(dirname(source));
+  const path = join(workspace, basename(source));
+  if (denyRead.some((host) => inside(host, source) || inside(host, path)))
+    return;
+  const entry = await existing(path);
+  if (!entry) return;
+  if (!entry.isDirectory() || (await realpath(path)) !== path)
+    throw new ToolFailure('The shared references directory must be local');
+
+  const denied = denyRead.flatMap((host) => {
+    if (inside(source, host)) return [join(path, relative(source, host))];
+    return inside(path, host) ? [host] : [];
+  });
+  const masks = new Set(
+    denied.filter(
+      (host) =>
+        !denied.some((parent) => parent !== host && inside(parent, host)),
+    ),
+  );
+  await checkReferenceLinks(path, workspace, masks);
+  return { path, masks };
 }
 
 type Relay = Awaited<ReturnType<typeof createRelay>>;
@@ -199,7 +251,7 @@ class Session implements ExecSession {
   }
 
   async #args(relay?: Relay) {
-    const { workdir, denyRead, network } = this.#scope;
+    const { workdir, denyRead, network, references } = this.#scope;
     const args = [
       ...namespaceArgs,
       '--die-with-parent',
@@ -258,6 +310,8 @@ class Session implements ExecSession {
         args.push('--ro-bind', path, join(sandboxRoot, name));
       }
     }
+    const mount = references && (await referenceMount(references, denyRead));
+    if (mount) args.push('--ro-bind', mount.path, sandboxReferences);
     const masks = denyRead.flatMap((host) => {
       if (host === workdir)
         throw new ToolFailure('Cannot deny the complete chat workdir');
@@ -267,6 +321,9 @@ class Session implements ExecSession {
         return [[host, host] as const];
       return [];
     });
+    if (mount)
+      for (const host of mount.masks)
+        masks.push([host, join(sandboxReferences, relative(mount.path, host))]);
     for (const [host, target] of masks) {
       const info = await existing(host);
       if (info?.isDirectory())
