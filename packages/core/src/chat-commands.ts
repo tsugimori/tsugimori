@@ -5,7 +5,6 @@ const descriptions = {
     en: 'Add an agent or platform ([--id <id>])',
     'zh-TW': '新增代理或平台（[--id <id>]）',
   },
-  agent: { en: 'Switch this chat’s agent', 'zh-TW': '切換這個對話的代理' },
   allow: {
     en: 'Allow members to use the bot here',
     'zh-TW': '允許成員在此使用機器人',
@@ -42,8 +41,8 @@ const descriptions = {
   },
   login: { en: 'Sign in to an agent', 'zh-TW': '登入代理' },
   model: {
-    en: 'Show or set the model (default to reset)',
-    'zh-TW': '查看或設定模型（default 還原）',
+    en: 'Choose a provider and model (default to reset)',
+    'zh-TW': '選擇供應商和模型（default 還原）',
   },
   new: {
     en: 'Start a new conversation',

@@ -26,6 +26,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import type { BotIdentity } from './updates.ts';
 
 import { BotApi, BotApiError, nativeId, record } from './api.ts';
+import { buttonRows } from './button-rows.ts';
 import { telegramSetSticker } from './inbound-media.ts';
 import {
   maxMessage,
@@ -428,15 +429,9 @@ export class TelegramAdapter implements PlatformAdapter {
       throw new SendFailure({ parts, deliveryUnknown: false }, error);
     }
     const controls = message.approval ? messages.length - 1 : 0;
-    const keyboard = [];
-    const buttons = message.buttons ?? [];
-    for (let index = 0; index < buttons.length; index += 4)
-      keyboard.push(
-        buttons.slice(index, index + 4).map(({ id, label }) => ({
-          text: label,
-          callback_data: id,
-        })),
-      );
+    const keyboard = buttonRows(message.buttons ?? [], message.approval).map(
+      (row) => row.map(({ id, label }) => ({ text: label, callback_data: id })),
+    );
     try {
       for (const [index, part] of messages.entries()) {
         const { text, entities } = part;

@@ -149,7 +149,7 @@ export class CodexAgent implements AgentConnector {
 
   async economyModel() {
     if (!this.#server) return;
-    const models = await this.#models(this.#server);
+    const models = await this.#models(this.#server, true);
     const light = new Map<string, string>();
     for (const { model, id, hidden, inputModalities } of models) {
       const value = typeof model === 'string' ? model : id;
@@ -436,21 +436,25 @@ export class CodexAgent implements AgentConnector {
     }
   }
 
-  #models(server: AppServer) {
+  #models(server: AppServer, allowUnavailable = false) {
     let catalog = this.#modelCatalogs.get(server);
     if (!catalog) {
       catalog = this.#loadModels(server).catch((error: unknown) => {
         this.#modelCatalogs.delete(server);
-        if (!(error instanceof RpcError)) throw error;
-        return [];
+        throw error;
       });
       this.#modelCatalogs.set(server, catalog);
     }
-    return catalog;
+    return allowUnavailable
+      ? catalog.catch((error: unknown) => {
+          if (!(error instanceof RpcError)) throw error;
+          return [];
+        })
+      : catalog;
   }
 
   async #catalogModel(server: AppServer, model?: string) {
-    return (await this.#models(server)).find((entry) =>
+    return (await this.#models(server, true)).find((entry) =>
       model === undefined || model === 'default'
         ? entry.isDefault === true
         : entry.model === model || entry.id === model,

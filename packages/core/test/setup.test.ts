@@ -1003,8 +1003,8 @@ test('runtime isolates agent and execution failures and keeps owner-visible chat
     platform.sent.at(-1)?.text,
     'agent/bad · 代理程式登入：請先登入。',
   );
-  await platform.receive('route', '/agent good');
-  assert.equal(platform.sent.at(-1)?.text, '已切換到代理程式 good。');
+  await platform.receive('route', '/model good default');
+  assert.match(platform.sent.at(-1)?.text ?? '', /^已將供應商設為 good。/);
   await platform.receive('works', 'Hello');
   await f.gateway.idle();
   assert.equal(platform.sent.at(-1)?.text, 'Still working.');

@@ -212,7 +212,6 @@ test(
       ownerCommands.map(({ command }) => command),
       [
         'add',
-        'agent',
         'allow',
         'ask',
         'btw',

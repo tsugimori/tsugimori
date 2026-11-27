@@ -48,6 +48,8 @@ For manual API-key authentication, configure the key before starting the gateway
 
 `tsugimori doctor` checks that the platform-specific bundled CLI runs and that its home is writable or can be created. It checks for configured authentication and reports whether the CLI advertises a configurable native compaction window. With an explicit key or token, the authentication check confirms presence. Guided setup's test turn exercises provider access.
 
+To route a chat to Claude, run `/model` and choose the Claude instance and model, or type `/model <agentId> <model>`. Use `/model <agentId> default` to select Claude's default model.
+
 For a chat routed to Claude, `/status` shows the effective model, reasoning and speed when known, along with context usage and the reported model window when available. It shows compaction timing and session count from traces. When the SDK reports subscription rate-limit events, the card shows cached five-hour and seven-day quota windows and reset times as available. The card uses cached state. **System** shows whether the Claude instance is attached.
 
 ## Execution records

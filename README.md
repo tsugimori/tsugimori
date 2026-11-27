@@ -113,8 +113,7 @@ sticker catalog.
 | ------------------------------------------------ | --------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
 | `/help`                                          | Owner or members of an allowlisted chat                   | Lists the commands you can use in this chat, with tappable buttons where supported.                         |
 | `/status`                                        | Owner                                                     | Shows gateway health, chat activity, incognito mode, and system state.                                      |
-| `/agent <id>`                                    | Owner                                                     | Switches this chat to an available agent and reports any incompatible thinking or fast overrides it clears. |
-| `/model [name]`                                  | Owner                                                     | Shows the current model and its source, or sets a chat override. Use `default` to clear it.                 |
+| `/model [provider] [model]`                      | Owner                                                     | Shows the current provider and model, then offers provider and model choices.                               |
 | `/thinking [level]`                              | Owner                                                     | Shows or sets reasoning effort for this chat. Use `default` to clear the override.                          |
 | `/fast [on\|off\|default]`                       | Owner                                                     | Shows or sets speed on a supported agent. `off` selects standard speed and `default` clears the override.   |
 | `/sticker`                                       | Owner in DM                                               | Lists Telegram sets and block status, plus the number of cached single stickers.                            |
@@ -136,6 +135,8 @@ sticker catalog.
 | `/cancel`                                        | Owner in the originating chat or setup's secret-prompt DM | Cancels guided setup or a pending removal.                                                                  |
 | `/previews`                                      | Owner                                                     | Lists open previews on this adapter.                                                                        |
 | `/preview close <id>`                            | Owner                                                     | Closes a preview on this adapter.                                                                           |
+
+Use `/model <agentId>` to list a provider's models, or `/model <agentId> <model>` to select both directly. With one argument, configured agent IDs take precedence over model names. Use `/model <model>` for other model names on the current provider. `/model <agentId> default` uses that provider's default model. `/model default` clears both chat overrides and restores the configured route. Switching providers starts a fresh session and reports any incompatible thinking or fast overrides it clears.
 
 `/btw` and `/ask` questions and answers stay out of ordinary recent history, history tools, and summaries. An explicit reply can include them in its thread.
 

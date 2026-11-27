@@ -1901,7 +1901,8 @@ test('/help paginates within the inline button limit and falls back to text', as
   const third = await navigate(second, 'Next');
   checkPage(third, 3);
   assert.equal(labels(third)?.at(-1), 'Previous');
-  assert.equal(commands.length, 24);
+  assert.equal(commands.length, 23);
+  assert.ok(!commands.includes('/agent'));
   assert.equal(new Set(commands).size, commands.length);
   assert.deepEqual(labels(await navigate(third, 'Previous')), labels(second));
 
@@ -2185,7 +2186,7 @@ test(
         thinking: 'low',
         serviceTier: 'default',
       },
-      { id: 'compatible', kind: 'fake' },
+      { id: 'compatible', kind: 'fake', model: 'compatible-default' },
       { id: 'legacy', kind: 'fake' },
     ];
     const configure = async () => {
@@ -2210,12 +2211,23 @@ test(
       await gateway.idle();
       return platform.sent.at(-1)?.text;
     };
-    for (const command of ['/model member-model', '/thinking high', '/fast on'])
+    for (const command of [
+      '/model',
+      '/model legacy',
+      '/model legacy member-model',
+      '/model member-model',
+      '/model default',
+      '/thinking high',
+      '/fast on',
+    ])
       assert.equal(await say(command, 'member'), undefined);
     assert.equal(store.getChat(chat)?.model, null);
     assert.equal(store.getChat(chat)?.thinking, null);
     assert.equal(store.getChat(chat)?.serviceTier, null);
-    assert.equal(await say('/model'), 'Model: configured-model (agent config)');
+    assert.equal(
+      await say('/model'),
+      'Provider: test · Model: configured-model (agent config)\nProviders: test · compatible · legacy · default',
+    );
     assert.equal(await say('/thinking'), 'Effort: low (agent config)');
     assert.equal(await say('/fast'), 'Fast: off (agent config)');
     assert.match(
@@ -2233,7 +2245,10 @@ test(
     await say('/model chat-model');
     await say('/thinking high');
     await say('/fast on');
-    assert.equal(await say('/model'), 'Model: chat-model (this chat)');
+    assert.match(
+      (await say('/model')) ?? '',
+      /^Provider: test · Model: chat-model \(this chat\)$/m,
+    );
     assert.equal(await say('/thinking'), 'Effort: high (this chat)');
     assert.equal(await say('/fast'), 'Fast: on (this chat)');
     assert.match(
@@ -2267,20 +2282,31 @@ test(
 
     await say('/thinking high');
     await say('/fast off');
-    assert.equal(await say('/agent compatible'), 'Agent set to compatible.');
+    assert.equal(
+      await say('/model compatible compatible-model'),
+      'Provider set to compatible.\nModel set to compatible-model.',
+    );
     assert.equal(store.getChat(chat)?.thinking, 'high');
     assert.equal(store.getChat(chat)?.serviceTier, 'default');
-    assert.equal(await say('/model'), 'Model: provider-model (default)');
+    assert.match(
+      (await say('/model')) ?? '',
+      /^Provider: compatible · Model: compatible-model \(this chat\)$/m,
+    );
     await say('new agent turn');
-    assert.equal(requests[4]?.model, 'default');
+    assert.equal(requests[4]?.model, 'compatible-model');
     assert.equal(requests[4]?.serviceTier, 'default');
     assert.equal(requests[4]?.resumeSessionId, undefined);
     assert.match(
-      (await say('/agent legacy')) ?? '',
+      (await say('/model legacy default')) ?? '',
       /Cleared overrides unsupported by this agent: Effort, Fast\./,
     );
     assert.equal(store.getChat(chat)?.thinking, null);
     assert.equal(store.getChat(chat)?.serviceTier, null);
+    assert.equal(store.getChat(chat)?.model, null);
+    assert.match(
+      (await say('/model')) ?? '',
+      /^Provider: legacy · Model: provider-model \(default\)$/m,
+    );
     assert.equal(await say('/fast'), 'This agent does not support fast mode.');
     assert.equal(
       await say('/fast on'),
@@ -2293,6 +2319,41 @@ test(
     await say('new legacy session');
     assert.equal(requests[6]?.thinking, 'low');
     assert.equal(requests[6]?.resumeSessionId, undefined);
+
+    for (const turn of ['/agent compatible', '/unknown compatible']) {
+      const before = requests.length;
+      assert.equal(await say(turn), 'Reply');
+      assert.equal(store.getChat(chat)?.agentId, 'legacy');
+      assert.equal(requests.length, before + 1);
+    }
+    await say('/model legacy explicit-model');
+    assert.equal(store.getChat(chat)?.model, 'explicit-model');
+    assert.match(
+      (await say('/model default')) ?? '',
+      /Provider and model overrides cleared\./,
+    );
+    assert.equal(store.getChat(chat)?.agentId, null);
+    assert.equal(store.getChat(chat)?.model, null);
+    assert.match(
+      (await say('/model')) ?? '',
+      /^Provider: test · Model: configured-model \(agent config\)$/m,
+    );
+    assert.doesNotMatch((await say('/help')) ?? '', /^\/agent\b/m);
+
+    store.setWorkspaceSettings(chat, {
+      agentId: 'test',
+      model: 'workspace-model',
+    });
+    await say('/model compatible default');
+    assert.match(
+      (await say('/model')) ?? '',
+      /^Provider: compatible · Model: compatible-default \(this chat\)$/m,
+    );
+    await say('/model default');
+    assert.match(
+      (await say('/model')) ?? '',
+      /^Provider: test · Model: workspace-model \(this chat\)$/m,
+    );
   },
 );
 
@@ -2317,7 +2378,10 @@ test('localizes current settings and command usage in Traditional Chinese', asyn
     await gateway.idle();
     return platform.sent.at(-1)?.text;
   };
-  assert.equal(await say('/model'), '模型：first（agent 設定）');
+  assert.match(
+    (await say('/model')) ?? '',
+    /^供應商：test · 模型：first（agent 設定）$/m,
+  );
   assert.equal(await say('/thinking'), '推理：預設（預設）');
   assert.equal(
     await say('/thinking max'),

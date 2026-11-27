@@ -241,14 +241,24 @@ test(
   async (t) => {
     const f = await fixture(t);
     const sourceToken = await f.say('/model');
-    const first = await f.delivery(
+    const providers = await f.delivery(
       ({ replyToken, items }) => replyToken === sourceToken && !!items,
+    );
+    assert.deepEqual(
+      providers.items?.map(({ action }) => action.label),
+      ['demo', 'default'],
+    );
+    await f.press(providers.items![0]!.action.data);
+    const first = await f.delivery(
+      ({ text, items }) => text.includes('Page 1 of 3') && !!items,
     );
     assert.equal(first.items?.length, 12);
     assert.equal(first.items?.[0]?.action.label, 'model-0');
+    assert.match(first.text, /model-9 · model-10/);
     await f.press(first.items!.at(-1)!.action.data);
     const second = await f.delivery(({ items }) => items?.length === 13);
     assert.equal(second.items?.[0]?.action.label, 'model-11');
+    assert.match(second.text, /model-20 · model-21/);
     const selectToken = await f.press(second.items![0]!.action.data);
     const selected = await f.delivery(
       ({ replyToken }) => replyToken === selectToken,

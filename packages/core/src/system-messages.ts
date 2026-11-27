@@ -63,9 +63,8 @@ const messages = {
     removedFromAllowlist: 'Chat removed from the allowlist.',
     agentUnavailable: 'That agent is not attached.',
     noAgent: 'No agent is attached.',
-    agentSet: (id: string) => `Agent set to ${id}.`,
     settingLabels: {
-      agent: 'Agent',
+      provider: 'Provider',
       model: 'Model',
       thinking: 'Effort',
       serviceTier: 'Fast',
@@ -95,6 +94,10 @@ const messages = {
     settingCleared: (label: string) => `${label} override cleared.`,
     agentOverridesCleared: (labels: string) =>
       `Cleared overrides unsupported by this agent: ${labels}.`,
+    modelProviders: (names: string) => `Providers: ${names}`,
+    providerModels: (id: string) => `Choose a model for ${id}.`,
+    providerModelDefault: 'Using the provider’s default model.',
+    modelRouteCleared: 'Provider and model overrides cleared.',
     thinkingUsage: (levels: string) => `Usage: /thinking <${levels}|default>`,
     thinkingUnsupported:
       'This agent does not support reasoning effort overrides.',
@@ -275,9 +278,8 @@ const messages = {
     removedFromAllowlist: '已將此聊天室移出允許清單。',
     agentUnavailable: '該代理程式尚未接上。',
     noAgent: '目前沒有接上的代理程式。',
-    agentSet: (id: string) => `已切換到代理程式 ${id}。`,
     settingLabels: {
-      agent: '代理程式',
+      provider: '供應商',
       model: '模型',
       thinking: '推理',
       serviceTier: '快速',
@@ -303,6 +305,10 @@ const messages = {
     settingCleared: (label: string) => `已清除本聊天室的${label}覆寫。`,
     agentOverridesCleared: (labels: string) =>
       `已清除此代理程式不支援的覆寫：${labels}。`,
+    modelProviders: (names: string) => `供應商選項：${names}`,
+    providerModels: (id: string) => `請選擇 ${id} 的模型。`,
+    providerModelDefault: '已使用供應商的預設模型。',
+    modelRouteCleared: '已清除本聊天室的供應商與模型覆寫。',
     thinkingUsage: (levels: string) => `用法：/thinking <${levels}|default>`,
     thinkingUnsupported: '此代理程式不支援設定推理強度。',
     fastUsage: '用法：/fast <on|off|default>',

@@ -10,7 +10,10 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 
-import type { AgentFactory } from '../../plugin-sdk/src/index.ts';
+import type {
+  AgentConnector,
+  AgentFactory,
+} from '../../plugin-sdk/src/index.ts';
 
 interface KeyboardButton {
   callback_data: string;
@@ -36,6 +39,10 @@ const model = 'model-' + 'abcdefghij'.repeat(10);
 async function fixture(
   t: TestContext,
   models = ['one', 'two', 'three', 'four', model],
+  listSecondModels: AgentConnector['listModels'] = () => [
+    'second-long-model-full-name',
+    'short',
+  ],
 ) {
   const workspace = await mkdtemp(join(tmpdir(), 'tsugimori-chat-choices-'));
   const store = new SqliteStore(':memory:');
@@ -81,6 +88,11 @@ async function fixture(
     kind: 'demo',
     loop: 'external',
     settings: { serviceTiers: true, thinking: ['low', 'high'] },
+    ...(id === 'second' && {
+      implementation: 'Second Provider',
+      listModels: listSecondModels,
+      settings: { thinking: ['low'] },
+    }),
     ...(id === 'first' && {
       listModels: () => models,
       thinkingLevels: async (selected) =>
@@ -309,14 +321,17 @@ test(
   async (t) => {
     const models = Array.from({ length: 105 }, (_, index) => `model-${index}`);
     const f = await fixture(t, models);
-    await f.say('/model');
+    await f.say('/model first');
     const first = await f.prompt('Page 1 of 2');
+    assert.match(first.text, /model-0 · model-1/);
+    assert.doesNotMatch(first.text, /\bmodel-80\b/);
     const next = buttons(first, [...models.slice(0, 80), 'Next']).at(-1)!;
     await f.press(first.id, next);
     assert.deepEqual((await f.edit(first.id)).reply_markup, {
       inline_keyboard: [],
     });
     const second = await f.prompt('Page 2 of 2');
+    assert.match(second.text, /model-104 · default/);
     const [last] = buttons(second, [
       ...models.slice(80),
       'default',
@@ -354,7 +369,21 @@ test(
     assert.match((await f.press(thinking.id, high!)) ?? '', /unavailable/);
 
     await f.say('/model');
-    const models = await f.prompt('Model: default (default)');
+    const providers = await f.prompt(
+      'Provider: first · Model: default (default)',
+    );
+    const [first, second] = buttons(providers, [
+      'first',
+      'Second Provider',
+      'default',
+    ]);
+    assert.match(
+      providers.text,
+      /Providers: first · Second Provider \(second\) · default/,
+    );
+    await f.press(providers.id, first!);
+    assert.equal(f.store.getChat(chat)?.agentId, null);
+    const models = await f.prompt('Choose a model for first.');
     const selected = buttons(models, [
       'one',
       'two',
@@ -363,7 +392,12 @@ test(
       model,
       'default',
     ])[4]!;
-    assert.equal(models.reply_markup?.inline_keyboard.length, 2);
+    assert.match(models.text, /one · two · three · four/);
+    assert.ok(models.text.includes(model));
+    assert.deepEqual(
+      models.reply_markup?.inline_keyboard.map((row) => row.length),
+      [4, 1, 1],
+    );
     await f.press(models.id, selected);
     assert.equal(f.store.getChat(chat)?.model, model);
     assert.equal((await f.edit(models.id)).text, `Model set to ${model}.`);
@@ -380,17 +414,81 @@ test(
     await f.prompt('Usage: /thinking <low|medium|max|default>', afterModel);
     assert.equal(f.store.getChat(chat)?.thinking, 'high');
 
-    await f.say('/agent');
-    const agents = await f.prompt('Agent: first (default)');
-    const [, second] = buttons(agents, ['first', 'second']);
-    await f.press(agents.id, second!);
-    assert.equal(f.store.getChat(chat)?.agentId, 'second');
-    assert.equal((await f.edit(agents.id)).text, 'Agent set to second.');
-    const afterSwitch = f.sent.length;
+    assert.match((await f.press(providers.id, second!)) ?? '', /unavailable/);
+    const afterModelChoice = f.sent.length;
     await f.say('/model');
+    const agents = await f.prompt(
+      `Provider: first · Model: ${model} (this chat)`,
+      afterModelChoice,
+    );
+    const [, secondProvider] = buttons(agents, [
+      'first',
+      'Second Provider',
+      'default',
+    ]);
+    await f.press(agents.id, secondProvider!);
+    assert.equal(f.store.getChat(chat)?.agentId, null);
+    const secondModels = await f.prompt('Choose a model for second.');
+    assert.match(
+      secondModels.text,
+      /second-long-model-full-name · short · default/,
+    );
+    const [longModel] = buttons(secondModels, [
+      'second-long-model-full-name',
+      'short',
+      'default',
+    ]);
+    assert.match(
+      (await f.press(secondModels.id, longModel!, owner + 1)) ?? '',
+      /unavailable/,
+    );
+    await f.press(secondModels.id, longModel!);
+    assert.equal(f.store.getChat(chat)?.agentId, 'second');
+    assert.equal(f.store.getChat(chat)?.model, 'second-long-model-full-name');
+    assert.equal(f.store.getChat(chat)?.thinking, null);
+    assert.equal(f.store.getChat(chat)?.serviceTier, null);
     assert.equal(
-      (await f.prompt(`Model: ${model} (this chat)`, afterSwitch)).reply_markup,
-      undefined,
+      (await f.edit(secondModels.id)).text,
+      [
+        'Provider set to second.',
+        'Model set to second-long-model-full-name.',
+        'Cleared overrides unsupported by this agent: Effort, Fast.',
+      ].join('\n'),
+    );
+
+    let afterSwitch = f.sent.length;
+    await f.say('/model second');
+    const defaults = await f.prompt('Choose a model for second.', afterSwitch);
+    await f.press(
+      defaults.id,
+      buttons(defaults, [
+        'second-long-model-full-name',
+        'short',
+        'default',
+      ])[2]!,
+    );
+    assert.equal(f.store.getChat(chat)?.agentId, 'second');
+    assert.equal(f.store.getChat(chat)?.model, null);
+    assert.equal(
+      (await f.edit(defaults.id)).text,
+      'Using the provider’s default model.',
+    );
+
+    afterSwitch = f.sent.length;
+    await f.say('/model');
+    const reset = await f.prompt(
+      'Provider: second · Model: default (default)',
+      afterSwitch,
+    );
+    await f.press(
+      reset.id,
+      buttons(reset, ['first', 'Second Provider', 'default'])[2]!,
+    );
+    assert.equal(f.store.getChat(chat)?.agentId, null);
+    assert.equal(f.store.getChat(chat)?.model, null);
+    assert.match(
+      (await f.edit(reset.id)).text,
+      /Provider and model overrides cleared\./,
     );
 
     await f.say('/login');
@@ -400,6 +498,64 @@ test(
     assert.match((await f.edit(login.id)).text, /\/login disabled/);
     await f.prompt('Reply login or token');
     await f.say('/cancel');
+  },
+);
+
+test(
+  'Telegram reports rejected and timed-out model catalogs without switching the chat',
+  { timeout: 6_000 },
+  async (t) => {
+    let calls = 0;
+    const f = await fixture(t, undefined, async () => {
+      if (++calls === 1) throw new Error('Catalog unavailable');
+      return new Promise(() => {});
+    });
+    const chat = { adapterId, chatId: '-1001_17' };
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const start = f.sent.length;
+      await f.say('/model second');
+      const response = await f.prompt('This selection is unavailable.', start);
+      assert.equal(response.reply_markup, undefined);
+      assert.equal(f.store.getChat(chat)?.agentId, null);
+      assert.equal(f.store.getChat(chat)?.model, null);
+    }
+    assert.equal(calls, 2);
+  },
+);
+
+test(
+  'Telegram rejects model picker buttons for a removed provider',
+  { timeout: 6_000 },
+  async (t) => {
+    const f = await fixture(t);
+    const chat = { adapterId, chatId: '-1001_17' };
+    await f.say('/model');
+    const providers = await f.prompt('Providers:');
+    const [, second] = buttons(providers, [
+      'first',
+      'Second Provider',
+      'default',
+    ]);
+    await f.say('/model second');
+    const models = await f.prompt('Choose a model for second.');
+    const [firstModel] = buttons(models, [
+      'second-long-model-full-name',
+      'short',
+      'default',
+    ]);
+    await f.say('/remove agent second');
+    const removal = await f.prompt('Press Delete or reply yes');
+    await f.press(removal.id, buttons(removal, ['Delete', 'Cancel'])[0]!);
+    await f.prompt('Removed agent second.');
+
+    assert.match((await f.press(models.id, firstModel!)) ?? '', /unavailable/);
+    await f.press(providers.id, second!);
+    assert.equal(
+      (await f.edit(providers.id)).text,
+      'That agent is not attached.',
+    );
+    assert.equal(f.store.getChat(chat)?.agentId, null);
+    assert.equal(f.store.getChat(chat)?.model, null);
   },
 );
 

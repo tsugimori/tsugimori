@@ -123,6 +123,18 @@ type LinkedApproval = Exclude<
   record: ApprovalRecord;
 };
 
+type CommandSend = (
+  text: string,
+  choices?: readonly PromptChoice[],
+  fallback?: string,
+  options?: {
+    canChoose?(): boolean;
+    command?: Command['name'];
+    describePage?(page: readonly PromptChoice[]): string;
+    select?: ChoiceHandler;
+  },
+) => Promise<void>;
+
 function commandChoices(values: Iterable<string>): PromptChoice[] {
   return [...new Set(values)].map((value) => ({ value, label: value }));
 }
@@ -676,6 +688,11 @@ export class Gateway {
   #removingPlatform(id: string) {
     const target = this.#activeRemoval?.plan;
     return target?.category === 'platform' && target.id === id;
+  }
+
+  #removingAgent(id: string) {
+    const target = this.#activeRemoval?.plan;
+    return target?.category === 'agent' && target.id === id;
   }
 
   #removingAgentRoute(chat: ChatRef) {
@@ -1785,7 +1802,7 @@ export class Gateway {
 
   async #chatAgentSetting(
     chat: ChatRef,
-    name: 'fast' | 'model' | 'thinking',
+    name: 'fast' | 'thinking',
     args: string,
     send: (text: string, choices?: readonly PromptChoice[]) => Promise<void>,
     isCurrentOwner: () => boolean,
@@ -1834,16 +1851,17 @@ export class Gateway {
                 : status.serviceTier,
               m,
             )
-          : field === 'thinking'
-            ? (value ?? status.defaults?.effort ?? m.unset)
-            : ((value === 'default' ? undefined : value) ??
-              status.defaults?.model ??
-              m.unset);
+          : (value ?? status.defaults?.effort ?? m.unset);
       return send(
         m.settingCurrent(label, effective, m.settingSources[source]),
         name === 'thinking'
           ? commandChoices([...(levels ?? []), 'default'])
-          : await this.#settingChoices(chat, name),
+          : commandChoices([
+              ...(agent && acceptsServiceTier(agent, 'fast') ? ['on'] : []),
+              ...(agent && acceptsServiceTier(agent, 'default')
+                ? ['off', 'default']
+                : []),
+            ]),
       );
     }
 
@@ -1877,29 +1895,157 @@ export class Gateway {
     );
   }
 
-  async #settingChoices(chat: ChatRef, name: 'fast' | 'model') {
-    const agent = this.#tasks.route(chat).selected?.agent;
-    if (name === 'fast')
-      return commandChoices([
-        ...(agent && acceptsServiceTier(agent, 'fast') ? ['on'] : []),
-        ...(agent && acceptsServiceTier(agent, 'default')
-          ? ['off', 'default']
-          : []),
-      ]);
-    if (!agent?.listModels) return [];
+  async #showProviderModels(
+    chat: ChatRef,
+    id: string,
+    send: CommandSend,
+    canChoose: () => boolean,
+  ) {
+    const m = systemMessages(this.#runtime.config.locale);
+    const agent = this.#runtime.getAgent(id)?.agent;
+    if (!canChoose()) return;
+    if (!agent || this.#removingAgent(id))
+      return send(this.#runtime.unavailable(id) || m.agentUnavailable);
+    const available = () =>
+      this.#runtime.getAgent(id)?.agent === agent && !this.#removingAgent(id);
+    let models: readonly string[];
     try {
-      const models = await untilAborted(
-        AbortSignal.timeout(2_000),
-        async () => agent.listModels?.() ?? [],
-      );
-      return models.length ? commandChoices([...models, 'default']) : [];
+      models = agent.listModels
+        ? await untilAborted(
+            AbortSignal.timeout(2_000),
+            async () => agent.listModels?.() ?? [],
+          )
+        : [];
     } catch {
       this.#deps.log({
         level: 'warn',
         event: 'choice.models_unavailable',
         ...chat,
       });
-      return [];
+      if (canChoose()) await send(m.choices.unavailable);
+      return;
+    }
+    if (!canChoose()) return;
+    if (!available())
+      return send(this.#runtime.unavailable(id) || m.agentUnavailable);
+    const choices = commandChoices([...models, 'default']).map(({ label }) => ({
+      label,
+      value: `${id} ${label}`,
+    }));
+    return send(m.providerModels(id), choices, undefined, {
+      canChoose: () => canChoose() && available(),
+      describePage: (page) =>
+        m.choices.values(page.map(({ label }) => label).join(' · ')),
+    });
+  }
+
+  async #setChatModel(
+    chat: ChatRef,
+    provider: string | null | undefined,
+    model: string | null,
+    send: CommandSend,
+    canChoose: () => boolean,
+  ) {
+    const { store } = this.#deps;
+    const m = systemMessages(this.#runtime.config.locale);
+    const target = provider ? this.#runtime.getAgent(provider) : undefined;
+    let catalog:
+      | {
+          agent: NonNullable<typeof target>['agent'];
+          levels: readonly string[] | undefined;
+          model: string | undefined;
+        }
+      | undefined;
+
+    while (canChoose()) {
+      if (
+        provider &&
+        (!target ||
+          this.#runtime.getAgent(provider) !== target ||
+          this.#removingAgent(provider))
+      )
+        return send(this.#runtime.unavailable(provider) || m.agentUnavailable);
+      const current = store.getChat(chat);
+      const route = this.#tasks.route(chat, current);
+      const update: ChatRoute = { model };
+      // An explicit provider default takes precedence over a workspace model.
+      if (target && model === null && store.getWorkspaceSettings(chat)?.model)
+        update.model = target.config.model ?? 'default';
+      if (
+        provider === null ||
+        (provider !== undefined && route.agentId !== provider)
+      )
+        update.agentId = provider;
+      const next = this.#tasks.route(
+        chat,
+        current && { ...current, ...update },
+      );
+      const switching = route.agentId !== next.agentId;
+      const agent = next.selected?.agent;
+      if (next.agentId && this.#removingAgent(next.agentId))
+        return send(m.choices.unavailable);
+
+      const cleared: string[] = [];
+      if (switching && agent) {
+        if (current?.thinking) {
+          const nextModel = next.model.value;
+          if (
+            !catalog ||
+            catalog.agent !== agent ||
+            catalog.model !== nextModel
+          ) {
+            catalog = {
+              agent,
+              model: nextModel,
+              levels: await this.#tasks.thinkingLevels(next),
+            };
+            // Reload the chat route and recheck permission after the catalog call.
+            continue;
+          }
+          if (
+            !(catalog.levels ?? agent.settings?.thinking)?.includes(
+              current.thinking,
+            )
+          ) {
+            update.thinking = null;
+            cleared.push(m.settingLabels.thinking);
+          }
+        }
+        if (
+          current?.serviceTier &&
+          !acceptsServiceTier(agent, current.serviceTier)
+        ) {
+          update.serviceTier = null;
+          cleared.push(m.settingLabels.serviceTier);
+        }
+      }
+      if (
+        current &&
+        (current.model !== update.model ||
+          (update.agentId !== undefined &&
+            current.agentId !== update.agentId) ||
+          cleared.length)
+      ) {
+        const invalidate =
+          switching ||
+          (route.model.value !== next.model.value &&
+            !agent?.settings?.perTurn?.includes('model'));
+        if (invalidate) this.#tasks.invalidateSession(chat);
+        store.setChatRoute(chat, update, invalidate);
+      }
+      const text =
+        provider === null
+          ? m.modelRouteCleared
+          : model === null
+            ? m.providerModelDefault
+            : m.settingSet(m.settingLabels.model, model);
+      const result =
+        switching && next.agentId
+          ? [m.settingSet(m.settingLabels.provider, next.agentId), text]
+          : [text];
+      if (cleared.length)
+        result.push(m.agentOverridesCleared(cleared.join(', ')));
+      return send(result.join('\n'));
     }
   }
 
@@ -2013,108 +2159,104 @@ export class Gateway {
     const selectedCommand = m.choices.answer(
       args ? `/${name} ${args}` : `/${name}`,
     );
-    const send = async (
-      text: string,
-      choices: readonly PromptChoice[] = [],
-      fallback?: string,
-      {
-        canChoose,
-        command: choiceCommand = name,
-        describePage,
-        select,
-      }: {
-        canChoose?(): boolean;
-        command?: Command['name'];
-        describePage?(page: readonly PromptChoice[]): string;
-        select?: ChoiceHandler;
-      } = {},
-    ) => {
-      const limit = adapter.capabilities.maxInlineButtons ?? Infinity;
-      if (
-        !choices.length ||
-        !supportsChoices(adapter) ||
-        (limit < 3 && choices.length > limit)
-      ) {
-        const body = choices.length
-          ? [
-              text,
-              fallback ??
-                m.choices.values(
-                  choices
-                    .map(({ value }) => `/${choiceCommand} ${value}`)
-                    .join(' · '),
-                ),
-            ].join('\n')
-          : text;
-        if (finish) await finish(body);
-        else await this.#outbound.send(adapter, reply(message, body));
-        return;
-      }
-      if (finish) await finish(selectedCommand);
-      const choicesPerPage =
-        choices.length <= Math.min(defaultChoicesPerPage, limit)
-          ? choices.length
-          : Math.min(defaultChoicesPerPage, limit - 2);
-      const pages = Math.ceil(choices.length / choicesPerPage);
-      const showPage = async (index: number) => {
-        if (this.#isStopping()) return;
-        const offset = index * choicesPerPage;
-        const page = choices.slice(offset, offset + choicesPerPage);
-        const prompt = [
-          text,
-          pages > 1 ? m.choices.page(index + 1, pages) : undefined,
-          describePage?.(page),
-        ]
-          .filter(Boolean)
-          .join('\n');
-        const previous = { value: '', label: m.choices.previous };
-        const next = { value: '', label: m.choices.next };
-        if (index > 0) page.push(previous);
-        if (index + 1 < pages) page.push(next);
-        await this.#chatChoices.send(
-          adapter,
-          reply(message, prompt),
-          message.userId,
-          page,
-          async (choice, edit, event) => {
-            if (choice === previous || choice === next) {
-              const target = index + (choice === previous ? -1 : 1);
-              await edit(prompt);
-              await showPage(target);
-              return;
-            }
-            if (select) {
-              await select(choice, edit, event);
-              return;
-            }
-            await this.#trace.span(
-              'trigger.command',
-              { ...chat, command: name },
-              () =>
-                this.#command(
-                  adapter,
-                  chat,
-                  message,
-                  seq,
-                  this.#auth.isOwner({
-                    adapterId: adapter.id,
-                    userId: message.userId,
-                  }),
-                  { name: choiceCommand, args: choice.value },
-                  edit,
-                ),
-            );
-          },
-          {
-            canChoose,
-            command: select ? undefined : choiceCommand,
-            deliver: (outbound) => this.#outbound.send(adapter, outbound),
-            expires: true,
-          },
-        );
+    const respond =
+      (
+        finish?: (text: string) => Promise<void>,
+        selection = selectedCommand,
+      ): CommandSend =>
+      async (
+        text,
+        choices = [],
+        fallback,
+        { canChoose, command: choiceCommand = name, describePage, select } = {},
+      ) => {
+        const limit = adapter.capabilities.maxInlineButtons ?? Infinity;
+        if (
+          !choices.length ||
+          !supportsChoices(adapter) ||
+          (limit < 3 && choices.length > limit)
+        ) {
+          const body = choices.length
+            ? [
+                text,
+                fallback ??
+                  m.choices.values(
+                    choices
+                      .map(({ value }) => `/${choiceCommand} ${value}`)
+                      .join(' · '),
+                  ),
+              ].join('\n')
+            : text;
+          if (finish) await finish(body);
+          else await this.#outbound.send(adapter, reply(message, body));
+          return;
+        }
+        if (finish) await finish(selection);
+        const choicesPerPage =
+          choices.length <= Math.min(defaultChoicesPerPage, limit)
+            ? choices.length
+            : Math.min(defaultChoicesPerPage, limit - 2);
+        const pages = Math.ceil(choices.length / choicesPerPage);
+        const showPage = async (index: number) => {
+          if (this.#isStopping() || canChoose?.() === false) return;
+          const offset = index * choicesPerPage;
+          const page = choices.slice(offset, offset + choicesPerPage);
+          const prompt = [
+            text,
+            pages > 1 ? m.choices.page(index + 1, pages) : undefined,
+            describePage?.(page),
+          ]
+            .filter(Boolean)
+            .join('\n');
+          const previous = { value: '', label: m.choices.previous };
+          const next = { value: '', label: m.choices.next };
+          if (index > 0) page.push(previous);
+          if (index + 1 < pages) page.push(next);
+          await this.#chatChoices.send(
+            adapter,
+            reply(message, prompt),
+            message.userId,
+            page,
+            async (choice, edit, event) => {
+              if (choice === previous || choice === next) {
+                const target = index + (choice === previous ? -1 : 1);
+                await edit(prompt);
+                await showPage(target);
+                return;
+              }
+              if (select) {
+                await select(choice, edit, event);
+                return;
+              }
+              await this.#trace.span(
+                'trigger.command',
+                { ...chat, command: name },
+                () =>
+                  this.#command(
+                    adapter,
+                    chat,
+                    message,
+                    seq,
+                    this.#auth.isOwner({
+                      adapterId: adapter.id,
+                      userId: message.userId,
+                    }),
+                    { name: choiceCommand, args: choice.value },
+                    edit,
+                  ),
+              );
+            },
+            {
+              canChoose,
+              command: select ? undefined : choiceCommand,
+              deliver: (outbound) => this.#outbound.send(adapter, outbound),
+              expires: true,
+            },
+          );
+        };
+        await showPage(0);
       };
-      await showPage(0);
-    };
+    const send = respond(finish);
     const setup = async (request: Parameters<ChatSetup['start']>[2]) => {
       const started = await this.#chatSetup.start(adapter, message, request);
       if (!started) await send(m.setup.alreadyRunning);
@@ -2406,81 +2548,110 @@ export class Gateway {
         if (name === 'deny') this.#tasks.cancelApprovals(chat);
         await send(name === 'allow' ? m.allowlisted : m.removedFromAllowlist);
         break;
-      case 'agent': {
+      case 'model': {
+        const canChoose = () =>
+          isCurrentOwner() &&
+          !this.#removingPlatform(adapter.id) &&
+          !this.#removingAgentRoute(chat);
+        if (!canChoose()) {
+          if (finish) await finish(m.choices.unavailable);
+          break;
+        }
         if (!args) {
-          const current = store.getChat(chat);
-          const route = this.#tasks.route(chat, current);
-          const chatAgent =
-            current?.agentId ?? store.getWorkspaceSettings(chat)?.agentId;
-          const source =
-            chatAgent !== undefined && chatAgent === route.agentId
-              ? m.settingSources.chat
-              : m.settingSources.default;
-          await send(
+          const route = this.#tasks.route(chat);
+          const provider = route.agentId ?? m.unset;
+          const status = this.#tasks.status(chat);
+          const model =
+            (route.model.value === 'default' ? undefined : route.model.value) ??
+            status.defaults?.model ??
+            m.unset;
+          const current = [
+            locale === 'zh-TW'
+              ? `${m.settingLabels.provider}：${provider}`
+              : `${m.settingLabels.provider}: ${provider}`,
             m.settingCurrent(
-              m.settingLabels.agent,
-              route.agentId ?? m.unset,
-              source,
+              m.settingLabels.model,
+              model,
+              m.settingSources[route.model.source],
             ),
-            commandChoices(
-              this.#runtime.config.agents.flatMap(({ id }) =>
-                this.#runtime.getAgent(id) ? [id] : [],
+          ].join(' · ');
+          const reset = { label: 'default', value: 'default' };
+          const agents = this.#runtime.config.agents.flatMap(({ id }) => {
+            const agent = this.#runtime.getAgent(id)?.agent;
+            return agent && !this.#removingAgent(id) ? [agent] : [];
+          });
+          const choices = agents.map(({ id, implementation }) => {
+            const label =
+              implementation &&
+              !agents.some(
+                (other) =>
+                  other.id !== id &&
+                  (other.id === implementation ||
+                    other.implementation === implementation),
+              )
+                ? implementation
+                : id;
+            return {
+              label:
+                label === reset.label
+                  ? `${label} (${m.settingLabels.provider})`
+                  : label,
+              value: id,
+            };
+          });
+          choices.push(reset);
+          const describePage = (page: readonly PromptChoice[]) =>
+            m.modelProviders(
+              page
+                .map(({ label, value }) =>
+                  label === value ? label : `${label} (${value})`,
+                )
+                .join(' · '),
+            );
+          await send(current, choices, describePage(choices), {
+            canChoose,
+            describePage,
+            select: (choice, edit) =>
+              this.#trace.span(
+                'trigger.command',
+                { ...chat, command: name },
+                () => {
+                  const send = respond(
+                    edit,
+                    m.choices.answer(`/model ${choice.value}`),
+                  );
+                  return choice === reset
+                    ? this.#setChatModel(chat, null, null, send, canChoose)
+                    : this.#showProviderModels(
+                        chat,
+                        choice.value,
+                        send,
+                        canChoose,
+                      );
+                },
               ),
-            ),
+          });
+          break;
+        }
+        if (args === 'default') {
+          await this.#setChatModel(chat, null, null, send, canChoose);
+          break;
+        }
+        const [provider = args, model] = args.split(/\s+([\s\S]+)/, 2);
+        if (model !== undefined)
+          await this.#setChatModel(
+            chat,
+            provider,
+            model === 'default' ? null : model,
+            send,
+            canChoose,
           );
-          break;
-        }
-        const next = this.#runtime.getAgent(args);
-        if (!next) {
-          await send(this.#runtime.unavailable(args) || m.agentUnavailable);
-          break;
-        }
-        const current = store.getChat(chat);
-        const switching = this.#tasks.route(chat, current).agentId !== args;
-        const update: ChatRoute = { agentId: args };
-        const cleared: string[] = [];
-        if (switching) {
-          if (current?.thinking) {
-            const nextRoute = this.#tasks.route(chat, {
-              ...current,
-              ...update,
-            });
-            const levels =
-              (await this.#tasks.thinkingLevels(nextRoute)) ??
-              next.agent.settings?.thinking;
-            if (!isCurrentOwner() || this.#runtime.getAgent(args) !== next)
-              break;
-            if (
-              !levels?.includes(current.thinking) &&
-              store.getChat(chat)?.thinking === current.thinking
-            ) {
-              update.thinking = null;
-              cleared.push(m.settingLabels.thinking);
-            }
-          }
-          if (
-            current?.serviceTier &&
-            !acceptsServiceTier(next.agent, current.serviceTier)
-          ) {
-            update.serviceTier = null;
-            cleared.push(m.settingLabels.serviceTier);
-          }
-        }
-        if (current?.agentId !== args) {
-          if (switching) this.#tasks.invalidateSession(chat);
-          store.setChatRoute(chat, update, switching);
-        }
-        await send(
-          [
-            m.agentSet(args),
-            ...(cleared.length
-              ? [m.agentOverridesCleared(cleared.join(', '))]
-              : []),
-          ].join('\n'),
-        );
+        else if (this.#runtime.config.agents.some(({ id }) => id === provider))
+          await this.#showProviderModels(chat, provider, send, canChoose);
+        else
+          await this.#setChatModel(chat, undefined, provider, send, canChoose);
         break;
       }
-      case 'model':
       case 'thinking':
       case 'fast':
         await this.#chatAgentSetting(chat, name, args, send, isCurrentOwner);
