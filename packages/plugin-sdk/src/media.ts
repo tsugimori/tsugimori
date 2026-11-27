@@ -17,6 +17,8 @@ export interface QueuedMedia {
 export type MediaReceipt = QueuedMedia | SendReceipt;
 
 export interface MediaUpload extends MediaDestination {
+  /** Encoded audio duration in milliseconds when supplied for playback. */
+  audioDurationMs?: number;
   file: MediaFile;
   preview(maxBytes: number): Promise<AttachmentContent>;
   /** Final URL of a downloaded web image, after redirects. */

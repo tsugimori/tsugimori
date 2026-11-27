@@ -99,6 +99,12 @@ export interface PrincipalRef {
 }
 
 export interface PlatformCapabilities {
+  audio?: {
+    /** Maximum bytes accepted for both source and encoded audio. */
+    maxBytes: number;
+    /** Accept Ogg/Opus voice messages in addition to AAC/M4A audio. */
+    voice?: boolean;
+  };
   deleteEvents?: boolean;
   files?: { maxBytes: number };
   images?: {
@@ -345,6 +351,8 @@ export interface PlatformAdapter {
     message: OutboundMessage,
     options?: { media?: readonly QueuedMedia[]; signal?: AbortSignal },
   ): Promise<SendReceipt>;
+  /** Send prepared AAC/M4A audio or, with the voice capability, Ogg/Opus. */
+  sendAudio?(message: MediaUpload, signal: AbortSignal): Promise<MediaReceipt>;
   sendFile?(message: MediaUpload, signal: AbortSignal): Promise<MediaReceipt>;
   sendImage?(message: MediaUpload, signal: AbortSignal): Promise<MediaReceipt>;
   sendReaction?(

@@ -6842,6 +6842,136 @@ test('send tools require advertised capabilities and keep files and reactions in
 });
 
 const webPng = Buffer.from('89504e470d0a1a0a', 'hex');
+
+test('send.audio validates sources, encodes voice and music, and records delivery', async (t) => {
+  if (spawnSync('ffmpeg', ['-version']).status !== 0) {
+    t.skip('ffmpeg is unavailable on PATH');
+    return;
+  }
+  const wav = execFileSync('ffmpeg', [
+    '-loglevel',
+    'error',
+    '-filter_threads',
+    '1',
+    '-f',
+    'lavfi',
+    '-i',
+    'sine=frequency=440:duration=0.25',
+    '-c:a',
+    'pcm_s16le',
+    '-f',
+    'wav',
+    'pipe:1',
+  ]);
+  const url = 'https://audio.example.test/web.wav?signature=private-audio';
+  const uploads: string[] = [];
+  const f = await fixture(
+    t,
+    async function* (request) {
+      const audio = request.tools.find(({ name }) => name === 'send.audio');
+      if (!audio) {
+        yield { type: 'text.final', text: 'Audio unavailable' };
+        return;
+      }
+      await assert.rejects(
+        audio.run({ music: true }),
+        /Invalid tool arguments/,
+      );
+      await assert.rejects(
+        audio.run({ url, path: 'local.wav' }),
+        /Invalid tool arguments/,
+      );
+      await assert.rejects(
+        audio.run({ url: url.replace('https:', 'http:') }),
+        /HTTPS audio URL/,
+      );
+      await writeFile(join(request.workdir, 'fake.wav'), webPng);
+      await assert.rejects(
+        audio.run({ path: 'fake.wav' }),
+        /decode and encode this audio/,
+      );
+      await writeFile(join(request.workdir, 'local.wav'), wav);
+      await audio.run({ path: 'local.wav' });
+      await audio.run({ attachment: { messageId: 'audio-source', index: 0 } });
+      await audio.run({ url, music: true }, undefined, 'web-audio');
+      yield { type: 'text.final', text: 'NO_REPLY: Audio sent' };
+    },
+    true,
+    {
+      downloadAttachment: async () => ({ bytes: wav, mime: 'audio/wav' }),
+      webImageNetwork: {
+        resolve: async () => ['93.184.216.34'],
+        async connect(target, address, _signal, accept) {
+          assert.equal(address, '93.184.216.34');
+          assert.equal(target.href, url);
+          assert.match(accept, /audio/);
+          return Object.assign(Readable.from([wav]), {
+            statusCode: 200,
+            headers: {},
+          });
+        },
+      },
+    },
+  );
+  const { platform, sent } = f.platform;
+  platform.capabilities.audio = { maxBytes: wav.length, voice: true };
+  await f.platform.emit(
+    inbound('no-audio', 'Which media tools are available?'),
+  );
+  await f.gateway.idle();
+  assert.equal(sent[0]?.text, 'Audio unavailable');
+
+  platform.sendAudio = async ({
+    file,
+    replyTo,
+    audioDurationMs,
+    sourceUrl,
+  }) => {
+    const bytes = Buffer.from(file.bytes);
+    assert.equal(replyTo, 'audio-source');
+    assert.equal(sourceUrl, undefined);
+    if (file.name === 'web.m4a') {
+      assert.equal(file.mime, 'audio/mp4');
+      assert.equal(bytes.toString('ascii', 4, 8), 'ftyp');
+      assert.ok(bytes.includes('mp4a'));
+      assert.ok(bytes.indexOf('moov') < bytes.indexOf('mdat'));
+      assert.ok(audioDurationMs! >= 240 && audioDurationMs! <= 270);
+    } else {
+      assert.equal(file.mime, 'audio/ogg');
+      assert.equal(bytes.toString('ascii', 0, 4), 'OggS');
+      assert.ok(bytes.includes('OpusHead'));
+    }
+    uploads.push(file.name);
+    return { messageId: file.name };
+  };
+  await f.platform.emit(
+    inbound('audio-source', 'Send the audio', {
+      attachments: [
+        { index: 0, kind: 'audio', name: 'attached.wav', fileId: 'audio' },
+      ],
+    }),
+  );
+  await f.gateway.idle();
+  await f.trace.flush();
+  assert.equal(sent.length, 1);
+  assert.deepEqual(uploads, ['local.ogg', 'attached.ogg', 'web.m4a']);
+  for (const name of uploads)
+    assert.equal(f.store.getMessage(chat, name)?.text, '[audio]');
+  const [task] = f.store.listChatTasks(chat);
+  assert.equal(task?.status, 'sent');
+  const call = f.store
+    .taskToolCalls([task.id])
+    .find(({ callId }) => callId === 'web-audio');
+  assert.deepEqual(JSON.parse(call!.args!), {
+    url: 'https://audio.example.test/web.wav',
+    music: true,
+  });
+  assert.doesNotMatch(
+    JSON.stringify(f.store.taskTrace(task.id)),
+    /private-audio/,
+  );
+});
+
 const webImageUrl =
   'https://images.example.test/a%20picture.png?signature=private-value';
 const redirectImageUrl =

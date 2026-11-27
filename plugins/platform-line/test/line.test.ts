@@ -1204,6 +1204,70 @@ test('LINE media-only delivery serves repeated and concurrent GETs and HEAD', as
   ]);
 });
 
+test('LINE queues AAC audio and hosts it with the original duration and retention', async (t) => {
+  const f = await fixture(t, fakeApi(), { publicMedia: true });
+  const destination = { chatId: userId, replyTo: '73' };
+  await f.post([message('73')]);
+  await f.waitFor(1);
+  const signal = AbortSignal.timeout(3000);
+  const bytes = Buffer.from('0000ftypM4A synthetic encoded audio');
+  const upload = {
+    ...destination,
+    file: { name: 'speech.m4a', bytes, mime: 'audio/mp4' },
+    audioDurationMs: 250,
+    preview: () => assert.fail('LINE audio needs no preview'),
+  };
+  const { maxBytes } = f.adapter.capabilities.audio!;
+  assert.equal(maxBytes, 20 * 1024 ** 2);
+  await assert.rejects(
+    f.adapter.sendAudio({ ...upload, audioDurationMs: 0 }, signal),
+    /positive duration/,
+  );
+  await assert.rejects(
+    f.adapter.sendAudio(
+      {
+        ...upload,
+        file: { ...upload.file, bytes: Buffer.alloc(maxBytes + 1) },
+      },
+      signal,
+    ),
+    /20 MB size limit/,
+  );
+  const queued = await f.adapter.sendAudio(upload, signal);
+  assert.equal(
+    f.api.calls.find(({ path }) => path.endsWith('/reply')),
+    undefined,
+  );
+  const receipt = await f.adapter.send(
+    { ...destination, text: '' },
+    { media: [queued], signal },
+  );
+  assert.deepEqual(receipt.parts, [
+    { messageId: '1', mediaId: queued.id, text: '[audio]' },
+  ]);
+  const reply = f.api.calls.find(({ path }) => path.endsWith('/reply'));
+  assert.equal(reply?.body?.replyToken, 'token-73');
+  const [audio] = reply?.body?.messages ?? [];
+  assert.equal(audio?.type, 'audio');
+  const { originalContentUrl } = audio;
+  assert.match(
+    originalContentUrl,
+    /^https:\/\/hooks\.example\.test\/line\/main\/media\/[A-Za-z0-9_-]{32}$/,
+  );
+  assert.deepEqual(audio, { type: 'audio', originalContentUrl, duration: 250 });
+  const href = f.base + new URL(originalContentUrl).pathname;
+  const response = await fetch(href);
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get('content-type'), 'audio/mp4');
+  assert.equal(
+    response.headers.get('cache-control'),
+    'public, max-age=1209600, immutable',
+  );
+  assert.deepEqual(Buffer.from(await response.arrayBuffer()), bytes);
+  f.advance(14 * 24 * 60 * 60_000);
+  assert.equal((await fetch(href)).status, 404);
+});
+
 test('LINE uses eligible web image URLs and hosts the remaining image parts', async (t) => {
   const maxLengthUrl = imageUrl.padEnd(2000, 'a');
   for (const { bytes, directParts, label, makePreview, sourceUrl } of [

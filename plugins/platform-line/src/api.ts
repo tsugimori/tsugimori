@@ -57,6 +57,7 @@ export interface LineText {
 
 export type LineMessage =
   | LineText
+  | { duration: number; originalContentUrl: string; type: 'audio' }
   | { packageId: string; stickerId: string; type: 'sticker' }
   | {
       originalContentUrl: string;

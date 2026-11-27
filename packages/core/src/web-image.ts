@@ -54,7 +54,7 @@ function publicAddress(address: string) {
   }
 }
 
-interface ImageResponse extends AsyncIterable<Uint8Array> {
+interface MediaResponse extends AsyncIterable<Uint8Array> {
   destroy(): void;
   headers: IncomingMessage['headers'];
   statusCode?: number;
@@ -65,7 +65,8 @@ export interface WebImageNetwork {
     url: URL,
     address: string,
     signal: AbortSignal,
-  ): Promise<ImageResponse>;
+    accept: string,
+  ): Promise<MediaResponse>;
   resolve(hostname: string): Promise<readonly string[]>;
 }
 
@@ -77,7 +78,7 @@ const network: WebImageNetwork = {
   async resolve(host) {
     return (await lookup(host, { all: true })).map(({ address }) => address);
   },
-  connect(url, address, signal) {
+  connect(url, address, signal, accept) {
     const request = url.protocol === 'https:' ? httpsRequest : httpRequest;
     const host = hostname(url);
     return new Promise((resolve, reject) => {
@@ -94,7 +95,7 @@ const network: WebImageNetwork = {
           headers: {
             Host: url.host,
             'User-Agent': 'Tsugimori',
-            Accept: 'image/jpeg, image/png, image/gif, image/webp',
+            Accept: accept,
           },
         },
         resolve,
@@ -105,13 +106,17 @@ const network: WebImageNetwork = {
   },
 };
 
-function imageUrl(source: string, base?: URL) {
+type DownloadKind = 'Audio' | 'Image';
+
+function mediaUrl(kind: DownloadKind, source: string, base?: URL) {
   const url =
     base || /^https?:\/\//i.test(source) ? URL.parse(source, base) : null;
+  if (kind === 'Audio' && url?.protocol !== 'https:')
+    throw new ToolFailure('Expected an HTTPS audio URL');
   if (url?.protocol !== 'http:' && url?.protocol !== 'https:')
     throw new ToolFailure('Expected an HTTP or HTTPS image URL');
   if (url.username || url.password)
-    throw new ToolFailure('Image URLs cannot contain credentials');
+    throw new ToolFailure(`${kind} URLs cannot contain credentials`);
   return url;
 }
 
@@ -126,13 +131,7 @@ const formats = [
   magic: Buffer.from(magic, 'hex'),
 }));
 
-function imageFile(url: URL, bytes: Buffer): MediaFile {
-  const format = formats.find(
-    ({ mime, magic }) =>
-      bytes.subarray(0, magic.length).equals(magic) &&
-      (mime !== 'image/webp' || bytes.toString('latin1', 8, 12) === 'WEBP'),
-  );
-  if (!format) throw new ToolFailure('Downloaded content is not an image');
+function urlFilename(url: URL) {
   const segment = url.pathname.split('/').at(-1) ?? '';
   let name = segment;
   try {
@@ -140,9 +139,19 @@ function imageFile(url: URL, bytes: Buffer): MediaFile {
   } catch (error) {
     if (!(error instanceof URIError)) throw error;
   }
-  name = name
+  return name
     .replace(/[^\p{L}\p{N}_.-]+/gu, '_')
     .replace(/^[._-]+|[._-]+$/g, '');
+}
+
+function imageFile(url: URL, bytes: Buffer): MediaFile {
+  const format = formats.find(
+    ({ mime, magic }) =>
+      bytes.subarray(0, magic.length).equals(magic) &&
+      (mime !== 'image/webp' || bytes.toString('latin1', 8, 12) === 'WEBP'),
+  );
+  if (!format) throw new ToolFailure('Downloaded content is not an image');
+  const name = urlFilename(url);
   const extension = extname(name);
   const stem = name.slice(0, name.length - extension.length).slice(0, 100);
   return {
@@ -169,31 +178,70 @@ export async function fetchWebImage(
   parentSignal: AbortSignal,
   io = network,
 ): Promise<WebImage> {
+  const { bytes, url } = await fetchWebMedia(
+    'Image',
+    source,
+    maxBytes,
+    parentSignal,
+    io,
+  );
+  return { file: imageFile(url, bytes), sourceUrl: url.href };
+}
+
+export async function fetchWebAudio(
+  source: string,
+  maxBytes: number,
+  parentSignal: AbortSignal,
+  io = network,
+): Promise<MediaFile> {
+  const { bytes, url } = await fetchWebMedia(
+    'Audio',
+    source,
+    maxBytes,
+    parentSignal,
+    io,
+  );
+  return { bytes, name: urlFilename(url).slice(0, 120) || 'audio' };
+}
+
+async function fetchWebMedia(
+  kind: DownloadKind,
+  source: string,
+  maxBytes: number,
+  parentSignal: AbortSignal,
+  io: WebImageNetwork,
+) {
+  const accept =
+    kind === 'Image'
+      ? 'image/jpeg, image/png, image/gif, image/webp'
+      : 'audio/*, application/octet-stream';
   const signal = AbortSignal.any([parentSignal, AbortSignal.timeout(15_000)]);
   try {
     return await untilAborted(signal, async () => {
-      let url = imageUrl(source);
+      let url = mediaUrl(kind, source);
       for (let hops = 0; ; hops++) {
         const host = hostname(url);
         const addresses = isIP(host) ? [host] : await io.resolve(host);
         signal.throwIfAborted();
         if (addresses.some((address) => !publicAddress(address)))
-          throw new ToolFailure('Image URL points to a blocked address');
+          throw new ToolFailure(`${kind} URL points to a blocked address`);
         const address = addresses[0];
-        if (!address) throw new ToolFailure('Image host could not be resolved');
-        const response = await io.connect(url, address, signal);
+        if (!address)
+          throw new ToolFailure(`${kind} host could not be resolved`);
+        const response = await io.connect(url, address, signal, accept);
         try {
           signal.throwIfAborted();
           const status = response.statusCode ?? 0;
           if (redirects.has(status) && response.headers.location) {
-            if (hops === 3) throw new ToolFailure('Too many image redirects');
-            url = imageUrl(response.headers.location, url);
+            if (hops === 3)
+              throw new ToolFailure(`Too many ${kind.toLowerCase()} redirects`);
+            url = mediaUrl(kind, response.headers.location, url);
             continue;
           }
           if (status < 200 || status >= 300)
-            throw new ToolFailure(`Image request returned HTTP ${status}`);
+            throw new ToolFailure(`${kind} request returned HTTP ${status}`);
           const tooLarge = () =>
-            new ToolFailure('Image exceeds the platform size limit');
+            new ToolFailure(`${kind} exceeds the platform size limit`);
           if (Number(response.headers['content-length']) > maxBytes)
             throw tooLarge();
           const chunks: Buffer[] = [];
@@ -203,10 +251,7 @@ export async function fetchWebImage(
             if (size > maxBytes) throw tooLarge();
             chunks.push(Buffer.from(chunk));
           }
-          return {
-            file: imageFile(url, Buffer.concat(chunks, size)),
-            sourceUrl: url.href,
-          };
+          return { bytes: Buffer.concat(chunks, size), url };
         } finally {
           response.destroy();
         }
@@ -214,8 +259,8 @@ export async function fetchWebImage(
     });
   } catch (error) {
     parentSignal.throwIfAborted();
-    if (signal.aborted) throw new ToolFailure('Image download timed out');
+    if (signal.aborted) throw new ToolFailure(`${kind} download timed out`);
     if (error instanceof ToolFailure) throw error;
-    throw new ToolFailure('Image download failed');
+    throw new ToolFailure(`${kind} download failed`);
   }
 }

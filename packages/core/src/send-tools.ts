@@ -27,7 +27,7 @@ import {
 import type { Outbound } from './outbound.ts';
 
 import { findAttachments } from './attachments.ts';
-import { mediaUpload } from './media.ts';
+import { mediaUpload, prepareAudio } from './media.ts';
 
 const string = { type: 'string', minLength: 1, maxLength: 1024 };
 const id = { type: 'string', minLength: 1, maxLength: 512 };
@@ -44,14 +44,17 @@ const attachmentSchema = properties(
   },
   ['messageId', 'index'],
 );
-const uploadSchema = (image: boolean) => {
+const uploadSchema = (web: boolean, music = false) => {
   const sources = {
     path: string,
     attachment: attachmentSchema,
-    ...(image && { url: { ...string, maxLength: 8192 } }),
+    ...(web && { url: { ...string, maxLength: 8192 } }),
   };
   return {
-    ...properties(sources, []),
+    ...properties(
+      { ...sources, ...(music && { music: { type: 'boolean' } }) },
+      [],
+    ),
     oneOf: Object.keys(sources).map((source) => ({ required: [source] })),
   };
 };
@@ -169,6 +172,39 @@ export function sendTools(
         };
         return send(task, '[sticker]', (address) =>
           sticker({ ...address, fileId, packageId }, task.signal),
+        );
+      },
+    });
+  }
+  if (adapter.sendAudio) {
+    const upload = adapter.sendAudio.bind(adapter);
+    const { maxBytes = 20 * 1024 ** 2, voice = false } =
+      adapter.capabilities.audio ?? {};
+    tools.push({
+      name: 'send.audio',
+      description:
+        'Send audio to this chat from exactly one source: a workspace path, chat attachment, or HTTPS URL.' +
+        (voice
+          ? ' Sends a voice message by default. Set music=true for an audio track.'
+          : '') +
+        completeReply,
+      schema: uploadSchema(true, voice),
+      async run(args, task) {
+        current();
+        const source = args as (Source | { url: string }) & { music?: boolean };
+        const file =
+          'url' in source
+            ? await deps.outbound.fetchAudio(source.url, maxBytes, task)
+            : await loadMedia(deps, adapter, source, task, maxBytes);
+        const media = await deps.trace.span(
+          'outbound.prepare_audio',
+          { ...task.chat, taskId: task.taskId },
+          () =>
+            prepareAudio(file, voice && !source.music, maxBytes, task.signal),
+        );
+        task.signal.throwIfAborted();
+        return send(task, '[audio]', (address) =>
+          upload(mediaUpload(address, media, task.signal), task.signal),
         );
       },
     });

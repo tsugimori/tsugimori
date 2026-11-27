@@ -38,7 +38,7 @@ function redactText(text: string) {
     );
 }
 
-function imageToolArguments(args: unknown) {
+function mediaToolArguments(args: unknown) {
   if (!args || typeof args !== 'object') return args;
   const clean = { ...args } as Record<string, unknown>;
   for (const key of ['url', 'path']) {
@@ -204,7 +204,11 @@ export class ToolDetails {
     const format = save(() => serializer(current));
     if (!format) return;
     const input = (args: unknown) =>
-      format.field(name === 'send.image' ? imageToolArguments(args) : args);
+      format.field(
+        name === 'send.image' || name === 'send.audio'
+          ? mediaToolArguments(args)
+          : args,
+      );
     const resultLimit = name === 'web_search' ? 4 * 1024 : undefined;
     const seq = save(() =>
       store.createToolCall({

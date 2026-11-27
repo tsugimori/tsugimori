@@ -46,6 +46,7 @@ import { mapEvent } from './updates.ts';
 import { webhook, webhookPath } from './webhook.ts';
 
 const uploadLimits = {
+  audio: { maxBytes: 20 * 1024 * 1024 },
   files: { maxBytes: 200 * 1024 * 1024 },
   images: { maxBytes: 10 * 1024 * 1024, queued: true },
 };
@@ -53,6 +54,7 @@ const maxPreview = 1024 * 1024;
 const maxMediaUrlLength = 2000;
 type PendingMedia =
   | { packageId: string; stickerId: string; type: 'sticker' }
+  | { duration: number; original: AttachmentContent; type: 'audio' }
   | {
       original: AttachmentContent | string;
       preview: AttachmentContent | string;
@@ -398,6 +400,28 @@ export class LineAdapter implements PlatformAdapter {
     });
   }
 
+  async sendAudio(message: MediaUpload, signal: AbortSignal) {
+    signal.throwIfAborted();
+    const { audioDurationMs: duration, file } = message;
+    const { maxBytes } = uploadLimits.audio;
+    if (file.bytes.byteLength > maxBytes)
+      throw new ToolFailure(
+        `LINE audio exceeds the ${maxBytes / 1024 ** 2} MB size limit`,
+      );
+    if (
+      file.mime !== 'audio/mp4' ||
+      !file.bytes.byteLength ||
+      duration === undefined ||
+      !Number.isSafeInteger(duration) ||
+      duration <= 0
+    )
+      throw new ToolFailure(
+        'LINE requires AAC/M4A audio with a positive duration',
+      );
+    this.#mediaBase();
+    return this.#queue(message, { type: 'audio', original: file, duration });
+  }
+
   sendImage(message: MediaUpload, signal: AbortSignal) {
     return this.#queueUpload(
       message,
@@ -584,9 +608,6 @@ export class LineAdapter implements PlatformAdapter {
               continue;
             }
             signal.throwIfAborted();
-            const { original, preview } = payload;
-            const originalDirect = typeof original === 'string';
-            const previewDirect = typeof preview === 'string';
             let base: string | undefined;
             const publish = async (content: AttachmentContent) => {
               const media = await this.#mediaHost.publish(
@@ -596,6 +617,17 @@ export class LineAdapter implements PlatformAdapter {
               releases.push(media.release);
               return media.url;
             };
+            if (payload.type === 'audio') {
+              messages.push({
+                type: 'audio',
+                originalContentUrl: await publish(payload.original),
+                duration: payload.duration,
+              });
+              continue;
+            }
+            const { original, preview } = payload;
+            const originalDirect = typeof original === 'string';
+            const previewDirect = typeof preview === 'string';
             const originalContentUrl = originalDirect
               ? original
               : await publish(original);

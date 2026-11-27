@@ -1,10 +1,11 @@
+import { ToolFailure } from '@tsugimori/plugin-sdk';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import { gzipSync } from 'node:zlib';
 
-import { prepareImage } from '../src/media.ts';
+import { prepareAudio, prepareImage } from '../src/media.ts';
 
 const signal = new AbortController().signal;
 const hasFfmpeg = spawnSync('ffmpeg', ['-version']).status === 0;
@@ -18,6 +19,48 @@ function ffmpeg(args: string[], input?: Uint8Array) {
     { input },
   );
 }
+
+test('audio preparation reports a missing ffmpeg as a tool failure', async () => {
+  const path = process.env.PATH;
+  delete process.env.PATH;
+  try {
+    await assert.rejects(
+      prepareAudio(
+        { bytes: Buffer.alloc(0), name: 'speech.wav' },
+        false,
+        1000,
+        signal,
+      ),
+      (error: unknown) =>
+        error instanceof ToolFailure &&
+        /ffmpeg is required to send audio/.test(error.message),
+    );
+  } finally {
+    if (path !== undefined) process.env.PATH = path;
+  }
+});
+
+test(
+  'audio preparation fails when either encoded format exceeds the byte limit',
+  { skip },
+  async () => {
+    const bytes = ffmpeg([
+      '-f',
+      'lavfi',
+      '-i',
+      'sine=frequency=440:duration=0.25',
+      '-f',
+      'wav',
+      'pipe:1',
+    ]);
+    for (const voice of [false, true]) {
+      await assert.rejects(
+        prepareAudio({ bytes, name: 'sine.wav' }, voice, 1000, signal),
+        /Encoded audio exceeds/,
+      );
+    }
+  },
+);
 
 function pngSize(png: Buffer) {
   assert.equal(png.subarray(1, 4).toString(), 'PNG');

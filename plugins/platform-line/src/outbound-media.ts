@@ -278,5 +278,10 @@ export class LineMediaHost {
 }
 
 function supportedMime(mime: string | undefined): mime is string {
-  return mime === 'image/jpeg' || mime === 'image/png' || mime === 'video/mp4';
+  return (
+    mime === 'image/jpeg' ||
+    mime === 'image/png' ||
+    mime === 'video/mp4' ||
+    mime === 'audio/mp4'
+  );
 }

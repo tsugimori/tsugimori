@@ -4,12 +4,35 @@ import { test } from 'node:test';
 
 import type { WebImageNetwork } from '../src/web-image.ts';
 
-import { fetchWebImage } from '../src/web-image.ts';
+import { fetchWebAudio, fetchWebImage } from '../src/web-image.ts';
 
 const url = 'https://images.example.test/example';
 const signal = new AbortController().signal;
 const publicAddress = '93.184.216.34';
 const png = Buffer.from('89504e470d0a1a0a', 'hex');
+
+test('web audio requires HTTPS and public addresses across redirects', async () => {
+  for (const [location, failure] of [
+    ['http://audio.example.test/speech.wav', /HTTPS audio URL/],
+    ['https://127.0.0.1/speech.wav', /blocked address/],
+  ] as const) {
+    const response = Object.assign(Readable.from([]), {
+      statusCode: 302,
+      headers: { location },
+    });
+    await assert.rejects(
+      fetchWebAudio(url, 100, signal, {
+        resolve: async () => [publicAddress],
+        async connect(target) {
+          assert.equal(target.href, url);
+          return response;
+        },
+      }),
+      failure,
+    );
+    assert.equal(response.destroyed, true);
+  }
+});
 
 test('web image downloads reject non-public DNS answers before connecting', async () => {
   for (const address of [

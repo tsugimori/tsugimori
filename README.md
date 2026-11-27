@@ -87,9 +87,12 @@ description when available. The agent can still load the original image with
 `attachment.get`. The LINE content API serves attachments hosted by LINE.
 
 Agents can send media in the current conversation using the tools supported by
-its platform. `send.image` and `send.file` accept a chat workspace path or
-`{ "attachment": { "messageId": "...", "index": 0 } }`. `send.image` also
-accepts a public HTTP(S) URL in `url`. Specify one source per call. When a final
+its platform. `send.image`, `send.file`, and `send.audio` accept a chat workspace
+path or `{ "attachment": { "messageId": "...", "index": 0 } }`. `send.image`
+also accepts a public HTTP(S) URL, and `send.audio` accepts a public HTTPS URL,
+in `url`. Specify one source per call. `send.audio` needs `ffmpeg` on PATH to
+decode and convert the audio. Telegram sends a voice message by default and an
+audio track with `music: true`. LINE sends an AAC/M4A audio message. When a final
 reply contains a Markdown image, the gateway sends it after the text or leaves
 its URL in the text if the download fails. Telegram sends media tools' uploads
 immediately. LINE includes queued media with the final reply, even when it has

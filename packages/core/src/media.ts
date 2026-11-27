@@ -3,14 +3,16 @@ import type {
   ImageLimits,
   InboundAttachment,
   MediaDestination,
+  MediaFile,
   MediaUpload,
 } from '@tsugimori/plugin-sdk';
 
 import { ToolFailure } from '@tsugimori/plugin-sdk';
 import { spawn } from 'node:child_process';
 import { constants } from 'node:fs';
-import { access, stat } from 'node:fs/promises';
-import { delimiter, resolve } from 'node:path';
+import { access, mkdtemp, readFile, rm, stat } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { basename, delimiter, extname, join, resolve } from 'node:path';
 import { pipeline } from 'node:stream/promises';
 
 import { lottieFrames, stickerEdge, stickerFrames } from './lottie.ts';
@@ -27,6 +29,8 @@ const rawSticker = [
 const maxVideoFrames = 60;
 
 export class FfmpegMissing extends Error {}
+
+class FfmpegOutputLimit extends Error {}
 
 export async function findFfmpeg() {
   const executable = process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg';
@@ -110,7 +114,9 @@ async function ffmpeg(
     for await (const bytes of child.stdout as AsyncIterable<Buffer>) {
       size += bytes.length;
       if (size > maxBytes)
-        throw new Error('ffmpeg output exceeds the media processing limit');
+        throw new FfmpegOutputLimit(
+          'ffmpeg output exceeds the media processing limit',
+        );
       chunks.push(bytes);
     }
     return Buffer.concat(chunks, size);
@@ -140,6 +146,126 @@ const pipeInput = [
   '-max_pixels',
   '50000000',
 ];
+
+export async function prepareAudio(
+  file: MediaFile,
+  voice: boolean,
+  maxBytes: number,
+  signal: AbortSignal,
+): Promise<Pick<MediaUpload, 'audioDurationMs' | 'file'>> {
+  signal.throwIfAborted();
+  const command = await findFfmpeg();
+  const missing = () =>
+    new ToolFailure(
+      'ffmpeg is required to send audio. Install it and make it available on PATH.',
+    );
+  if (!command) throw missing();
+
+  const input = [
+    ...pipeInput,
+    '-protocol_whitelist',
+    'cache,pipe',
+    '-read_ahead_limit',
+    '-1',
+    '-abort_on',
+    'empty_output',
+    '-i',
+    'cache:pipe:0',
+    '-map',
+    '0:a:0',
+    '-map_metadata',
+    '-1',
+    '-map_chapters',
+    '-1',
+    '-threads',
+    '1',
+  ];
+  const name = basename(file.name, extname(file.name)) || 'audio';
+  const tooLarge = () =>
+    new ToolFailure(
+      `Encoded audio exceeds the platform's ${maxBytes / 1024 ** 2} MB size limit`,
+    );
+  let directory: string | undefined;
+  try {
+    if (voice) {
+      const bytes = await ffmpeg(
+        command,
+        file.bytes,
+        [
+          ...input,
+          '-ac',
+          '1',
+          '-ar',
+          '48000',
+          '-c:a',
+          'libopus',
+          '-b:a',
+          '48k',
+          '-f',
+          'ogg',
+          'pipe:1',
+        ],
+        maxBytes,
+        signal,
+      );
+      if (!bytes.length)
+        throw new ToolFailure('Audio contains no playable samples');
+      return { file: { bytes, name: `${name}.ogg`, mime: 'audio/ogg' } };
+    }
+
+    // M4A needs seekable output for its playback metadata and fast-start header.
+    directory = await mkdtemp(join(tmpdir(), 'tsugimori-audio-'));
+    const output = join(directory, 'audio.m4a');
+    const progress = await ffmpeg(
+      command,
+      file.bytes,
+      [
+        '-progress',
+        'pipe:1',
+        ...input,
+        '-ac',
+        '2',
+        '-ar',
+        '48000',
+        '-c:a',
+        'aac',
+        '-b:a',
+        '128k',
+        '-movflags',
+        '+faststart',
+        // Allow limited muxer overhead before rejecting the entire oversized output.
+        '-fs',
+        String(maxBytes + 65_536),
+        '-f',
+        'ipod',
+        output,
+      ],
+      65_536,
+      signal,
+    );
+    if ((await stat(output)).size > maxBytes) throw tooLarge();
+    const timestamp = [
+      ...progress.toString().matchAll(/^out_time_us=(\d+)$/gm),
+    ].at(-1)?.[1];
+    const duration = Math.round(Number(timestamp) / 1_000);
+    if (!Number.isSafeInteger(duration) || duration <= 0)
+      throw new ToolFailure('Audio contains no playable samples');
+    const bytes = await readFile(output, { signal });
+    return {
+      audioDurationMs: duration,
+      file: { bytes, name: `${name}.m4a`, mime: 'audio/mp4' },
+    };
+  } catch (error) {
+    signal.throwIfAborted();
+    if (error instanceof ToolFailure) throw error;
+    if (error instanceof FfmpegMissing) throw missing();
+    if (error instanceof FfmpegOutputLimit) throw tooLarge();
+    throw new ToolFailure('Could not decode and encode this audio with ffmpeg');
+  } finally {
+    if (directory !== undefined)
+      await rm(directory, { recursive: true, force: true });
+  }
+}
 
 async function videoFrames(
   command: string,
@@ -368,12 +494,17 @@ export async function prepareStickerGrid(
 
 export function mediaUpload(
   address: MediaDestination,
-  { file, sourceUrl }: Pick<MediaUpload, 'file' | 'sourceUrl'>,
+  {
+    audioDurationMs,
+    file,
+    sourceUrl,
+  }: Pick<MediaUpload, 'audioDurationMs' | 'file' | 'sourceUrl'>,
   signal: AbortSignal,
 ): MediaUpload {
   return {
     ...address,
     file,
+    ...(audioDurationMs !== undefined && { audioDurationMs }),
     ...(sourceUrl !== undefined && { sourceUrl }),
     async preview(maxBytes) {
       const ffmpeg = await findFfmpeg();

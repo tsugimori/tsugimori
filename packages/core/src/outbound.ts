@@ -20,7 +20,7 @@ import type { WebImage, WebImageNetwork } from './web-image.ts';
 import { untilAborted } from './abort.ts';
 import { replaceMarkdownImages } from './markdown-images.ts';
 import { mediaUpload } from './media.ts';
-import { fetchWebImage } from './web-image.ts';
+import { fetchWebAudio, fetchWebImage } from './web-image.ts';
 
 export function conversationId({
   chatId,
@@ -269,6 +269,21 @@ export class Outbound {
       messageId: receipt.messageId,
       messageIds: parts.map(({ messageId }) => messageId),
     };
+  }
+
+  fetchAudio(
+    url: string,
+    maxBytes: number,
+    {
+      chat,
+      signal,
+      taskId,
+    }: { chat: ChatRef; signal: AbortSignal; taskId: string },
+  ) {
+    const { trace, webImageNetwork } = this.#deps;
+    return trace.span('outbound.fetch_audio', { ...chat, taskId }, () =>
+      fetchWebAudio(url, maxBytes, signal, webImageNetwork),
+    );
   }
 
   fetchImage(

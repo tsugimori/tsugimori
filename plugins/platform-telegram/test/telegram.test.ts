@@ -1186,7 +1186,7 @@ test('retries a rate-limited rich message as a rich message', async (t) => {
   assert.deepEqual(warnings, []);
 });
 
-test('sends reactions, stickers, photos, documents and videos to the current Telegram topic', async (t) => {
+test('sends reactions, stickers and media to the current Telegram topic', async (t) => {
   const calls: { body: unknown; method: string }[] = [];
   const fetch: typeof globalThis.fetch = async (input, init) => {
     const method = new URL(String(input)).pathname.split('/').at(-1)!;
@@ -1257,6 +1257,17 @@ test('sends reactions, stickers, photos, documents and videos to the current Tel
     ).messageId,
     '35',
   );
+  for (const [mime, name, messageId] of [
+    ['audio/ogg', 'speech.ogg', '36'],
+    ['audio/mp4', 'track.m4a', '37'],
+  ] as const) {
+    const receipt = await adapter.sendAudio(
+      { ...upload, file: { ...upload.file, mime, name } },
+      signal,
+    );
+    assert.equal(receipt.messageId, messageId);
+    assert.equal(receipt.parts[0]?.text, '[audio]');
+  }
   const large = {
     ...upload,
     file: { ...upload.file, bytes: Buffer.alloc(10 * 1024 ** 2 + 1) },
@@ -1270,6 +1281,8 @@ test('sends reactions, stickers, photos, documents and videos to the current Tel
       'sendPhoto',
       'sendDocument',
       'sendVideo',
+      'sendVoice',
+      'sendAudio',
     ],
   );
   assert.deepEqual(calls[0]?.body, {
@@ -1284,7 +1297,14 @@ test('sends reactions, stickers, photos, documents and videos to the current Tel
     reply_parameters: reply,
     sticker: 'CAAC_file-ID',
   });
-  for (const [i, field] of ['photo', 'document', 'video'].entries()) {
+  const fields = [
+    ['photo', 'test.png', 'image/png'],
+    ['document', 'test.png', 'image/png'],
+    ['video', 'test.mp4', 'video/mp4'],
+    ['voice', 'speech.ogg', 'audio/ogg'],
+    ['audio', 'track.m4a', 'audio/mp4'],
+  ] as const;
+  for (const [i, [field, name, mime]] of fields.entries()) {
     const form = calls[i + 2]?.body;
     assert.ok(form instanceof FormData);
     assert.equal(form.get('chat_id'), dest.chatId);
@@ -1292,7 +1312,8 @@ test('sends reactions, stickers, photos, documents and videos to the current Tel
     assert.deepEqual(JSON.parse(String(form.get('reply_parameters'))), reply);
     const file = form.get(field);
     assert.ok(file instanceof File);
-    assert.equal(file.name, field === 'video' ? 'test.mp4' : 'test.png');
+    assert.equal(file.name, name);
+    assert.equal(file.type, mime);
     assert.equal(await file.text(), 'file bytes');
   }
 });

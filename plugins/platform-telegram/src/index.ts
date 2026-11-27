@@ -44,6 +44,7 @@ import {
 import { mapUpdate } from './updates.ts';
 
 const telegramUploadLimits = {
+  audio: { maxBytes: 50 * 1024 * 1024, voice: true },
   files: { maxBytes: 50 * 1024 * 1024 },
   images: { maxBytes: 10 * 1024 * 1024 },
 };
@@ -53,7 +54,17 @@ type SendMethod =
   | 'sendSticker'
   | 'sendPhoto'
   | 'sendDocument'
-  | 'sendVideo';
+  | 'sendVideo'
+  | 'sendVoice'
+  | 'sendAudio';
+
+const mediaLabels = {
+  audio: '[audio]',
+  document: '[file]',
+  photo: '[image]',
+  video: '[video]',
+  voice: '[audio]',
+};
 
 const cursorLifetimeMs = 6 * 24 * 60 * 60 * 1_000;
 const unavailableScopeReasons = [
@@ -543,6 +554,16 @@ export class TelegramAdapter implements PlatformAdapter {
     );
   }
 
+  sendAudio(message: MediaUpload, signal: AbortSignal) {
+    const { mime } = message.file;
+    const { maxBytes } = telegramUploadLimits.audio;
+    if (mime === 'audio/ogg')
+      return this.#upload(message, 'sendVoice', 'voice', maxBytes, signal);
+    if (mime === 'audio/mp4')
+      return this.#upload(message, 'sendAudio', 'audio', maxBytes, signal);
+    throw new ToolFailure('Telegram requires Ogg/Opus voice or AAC/M4A audio');
+  }
+
   sendImage(message: MediaUpload, signal: AbortSignal) {
     return this.#upload(
       message,
@@ -574,7 +595,7 @@ export class TelegramAdapter implements PlatformAdapter {
   #upload(
     message: MediaUpload,
     method: SendMethod,
-    field: 'photo' | 'video' | 'document',
+    field: keyof typeof mediaLabels,
     limit: number,
     signal: AbortSignal,
   ) {
@@ -588,7 +609,7 @@ export class TelegramAdapter implements PlatformAdapter {
       message,
       method,
       { [field]: file },
-      field === 'photo' ? '[image]' : field === 'video' ? '[video]' : '[file]',
+      mediaLabels[field],
       signal,
     );
   }
